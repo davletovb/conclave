@@ -36,7 +36,21 @@ function App() {
     [models, selected],
   );
 
+  function selectMode(nextMode: OrchestrationMode) {
+    setMode(nextMode);
+    if (nextMode === "single") {
+      setSelected(current => {
+        const model = current[0] ?? models[0]?.model;
+        return model ? [model] : [];
+      });
+    }
+  }
+
   function toggleModel(model: string) {
+    if (mode === "single") {
+      setSelected([model]);
+      return;
+    }
     setSelected(current => current.includes(model) ? current.filter(id => id !== model) : [...current, model]);
   }
 
@@ -72,7 +86,7 @@ function App() {
         </div>
         <nav className="mode-list" aria-label="Orchestration mode">
           {modes.map(item => (
-            <button key={item.id} className={mode === item.id ? "mode active" : "mode"} onClick={() => setMode(item.id)}>
+            <button key={item.id} className={mode === item.id ? "mode active" : "mode"} onClick={() => selectMode(item.id)}>
               <strong>{item.label}</strong>
               <span>{item.description}</span>
             </button>
@@ -83,10 +97,16 @@ function App() {
 
       <section className="workspace">
         <header className="topbar">
-          <div>
+          <div className="mode-heading">
             <span className="eyebrow">ORCHESTRATION MODE</span>
             <h2>{modes.find(item => item.id === mode)?.label}</h2>
           </div>
+          <label className="mobile-mode-picker">
+            <span className="eyebrow">MODE</span>
+            <select value={mode} onChange={event => selectMode(event.target.value as OrchestrationMode)}>
+              {modes.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </label>
           <div className="model-picker">
             {models.map(model => (
               <button key={model.model} onClick={() => toggleModel(model.model)} className={selected.includes(model.model) ? "chip selected" : "chip"}>
