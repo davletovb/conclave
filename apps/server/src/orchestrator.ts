@@ -27,12 +27,40 @@ export class Orchestrator {
     if (request.participants.length === 0) throw new Error("At least one participant is required");
 
     if (request.mode === "single") {
+      if (request.participants.length !== 1) {
+        throw new Error("Single mode requires exactly one participant");
+      }
+
       const model = request.participants[0];
       const response = await this.ask(model, request.prompt);
       const step: OrchestrationStep = {
         id: makeStepId("answer", 0), kind: "answer", model, content: response.content,
       };
       return { mode: request.mode, steps: [step], final: response.content };
+    }
+
+    if (request.mode === "critic-revise") {
+      const author = request.participants[0];
+      const critic = request.participants[1] ?? author;
+      const draftResponse = await this.ask(author, request.prompt);
+      const draft: OrchestrationStep = {
+        id: makeStepId("answer", 0), kind: "answer", model: author, content: draftResponse.content,
+      };
+      const critiqueResponse = await this.ask(
+        critic,
+        `Critique this answer for factual gaps, weak reasoning, and missing alternatives.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
+      );
+      const critique: OrchestrationStep = {
+        id: makeStepId("critique", 0), kind: "critique", model: critic, content: critiqueResponse.content,
+      };
+      const revisionResponse = await this.ask(
+        author,
+        `Revise your answer using the critique. Keep only improvements you can justify.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nCritique:\n${critique.content}`,
+      );
+      const revision: OrchestrationStep = {
+        id: makeStepId("revision", 0), kind: "revision", model: author, content: revisionResponse.content,
+      };
+      return { mode: request.mode, steps: [draft, critique, revision], final: revision.content };
     }
 
     const independent = await Promise.all(
@@ -65,27 +93,6 @@ export class Orchestrator {
         id: makeStepId("synthesis", 0), kind: "synthesis", model: synthesizer, content: synthesis.content,
       };
       return { mode: request.mode, steps: [...independent, finalStep], final: synthesis.content };
-    }
-
-    if (request.mode === "critic-revise") {
-      const author = request.participants[0];
-      const critic = request.participants[1] ?? request.participants[0];
-      const draft = independent[0];
-      const critiqueResponse = await this.ask(
-        critic,
-        `Critique this answer for factual gaps, weak reasoning, and missing alternatives.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
-      );
-      const critique: OrchestrationStep = {
-        id: makeStepId("critique", 0), kind: "critique", model: critic, content: critiqueResponse.content,
-      };
-      const revisionResponse = await this.ask(
-        author,
-        `Revise your answer using the critique. Keep only improvements you can justify.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nCritique:\n${critique.content}`,
-      );
-      const revision: OrchestrationStep = {
-        id: makeStepId("revision", 0), kind: "revision", model: author, content: revisionResponse.content,
-      };
-      return { mode: request.mode, steps: [draft, critique, revision], final: revision.content };
     }
 
     const maxRounds = Math.max(1, Math.min(request.maxRounds ?? 1, 3));
