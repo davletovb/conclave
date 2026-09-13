@@ -47,6 +47,19 @@ const researchAngles = [
   "Skeptic: stress-test the framing, surface missing information, and challenge confident claims that are weakly supported.",
 ];
 
+const workflowKinds = new Set<OrchestrationStepKind>([
+  "answer",
+  "critique",
+  "revision",
+  "synthesis",
+  "judgment",
+  "route",
+  "research",
+  "plan",
+  "execution",
+  "review",
+]);
+
 function sameModel(a: ModelRef, b: ModelRef) {
   return a.provider === b.provider && a.model === b.model;
 }
@@ -73,10 +86,6 @@ function cancelledError() {
   const error = new Error("Run cancelled by user");
   error.name = "AbortError";
   return error;
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export class Orchestrator {
@@ -114,14 +123,17 @@ export class Orchestrator {
         throw new Error(`Workflow node ID '${node.id}' must start with a letter and contain only letters, numbers, _ or -`);
       }
       if (byId.has(node.id)) throw new Error(`Workflow node ID '${node.id}' is duplicated`);
+      if (!workflowKinds.has(node.kind)) {
+        throw new Error(`Workflow node '${node.id}' has unsupported kind '${String(node.kind)}'`);
+      }
       if (!node.promptTemplate?.trim()) throw new Error(`Workflow node '${node.id}' requires a prompt template`);
       if (node.promptTemplate.length > 20_000) throw new Error(`Workflow node '${node.id}' prompt template is too long`);
 
-      if (node.model.type === "participant") {
+      if (node.model?.type === "participant") {
         if (!Number.isInteger(node.model.index) || node.model.index < 0 || node.model.index >= request.participants.length) {
           throw new Error(`Workflow node '${node.id}' requires participant ${node.model.index + 1}, but only ${request.participants.length} participant${request.participants.length === 1 ? " is" : "s are"} selected`);
         }
-      } else if (node.model.type !== "synthesizer") {
+      } else if (node.model?.type !== "synthesizer") {
         throw new Error(`Workflow node '${node.id}' has an unsupported model selector`);
       }
       byId.set(node.id, node);
@@ -133,6 +145,7 @@ export class Orchestrator {
 
     for (const node of graph.nodes) {
       const dependencies = node.dependsOn ?? [];
+      if (!Array.isArray(dependencies)) throw new Error(`Workflow node '${node.id}' dependsOn must be an array`);
       if (new Set(dependencies).size !== dependencies.length) {
         throw new Error(`Workflow node '${node.id}' contains duplicate dependencies`);
       }
@@ -373,46 +386,76 @@ export class Orchestrator {
   }
 
   private workflowPrompt(node: WorkflowNode, request: OrchestrationRequest, completed: Map<string, OrchestrationStep>) {
-    const dependencies = (node.dependsOn ?? []).map(id => completed.get(id)).filter((step): step is OrchestrationStep => Boolean(step));
-    let prompt = node.promptTemplate
-      .replace(/\{\{prompt\}\}/g, request.prompt)
-      .replace(/\{\{dependencies\}\}/g, dependencies.map(step => `[${step.id}] ${step.model.label}:\n${step.content}`).join("\n\n"));
-    for (const dependency of dependencies) {
-      prompt = prompt.replace(new RegExp(`\\{\\{dep\\.${escapeRegExp(dependency.id)}\\}\\}`, "g"), dependency.content);
-    }
-    return prompt;
+    const dependencies = (node.dependsOn ?? [])
+      .map(id => completed.get(id))
+      .filter((step): step is OrchestrationStep => Boolean(step));
+    const dependencyTranscript = dependencies
+      .map(step => `[${step.id}] ${step.model.label}:\n${step.content}`)
+      .join("\n\n");
+
+    // Interpolate the original template in one pass. Values inserted from the
+    // user or another model are never re-scanned as template syntax.
+    return node.promptTemplate.replace(
+      /\{\{(prompt|dependencies|dep\.([A-Za-z][A-Za-z0-9_-]{0,63}))\}\}/g,
+      (_placeholder: string, token: string, dependencyId?: string) => {
+        if (token === "prompt") return request.prompt;
+        if (token === "dependencies") return dependencyTranscript;
+        return dependencyId ? completed.get(dependencyId)?.content ?? "" : "";
+      },
+    );
   }
 
   private async runCustom(request: OrchestrationRequest, context: RunContext) {
     const graph = this.validateWorkflow(request);
-    const remaining = new Map(graph.nodes.map(node => [node.id, node]));
+    const byId = new Map(graph.nodes.map(node => [node.id, node]));
     const completed = new Map<string, OrchestrationStep>();
-    const ordered: OrchestrationStep[] = [];
+    const tasks = new Map<string, Promise<OrchestrationStep>>();
+    const workflowController = new AbortController();
+    const onOuterAbort = () => workflowController.abort();
+    if (context.signal?.aborted) workflowController.abort();
+    else context.signal?.addEventListener("abort", onOuterAbort, { once: true });
+    const workflowContext: RunContext = { ...context, signal: workflowController.signal };
 
-    while (remaining.size > 0) {
-      this.throwIfCancelled(context);
-      const ready = [...remaining.values()].filter(node => (node.dependsOn ?? []).every(id => completed.has(id)));
-      if (ready.length === 0) throw new Error("Workflow graph could not make progress");
+    const runNode = (node: WorkflowNode): Promise<OrchestrationStep> => {
+      const existing = tasks.get(node.id);
+      if (existing) return existing;
 
-      const batch = await Promise.all(ready.map(node => this.executeStep({
-        id: node.id,
-        kind: node.kind,
-        model: this.workflowModel(node, request),
-        prompt: this.workflowPrompt(node, request, completed),
-        history: request.history,
-        dependsOn: node.dependsOn,
-      }, context)));
-
-      for (const step of batch) {
+      const task = Promise.all((node.dependsOn ?? []).map(dependencyId => {
+        const dependency = byId.get(dependencyId);
+        if (!dependency) throw new Error(`Workflow node '${node.id}' depends on missing node '${dependencyId}'`);
+        return runNode(dependency);
+      })).then(async () => {
+        this.throwIfCancelled(workflowContext);
+        const step = await this.executeStep({
+          id: node.id,
+          kind: node.kind,
+          model: this.workflowModel(node, request),
+          prompt: this.workflowPrompt(node, request, completed),
+          history: request.history,
+          dependsOn: node.dependsOn,
+        }, workflowContext);
         completed.set(step.id, step);
-        ordered.push(step);
-        remaining.delete(step.id);
-      }
-    }
+        return step;
+      });
+      tasks.set(node.id, task);
+      return task;
+    };
 
-    const output = completed.get(graph.outputNodeId);
-    if (!output) throw new Error(`Workflow output node '${graph.outputNodeId}' did not complete`);
-    return { mode: request.mode, steps: ordered, final: output.content } satisfies OrchestrationResult;
+    try {
+      const all = graph.nodes.map(node => runNode(node));
+      const results = await Promise.all(all).catch(async error => {
+        workflowController.abort();
+        await Promise.allSettled(all);
+        throw error;
+      });
+      const byResultId = new Map(results.map(step => [step.id, step]));
+      const ordered = graph.nodes.map(node => byResultId.get(node.id)!);
+      const output = byResultId.get(graph.outputNodeId);
+      if (!output) throw new Error(`Workflow output node '${graph.outputNodeId}' did not complete`);
+      return { mode: request.mode, steps: ordered, final: output.content } satisfies OrchestrationResult;
+    } finally {
+      context.signal?.removeEventListener("abort", onOuterAbort);
+    }
   }
 
   async run(request: OrchestrationRequest, options: RunOptions = {}): Promise<OrchestrationResult> {
