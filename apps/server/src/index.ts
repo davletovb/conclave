@@ -5,12 +5,16 @@ import type {
   OrchestrationStreamEvent,
   ProviderAdapter,
   ProviderStatus,
+  RunEventRecord,
+  StartRunRequest,
 } from "@conclave/core";
 import { AnthropicClaudeProvider } from "./providers/anthropic-claude.js";
 import { MockProvider } from "./providers/mock.js";
 import { OpenAICodexProvider } from "./providers/openai-codex.js";
 import { XaiGrokProvider } from "./providers/xai-grok.js";
 import { Orchestrator } from "./orchestrator.js";
+import { FileStateStore } from "./state/file-store.js";
+import { RunManager } from "./state/run-manager.js";
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -26,8 +30,11 @@ const providers = new Map<string, ProviderAdapter>([
   [xai.id, xai],
 ]);
 const orchestrator = new Orchestrator(providers);
+const stateStore = new FileStateStore();
+const runManager = new RunManager(orchestrator, stateStore);
+await runManager.init();
 
-app.get("/health", async () => ({ ok: true }));
+app.get("/health", async () => ({ ok: true, dataDir: stateStore.dataDir }));
 
 app.get("/providers", async (): Promise<ProviderStatus[]> => {
   const [openaiStatus, anthropicStatus, xaiStatus] = await Promise.all([
@@ -70,6 +77,97 @@ app.get("/models", async () => {
   ];
 });
 
+app.get("/conversations", async () => runManager.listConversations());
+
+app.get<{ Params: { id: string } }>("/conversations/:id", async (request, reply) => {
+  const conversation = await runManager.getConversation(request.params.id);
+  if (!conversation) return reply.code(404).send({ error: "Conversation not found" });
+  return conversation;
+});
+
+app.post<{ Body: StartRunRequest }>("/runs", async (request, reply) => {
+  try {
+    return await runManager.start(request.body);
+  } catch (error) {
+    return reply.code(400).send({
+      error: error instanceof Error ? error.message : "Could not start run",
+    });
+  }
+});
+
+app.get<{ Params: { id: string } }>("/runs/:id", async (request, reply) => {
+  const run = await runManager.getRun(request.params.id);
+  if (!run) return reply.code(404).send({ error: "Run not found" });
+  return run;
+});
+
+app.post<{ Params: { id: string } }>("/runs/:id/resume", async (request, reply) => {
+  try {
+    return await runManager.resume(request.params.id);
+  } catch (error) {
+    return reply.code(409).send({
+      error: error instanceof Error ? error.message : "Could not resume run",
+    });
+  }
+});
+
+app.get<{
+  Params: { id: string };
+  Querystring: { after?: string; follow?: string };
+}>("/runs/:id/events", async (request, reply) => {
+  const run = await runManager.getRun(request.params.id);
+  if (!run) return reply.code(404).send({ error: "Run not found" });
+
+  const after = Math.max(0, Number(request.query.after ?? 0) || 0);
+  const follow = request.query.follow !== "0";
+  reply.hijack();
+  const raw = reply.raw;
+  raw.statusCode = 200;
+  raw.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+  raw.setHeader("cache-control", "no-cache, no-transform");
+  raw.setHeader("connection", "keep-alive");
+  raw.setHeader("access-control-allow-origin", "*");
+  raw.flushHeaders?.();
+
+  let cursor = after;
+  let replaying = true;
+  let closed = false;
+  const buffered: RunEventRecord[] = [];
+  const terminal = (record: RunEventRecord) => record.event.type === "run_completed" || record.event.type === "error";
+  const write = (record: RunEventRecord) => {
+    if (closed || record.seq <= cursor || raw.destroyed || raw.writableEnded) return;
+    cursor = record.seq;
+    raw.write(`${JSON.stringify(record)}\n`);
+    if (terminal(record)) finish();
+  };
+  const onLive = (record: RunEventRecord) => {
+    if (replaying) buffered.push(record);
+    else write(record);
+  };
+  const unsubscribe = runManager.subscribe(run.id, onLive);
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    unsubscribe();
+    if (!raw.destroyed && !raw.writableEnded) raw.end();
+  };
+
+  raw.once("close", finish);
+
+  try {
+    const backlog = await runManager.events(run.id, after);
+    for (const record of backlog) write(record);
+    replaying = false;
+    for (const record of buffered.sort((a, b) => a.seq - b.seq)) write(record);
+
+    const latest = await runManager.getRun(run.id);
+    if (!follow || !latest || ["completed", "failed", "interrupted"].includes(latest.status)) finish();
+  } catch (error) {
+    request.log.error(error);
+    finish();
+  }
+});
+
 app.post<{ Body: OrchestrationRequest }>("/orchestrate", async (request, reply) => {
   try {
     return await orchestrator.run(request.body);
@@ -81,6 +179,7 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate", async (request, reply) 
   }
 });
 
+// Compatibility endpoint for clients that have not moved to persistent runs yet.
 app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, reply) => {
   reply.hijack();
   const raw = reply.raw;
