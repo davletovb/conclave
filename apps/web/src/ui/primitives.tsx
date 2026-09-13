@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { ModelRef, OrchestrationMode, ProviderId } from "@conclave/core";
 import { highlight } from "../lib/text";
 import { renderKey } from "../lib/shortcuts";
@@ -208,7 +209,7 @@ export function Layer({
     }
   }
 
-  return (
+  return createPortal(
     <>
       <div className="overlay" onClick={onClose} />
       <div
@@ -232,7 +233,8 @@ export function Layer({
         )}
         {children}
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
 

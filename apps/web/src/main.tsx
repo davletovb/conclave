@@ -111,6 +111,50 @@ function freshUsage(): RunUsage {
   return { callsStarted: 0, callsCompleted: 0, inputTokens: 0, outputTokens: 0, tokenReports: 0 };
 }
 
+/**
+ * One conversation turn. A pasted prompt can run to hundreds of lines, which
+ * would bury the answer it belongs to, so a long one is clamped until asked for.
+ */
+function Turn({ role, content }: { role: "user" | "assistant"; content: string }) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const clampable = role === "user";
+
+  useEffect(() => {
+    // Only a collapsed body can report whether it had to hide anything.
+    if (!clampable || expanded) return;
+    const element = bodyRef.current;
+    if (!element) return;
+    const measure = () => setOverflows(element.scrollHeight - element.clientHeight > 4);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [clampable, expanded, content]);
+
+  return (
+    <article className={`turn ${role === "user" ? "turn-you" : "turn-them"}`}>
+      {role === "assistant" && <span className="eyebrow turn-label">Conclave</span>}
+      <div className="bubble">
+        <div
+          className="bubble-body"
+          ref={bodyRef}
+          data-clamped={clampable && !expanded ? true : undefined}
+          data-overflow={clampable && !expanded && overflows ? true : undefined}
+        >
+          <Markdown content={content} />
+        </div>
+        {clampable && (overflows || expanded) && (
+          <button type="button" className="bubble-more" onClick={() => setExpanded(value => !value)}>
+            {expanded ? "Show less" : "Show full prompt"}
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
 function App() {
   /* ---------------------------------------------------------------- state */
   const [models, setModels] = useState<ModelRef[]>([]);
@@ -500,6 +544,8 @@ function App() {
     if (!isCurrent(epoch)) return;
     setConversation(data);
     setSetupOpen(false);
+    setStuckToBottom(true);
+    if (streamRef.current) streamRef.current.scrollTop = 0;
     localStorage.setItem("conclave.conversationId", id);
 
     if (data.lastRunId) {
@@ -593,6 +639,7 @@ function App() {
 
   function newConversation() {
     beginViewOperation();
+    if (streamRef.current) streamRef.current.scrollTop = 0;
     setConversation(null);
     setSetupOpen(true);
     setActiveRunId(null);
@@ -1247,12 +1294,7 @@ function App() {
             {priorMessages.length > 0 && (
               <section className="turns" aria-label="Conversation history">
                 {priorMessages.map(message => (
-                  <article className={`turn ${message.role === "user" ? "turn-you" : "turn-them"}`} key={message.id}>
-                    {message.role === "assistant" && <span className="eyebrow turn-label">Conclave</span>}
-                    <div className="bubble">
-                      <Markdown content={message.content} />
-                    </div>
-                  </article>
+                  <Turn key={message.id} role={message.role} content={message.content} />
                 ))}
               </section>
             )}
