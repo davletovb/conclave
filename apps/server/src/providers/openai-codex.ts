@@ -2,6 +2,7 @@ import type {
   ModelRef,
   ProviderAdapter,
   ProviderEventSink,
+  ProviderLimitSnapshot,
   ProviderRequest,
   ProviderResponse,
   ProviderStatus,
@@ -27,6 +28,20 @@ type ModelListResponse = {
   }>;
 };
 
+type RateLimitWindowResponse = {
+  usedPercent: number;
+  windowDurationMins?: number | null;
+  resetsAt?: number | null;
+};
+
+type RateLimitsReadResponse = {
+  rateLimits?: {
+    primary?: RateLimitWindowResponse | null;
+    secondary?: RateLimitWindowResponse | null;
+    rateLimitReachedType?: string | null;
+  };
+};
+
 type ThreadStartResponse = { thread: { id: string } };
 type TurnStartResponse = { turn: { id: string } };
 
@@ -49,6 +64,17 @@ const TEXT_ONLY_INSTRUCTIONS = [
 
 function isAgentMessage(item: Record<string, unknown>): item is Record<string, unknown> & AgentMessageItem {
   return item.type === "agentMessage" && typeof item.text === "string";
+}
+
+function cancelledError() {
+  const error = new Error("Codex turn cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
+function numeric(record: Record<string, unknown> | undefined, key: string) {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 export class OpenAICodexProvider implements ProviderAdapter {
@@ -103,6 +129,26 @@ export class OpenAICodexProvider implements ProviderAdapter {
     }
   }
 
+  async limits(): Promise<ProviderLimitSnapshot> {
+    await this.requireChatGptAccount();
+    const response = await this.client.request<RateLimitsReadResponse>("account/rateLimits/read", {});
+    const snapshot = response.rateLimits;
+    const mapWindow = (window?: RateLimitWindowResponse | null) => window ? {
+      usedPercent: window.usedPercent,
+      windowDurationMins: window.windowDurationMins ?? undefined,
+      resetsAt: window.resetsAt ?? undefined,
+    } : undefined;
+
+    return {
+      provider: this.id,
+      available: Boolean(snapshot),
+      primary: mapWindow(snapshot?.primary),
+      secondary: mapWindow(snapshot?.secondary),
+      reachedType: snapshot?.rateLimitReachedType ?? undefined,
+      message: snapshot ? undefined : "Codex did not return a ChatGPT rate-limit snapshot.",
+    };
+  }
+
   async listModels(): Promise<ModelRef[]> {
     await this.requireChatGptAccount();
     const response = await this.client.request<ModelListResponse>("model/list", {
@@ -124,6 +170,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
   }
 
   async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
+    if (request.signal?.aborted) throw cancelledError();
     await this.requireChatGptAccount();
     const startedAt = Date.now();
     const prompt = this.buildPrompt(request);
@@ -136,7 +183,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
       developerInstructions: TEXT_ONLY_INSTRUCTIONS,
     });
 
-    const content = await this.runTurn(thread.thread.id, request.model, prompt, emit);
+    const content = await this.runTurn(thread.thread.id, request.model, prompt, emit, request.signal);
     return {
       provider: this.id,
       model: request.model,
@@ -171,7 +218,15 @@ export class OpenAICodexProvider implements ProviderAdapter {
     return parts.join("\n\n");
   }
 
-  private async runTurn(threadId: string, model: string, prompt: string, emit?: ProviderEventSink) {
+  private async runTurn(
+    threadId: string,
+    model: string,
+    prompt: string,
+    emit?: ProviderEventSink,
+    signal?: AbortSignal,
+  ) {
+    if (signal?.aborted) throw cancelledError();
+
     let expectedTurnId: string | null = null;
     const completedTurns = new Map<string, TurnCompletedParams>();
     const completedMessages = new Map<string, string[]>();
@@ -184,10 +239,31 @@ export class OpenAICodexProvider implements ProviderAdapter {
       rejectDone = reject;
     });
 
+    const interrupt = () => {
+      rejectDone(cancelledError());
+      if (!expectedTurnId) return;
+      void this.client.request("turn/interrupt", {
+        threadId,
+        turnId: expectedTurnId,
+      }).catch(() => undefined);
+    };
+    signal?.addEventListener("abort", interrupt, { once: true });
+
     const unsubscribe = this.client.onNotification((notification: CodexNotification) => {
       const params = notification.params ?? {};
       const notificationThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
       if (notificationThreadId && notificationThreadId !== threadId) return;
+
+      if (notification.method === "thread/tokenUsage/updated") {
+        const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
+        const total = tokenUsage?.total as Record<string, unknown> | undefined;
+        emit?.({
+          type: "usage",
+          inputTokens: numeric(total, "inputTokens"),
+          outputTokens: numeric(total, "outputTokens"),
+        });
+        return;
+      }
 
       const directTurnId = typeof params.turnId === "string" ? params.turnId : undefined;
       const nestedTurn = params.turn as Record<string, unknown> | undefined;
@@ -237,6 +313,11 @@ export class OpenAICodexProvider implements ProviderAdapter {
       });
       expectedTurnId = turn.turn.id;
 
+      if (signal?.aborted) {
+        interrupt();
+        throw cancelledError();
+      }
+
       const earlyCompletion = completedTurns.get(expectedTurnId);
       if (earlyCompletion) resolveDone(earlyCompletion);
 
@@ -248,6 +329,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
 
       const status = completion.turn?.status;
       if (status && status !== "completed") {
+        if (status === "interrupted" && signal?.aborted) throw cancelledError();
         throw new Error(completion.turn?.error?.message ?? `Codex turn ended with status ${status}`);
       }
 
@@ -262,6 +344,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
       return content;
     } finally {
       if (timeout) clearTimeout(timeout);
+      signal?.removeEventListener("abort", interrupt);
       unsubscribe();
     }
   }
