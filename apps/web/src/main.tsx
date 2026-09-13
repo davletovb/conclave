@@ -1,6 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
+  Conversation,
+  ConversationSummary,
   ModelRef,
   OrchestrationMode,
   OrchestrationResult,
@@ -8,6 +10,9 @@ import type {
   OrchestrationStreamEvent,
   ProviderId,
   ProviderStatus,
+  RunEventRecord,
+  StartRunResponse,
+  StoredRun,
 } from "@conclave/core";
 import "./styles.css";
 
@@ -50,6 +55,21 @@ function runtimeName(status: ProviderStatus) {
   return status.label;
 }
 
+async function readJson<T>(response: Response): Promise<T> {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = typeof (data as { error?: unknown }).error === "string"
+      ? (data as { error: string }).error
+      : `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+  return data as T;
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function App() {
   const [models, setModels] = useState<ModelRef[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
@@ -58,25 +78,34 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<OrchestrationResult | null>(null);
   const [liveSteps, setLiveSteps] = useState<OrchestrationStep[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [resumeRunId, setResumeRunId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const viewEpochRef = useRef(0);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    Promise.all([
-      fetch(`${API}/models`).then(r => r.json() as Promise<ModelRef[]>),
-      fetch(`${API}/providers`).then(r => r.json() as Promise<ProviderStatus[]>),
-    ])
-      .then(([modelData, providerData]) => {
-        setModels(modelData);
-        setProviders(providerData);
-        setSelected(initialSelection(modelData));
-      })
-      .catch(() => setError("Could not reach the Conclave server."));
+    const epoch = beginViewOperation();
+    void initialize(epoch);
+    return () => {
+      streamAbortRef.current?.abort();
+      viewEpochRef.current += 1;
+    };
   }, []);
 
   const participants = useMemo(
     () => models.filter(model => selected.includes(modelKey(model))),
     [models, selected],
+  );
+
+  const priorMessages = useMemo(
+    () => conversation?.messages.filter(
+      message => !(message.runId === activeRunId && message.role === "assistant"),
+    ) ?? [],
+    [conversation, activeRunId],
   );
 
   const subscriptionProviders = providers.filter(provider => provider.id !== "mock");
@@ -87,6 +116,155 @@ function App() {
   const runtimeTitle = subscriptionProviders
     .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
     .join("\n");
+
+  function beginViewOperation() {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    viewEpochRef.current += 1;
+    return viewEpochRef.current;
+  }
+
+  function isCurrent(epoch: number) {
+    return viewEpochRef.current === epoch;
+  }
+
+  async function initialize(epoch: number) {
+    try {
+      const [modelData, providerData, conversationData] = await Promise.all([
+        fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response)),
+        fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response)),
+        fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),
+      ]);
+      if (!isCurrent(epoch)) return;
+      setModels(modelData);
+      setProviders(providerData);
+      setConversations(conversationData);
+      setSelected(initialSelection(modelData));
+
+      const rememberedRun = localStorage.getItem("conclave.activeRunId");
+      const rememberedConversation = localStorage.getItem("conclave.conversationId");
+      if (rememberedRun) {
+        await recoverRun(rememberedRun, epoch);
+      } else if (rememberedConversation && conversationData.some(item => item.id === rememberedConversation)) {
+        await loadConversation(rememberedConversation, epoch);
+      }
+    } catch (cause) {
+      if (isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Could not reach the Conclave server.");
+      }
+    }
+  }
+
+  async function refreshConversations(epoch?: number) {
+    const data = await fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response));
+    if (epoch === undefined || isCurrent(epoch)) setConversations(data);
+  }
+
+  async function loadConversation(id: string, existingEpoch?: number) {
+    const epoch = existingEpoch ?? beginViewOperation();
+    if (existingEpoch === undefined) {
+      setLoading(false);
+      setError("");
+      setResult(null);
+      setLiveSteps([]);
+      setResumeRunId(null);
+    }
+
+    const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
+    if (!isCurrent(epoch)) return;
+    setConversation(data);
+    localStorage.setItem("conclave.conversationId", id);
+
+    if (data.lastRunId) {
+      const run = await fetch(`${API}/runs/${data.lastRunId}`).then(response => readJson<StoredRun>(response));
+      if (!isCurrent(epoch)) return;
+      setActiveRunId(run.id);
+      localStorage.setItem("conclave.activeRunId", run.id);
+      if (run.status === "completed" && run.result) {
+        setError("");
+        setResult(run.result);
+        setLiveSteps(run.result.steps);
+        setResumeRunId(null);
+      } else if (run.status === "running" || run.status === "queued") {
+        await recoverRun(run.id, epoch);
+      } else {
+        await replayPersistedRun(run.id, epoch);
+        if (!isCurrent(epoch)) return;
+        setResumeRunId(run.id);
+        setError(run.error ?? "This run was interrupted before it completed.");
+      }
+    } else {
+      setError("");
+      setActiveRunId(null);
+      setResult(null);
+      setLiveSteps([]);
+      setResumeRunId(null);
+      localStorage.removeItem("conclave.activeRunId");
+    }
+  }
+
+  async function recoverRun(runId: string, existingEpoch?: number) {
+    const epoch = existingEpoch ?? beginViewOperation();
+    try {
+      const run = await fetch(`${API}/runs/${runId}`).then(response => readJson<StoredRun>(response));
+      if (!isCurrent(epoch)) return;
+      setActiveRunId(run.id);
+      localStorage.setItem("conclave.activeRunId", run.id);
+      localStorage.setItem("conclave.conversationId", run.conversationId);
+      const thread = await fetch(`${API}/conversations/${run.conversationId}`).then(response => readJson<Conversation>(response));
+      if (!isCurrent(epoch)) return;
+      setConversation(thread);
+
+      if (run.status === "completed" && run.result) {
+        setError("");
+        setResult(run.result);
+        setLiveSteps(run.result.steps);
+        setLoading(false);
+        setResumeRunId(null);
+        return;
+      }
+
+      if (run.status === "failed" || run.status === "interrupted") {
+        await replayPersistedRun(run.id, epoch);
+        if (!isCurrent(epoch)) return;
+        setError(run.error ?? "This run was interrupted before it completed.");
+        setResumeRunId(run.id);
+        setLoading(false);
+        return;
+      }
+
+      setResult(null);
+      setLiveSteps([]);
+      setError("");
+      setResumeRunId(null);
+      setLoading(true);
+      const attached = await consumeRun(run.id, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(run.conversationId, epoch);
+    } finally {
+      if (isCurrent(epoch)) setLoading(false);
+    }
+  }
+
+  async function refreshConversation(id: string, epoch?: number) {
+    const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
+    if (epoch !== undefined && !isCurrent(epoch)) return;
+    setConversation(data);
+    await refreshConversations(epoch);
+  }
+
+  function newConversation() {
+    beginViewOperation();
+    setConversation(null);
+    setActiveRunId(null);
+    setResumeRunId(null);
+    setResult(null);
+    setLiveSteps([]);
+    setLoading(false);
+    setError("");
+    setPrompt("");
+    localStorage.removeItem("conclave.conversationId");
+    localStorage.removeItem("conclave.activeRunId");
+  }
 
   function selectMode(nextMode: OrchestrationMode) {
     setMode(nextMode);
@@ -137,6 +315,7 @@ function App() {
     if (streamEvent.type === "run_completed") {
       setResult(streamEvent.result);
       setLiveSteps(streamEvent.result.steps);
+      setResumeRunId(null);
       return;
     }
 
@@ -145,50 +324,164 @@ function App() {
     }
   }
 
+  async function replayPersistedRun(runId: string, epoch: number) {
+    setResult(null);
+    setLiveSteps([]);
+
+    const response = await fetch(`${API}/runs/${runId}/events?after=0&follow=0`);
+    if (!response.ok) await readJson(response);
+    const body = await response.text();
+    if (!isCurrent(epoch)) return false;
+
+    for (const line of body.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || !isCurrent(epoch)) continue;
+      const record = JSON.parse(trimmed) as RunEventRecord;
+      applyStreamEvent(record.event);
+    }
+    return isCurrent(epoch);
+  }
+
+  async function consumeRun(runId: string, epoch: number) {
+    let cursor = 0;
+    const controller = new AbortController();
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = controller;
+
+    try {
+      while (isCurrent(epoch) && !controller.signal.aborted) {
+        try {
+          const response = await fetch(`${API}/runs/${runId}/events?after=${cursor}&follow=1`, {
+            signal: controller.signal,
+          });
+          if (!response.ok) await readJson(response);
+          if (!response.body) throw new Error("This browser did not expose the response stream.");
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          const consumeLine = (line: string) => {
+            const trimmed = line.trim();
+            if (!trimmed || !isCurrent(epoch) || controller.signal.aborted) return;
+            const record = JSON.parse(trimmed) as RunEventRecord;
+            cursor = Math.max(cursor, record.seq);
+            applyStreamEvent(record.event);
+          };
+
+          while (true) {
+            const { done, value } = await reader.read();
+            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) consumeLine(line);
+            if (done) break;
+          }
+          if (buffer.trim()) consumeLine(buffer);
+        } catch (cause) {
+          if (controller.signal.aborted || !isCurrent(epoch)) return false;
+          // A browser/network stream can disappear while the server-owned run
+          // keeps working. Fall through to persisted status inspection, then
+          // reconnect from the last durable sequence cursor.
+        }
+
+        if (controller.signal.aborted || !isCurrent(epoch)) return false;
+
+        let run!: StoredRun;
+        try {
+          run = await fetch(`${API}/runs/${runId}`, { signal: controller.signal })
+            .then(next => readJson<StoredRun>(next));
+        } catch (cause) {
+          if (controller.signal.aborted || !isCurrent(epoch)) return false;
+          await sleep(600);
+          continue;
+        }
+
+        if (!isCurrent(epoch)) return false;
+        if (run.status === "completed") {
+          if (run.result) {
+            setError("");
+            setResult(run.result);
+            setLiveSteps(run.result.steps);
+          }
+          setResumeRunId(null);
+          return true;
+        }
+        if (run.status === "failed" || run.status === "interrupted") {
+          setError(run.error ?? "The run stopped before completion.");
+          setResumeRunId(run.id);
+          return true;
+        }
+
+        await sleep(500);
+      }
+      return false;
+    } finally {
+      if (streamAbortRef.current === controller) streamAbortRef.current = null;
+    }
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!prompt.trim() || participants.length === 0) return;
+    if (!prompt.trim() || participants.length === 0 || loading) return;
+    const epoch = beginViewOperation();
     setLoading(true);
     setError("");
+    setResumeRunId(null);
     setResult(null);
     setLiveSteps([]);
 
     try {
-      const response = await fetch(`${API}/orchestrate/stream`, {
+      const started = await fetch(`${API}/runs`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mode, prompt, participants, maxRounds: 1 }),
-      });
+        body: JSON.stringify({
+          conversationId: conversation?.id,
+          request: { mode, prompt, participants, maxRounds: 1 },
+        }),
+      }).then(response => readJson<StartRunResponse>(response));
+      if (!isCurrent(epoch)) return;
 
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error ?? "Orchestration failed");
-      }
-      if (!response.body) throw new Error("This browser did not expose the response stream.");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      const consumeLine = (line: string) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        applyStreamEvent(JSON.parse(trimmed) as OrchestrationStreamEvent);
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) consumeLine(line);
-        if (done) break;
-      }
-      if (buffer.trim()) consumeLine(buffer);
+      setActiveRunId(started.runId);
+      localStorage.setItem("conclave.activeRunId", started.runId);
+      localStorage.setItem("conclave.conversationId", started.conversationId);
+      setPrompt("");
+      await refreshConversation(started.conversationId, epoch);
+      if (!isCurrent(epoch)) return;
+      const attached = await consumeRun(started.runId, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(started.conversationId, epoch);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Orchestration failed");
+      if (isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Orchestration failed");
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent(epoch)) setLoading(false);
+    }
+  }
+
+  async function resumeInterruptedRun() {
+    if (!resumeRunId || loading) return;
+    const epoch = beginViewOperation();
+    const runId = resumeRunId;
+    setLoading(true);
+    setError("");
+    setResult(null);
+    setLiveSteps([]);
+    try {
+      const resumed = await fetch(`${API}/runs/${runId}/resume`, { method: "POST" })
+        .then(response => readJson<StartRunResponse>(response));
+      if (!isCurrent(epoch)) return;
+      setActiveRunId(resumed.runId);
+      setResumeRunId(null);
+      localStorage.setItem("conclave.activeRunId", resumed.runId);
+      localStorage.setItem("conclave.conversationId", resumed.conversationId);
+      const attached = await consumeRun(resumed.runId, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(resumed.conversationId, epoch);
+    } catch (cause) {
+      if (isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Could not resume run");
+      }
+    } finally {
+      if (isCurrent(epoch)) setLoading(false);
     }
   }
 
@@ -202,6 +495,7 @@ function App() {
           <h1>Conclave</h1>
           <p className="muted">Many models. One reasoning space.</p>
         </div>
+        <button className="new-chat" onClick={newConversation}>+ New conversation</button>
         <nav className="mode-list" aria-label="Orchestration mode">
           {modes.map(item => (
             <button key={item.id} className={mode === item.id ? "mode active" : "mode"} onClick={() => selectMode(item.id)}>
@@ -210,6 +504,22 @@ function App() {
             </button>
           ))}
         </nav>
+        {conversations.length > 0 && (
+          <div className="conversation-list">
+            <span className="eyebrow">RECENT</span>
+            {conversations.slice(0, 8).map(item => (
+              <button
+                key={item.id}
+                className={conversation?.id === item.id ? "conversation-link active" : "conversation-link"}
+                onClick={() => void loadConversation(item.id)}
+                title={item.title}
+              >
+                <span>{item.title}</span>
+                <small>{item.messageCount} messages</small>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="status" title={runtimeTitle}><span className="dot" /> {runtimeLabel}</div>
       </aside>
 
@@ -226,6 +536,7 @@ function App() {
             </select>
           </label>
           <div className="model-picker">
+            <button className="chip mobile-new-chat" onClick={newConversation}>New</button>
             {models.map(model => (
               <button key={modelKey(model)} onClick={() => toggleModel(model)} className={selected.includes(modelKey(model)) ? "chip selected" : "chip"}>
                 {model.label}
@@ -235,7 +546,18 @@ function App() {
         </header>
 
         <div className="content">
-          {!result && !loading && displayedSteps.length === 0 && (
+          {priorMessages.length > 0 && (
+            <section className="conversation-history" aria-label="Conversation history">
+              {priorMessages.map(message => (
+                <article key={message.id} className={`message ${message.role}`}>
+                  <span className="eyebrow">{message.role === "user" ? "YOU" : "CONCLAVE"}</span>
+                  <p>{message.content}</p>
+                </article>
+              ))}
+            </section>
+          )}
+
+          {!result && !loading && displayedSteps.length === 0 && priorMessages.length === 0 && (
             <section className="hero">
               <span className="eyebrow">CONVENE THE COUNCIL</span>
               <h3>Ask once. Let different minds work the problem.</h3>
@@ -244,9 +566,14 @@ function App() {
           )}
 
           {loading && displayedSteps.length === 0 && (
-            <div className="thinking"><span /> <span /> <span /> Convening {participants.length} model{participants.length === 1 ? "" : "s"}…</div>
+            <div className="thinking"><span /> <span /> <span /> Run continues even if this tab disconnects…</div>
           )}
-          {error && <div className="error">{error}</div>}
+          {error && (
+            <div className="error">
+              <span>{error}</span>
+              {resumeRunId && <button type="button" onClick={() => void resumeInterruptedRun()}>Resume run</button>}
+            </div>
+          )}
 
           {(displayedSteps.length > 0 || result) && (
             <section className="results">
@@ -256,7 +583,10 @@ function App() {
                   <p>{result.final}</p>
                 </div>
               )}
-              {loading && <div className="stream-status"><span className="dot" /> Live orchestration</div>}
+              {loading && <div className="stream-status"><span className="dot" /> Live · persisted locally</div>}
+              {!loading && resumeRunId && displayedSteps.length > 0 && (
+                <div className="stream-status">Partial output · previous attempt</div>
+              )}
               <div className="step-grid">
                 {displayedSteps.map(step => (
                   <article className="step-card" key={step.id}>
@@ -270,9 +600,9 @@ function App() {
         </div>
 
         <form className="composer" onSubmit={submit}>
-          <textarea value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Ask the council…" rows={3} />
+          <textarea value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversation ? "Continue the conversation…" : "Ask the council…"} rows={3} />
           <div className="composer-footer">
-            <span>{participants.length} participant{participants.length === 1 ? "" : "s"}</span>
+            <span>{conversation ? "Persistent conversation" : `${participants.length} participant${participants.length === 1 ? "" : "s"}`}</span>
             <button type="submit" disabled={loading || !prompt.trim() || participants.length === 0}>{loading ? "Running…" : "Convene"}</button>
           </div>
         </form>

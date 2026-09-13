@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
+  ChatMessage,
   ModelRef,
   OrchestrationEventSink,
   OrchestrationRequest,
@@ -21,6 +22,7 @@ type StepSpec = {
   kind: OrchestrationStepKind;
   model: ModelRef;
   prompt: string;
+  history?: ChatMessage[];
 };
 
 export class Orchestrator {
@@ -80,14 +82,15 @@ export class Orchestrator {
     let emittedText = false;
     const response = await this.adapterFor(spec.model).generate({
       model: spec.model.model,
-      messages: [{ role: "user", content: spec.prompt }],
+      messages: [
+        ...(spec.history ?? []),
+        { role: "user", content: spec.prompt },
+      ],
     }, event => {
       if (event.type === "text_delta" && event.delta) emittedText = true;
       this.mapProviderEvent(runId, spec.id, event, emit);
     });
 
-    // Providers that cannot expose token/chunk streaming yet still participate
-    // in the same protocol with one complete text delta at the end.
     if (!emittedText && response.content) {
       emit?.({ type: "text_delta", runId, stepId: spec.id, delta: response.content });
     }
@@ -126,6 +129,7 @@ export class Orchestrator {
           kind: "answer",
           model,
           prompt: request.prompt,
+          history: request.history,
         }, runId, emit);
         return complete({ mode: request.mode, steps: [step], final: step.content });
       }
@@ -138,18 +142,21 @@ export class Orchestrator {
           kind: "answer",
           model: author,
           prompt: request.prompt,
+          history: request.history,
         }, runId, emit);
         const critique = await this.executeStep({
           id: makeStepId("critique", 0),
           kind: "critique",
           model: critic,
           prompt: `Critique this answer for factual gaps, weak reasoning, and missing alternatives.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
+          history: request.history,
         }, runId, emit);
         const revision = await this.executeStep({
           id: makeStepId("revision", 0),
           kind: "revision",
           model: author,
           prompt: `Revise your answer using the critique. Keep only improvements you can justify.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nCritique:\n${critique.content}`,
+          history: request.history,
         }, runId, emit);
         return complete({ mode: request.mode, steps: [draft, critique, revision], final: revision.content });
       }
@@ -160,6 +167,7 @@ export class Orchestrator {
           kind: "answer",
           model,
           prompt: request.prompt,
+          history: request.history,
         }, runId, emit)),
       );
 
@@ -182,6 +190,7 @@ export class Orchestrator {
           kind: "synthesis",
           model: synthesizer,
           prompt: `Synthesize the independent answers below. Preserve useful disagreements and do not invent consensus.\n\nQuestion:\n${request.prompt}\n\nAnswers:\n${transcript}`,
+          history: request.history,
         }, runId, emit);
         return complete({ mode: request.mode, steps: [...independent, synthesis], final: synthesis.content });
       }
@@ -197,6 +206,7 @@ export class Orchestrator {
             kind: "critique",
             model,
             prompt: `You are in debate round ${round + 1}. Identify the strongest disagreement or weakness in the other positions and state what should change.\n\nQuestion:\n${request.prompt}\n\nCurrent positions:\n${debateTranscript}`,
+            history: request.history,
           }, runId, emit)),
         );
         debateSteps.push(...critiques);
@@ -210,6 +220,7 @@ export class Orchestrator {
         kind: "synthesis",
         model: synthesizer,
         prompt: `Judge the debate. Produce the best-supported answer, explicitly noting unresolved disagreements and uncertainty.\n\nQuestion:\n${request.prompt}\n\nDebate:\n${debateTranscript}`,
+        history: request.history,
       }, runId, emit);
       return complete({ mode: request.mode, steps: [...debateSteps, synthesis], final: synthesis.content });
     } catch (error) {

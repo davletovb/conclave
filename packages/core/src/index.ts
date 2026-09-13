@@ -68,6 +68,8 @@ export interface OrchestrationRequest {
   participants: ModelRef[];
   synthesizer?: ModelRef;
   maxRounds?: number;
+  /** Server-injected prior conversation context. Clients normally omit this. */
+  history?: ChatMessage[];
 }
 
 export type OrchestrationStepKind = "answer" | "critique" | "revision" | "synthesis";
@@ -99,6 +101,66 @@ export type OrchestrationStreamEvent =
   | { type: "error"; runId: string; message: string; stepId?: string };
 
 export type OrchestrationEventSink = (event: OrchestrationStreamEvent) => void;
+
+export interface ConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  runId?: string;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ConversationMessage[];
+  lastRunId?: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  lastRunId?: string;
+  messageCount: number;
+}
+
+export type RunStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
+
+export interface StoredRun {
+  id: string;
+  conversationId: string;
+  userMessageId: string;
+  status: RunStatus;
+  attempt: number;
+  request: OrchestrationRequest;
+  createdAt: string;
+  updatedAt: string;
+  result?: OrchestrationResult;
+  error?: string;
+}
+
+export interface RunEventRecord {
+  seq: number;
+  attempt: number;
+  at: string;
+  event: OrchestrationStreamEvent;
+}
+
+export interface StartRunRequest {
+  conversationId?: string;
+  request: OrchestrationRequest;
+}
+
+export interface StartRunResponse {
+  conversationId: string;
+  runId: string;
+  status: RunStatus;
+  attempt: number;
+}
 
 export function makeStepId(prefix: string, index: number) {
   return `${prefix}-${index + 1}`;
