@@ -6,9 +6,9 @@ import type {
 } from "@conclave/core";
 
 const modelCatalog: ModelRef[] = [
-  { provider: "mock", model: "mock-gpt", label: "GPT (mock)" },
-  { provider: "mock", model: "mock-claude", label: "Claude (mock)" },
-  { provider: "mock", model: "mock-grok", label: "Grok (mock)" },
+  { provider: "mock", model: "mock-gpt", label: "GPT (mock)", source: "mock", isDefault: true },
+  { provider: "mock", model: "mock-claude", label: "Claude (mock)", source: "mock" },
+  { provider: "mock", model: "mock-grok", label: "Grok (mock)", source: "mock" },
 ];
 
 export class MockProvider implements ProviderAdapter {

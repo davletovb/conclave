@@ -26,7 +26,9 @@ The browser never talks directly to provider runtimes. The server owns provider 
 
 ## Current status
 
-The first vertical slice runs against mock GPT/Claude/Grok personalities. This lets orchestration semantics and UX be tested before real provider authentication is added.
+OpenAI is now connected through the official local `codex app-server` runtime. If Codex is signed in with a ChatGPT account, Conclave discovers the models available to that account and sends OpenAI turns through the ChatGPT subscription allowance. Claude and Grok remain mocks until their adapters land.
+
+Conclave intentionally refuses Codex sessions authenticated with an OpenAI API key so it cannot silently switch from subscription usage to metered API billing.
 
 ## Run locally
 
@@ -42,6 +44,34 @@ pnpm dev
 
 Override the server URL with `VITE_CONCLAVE_API` when needed.
 
+## Connect your ChatGPT subscription
+
+Conclave expects the official Codex CLI on the same machine. On macOS you can install it with one of the official options:
+
+```bash
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+# or
+npm install -g @openai/codex
+# or
+brew install --cask codex
+```
+
+Then run:
+
+```bash
+codex
+```
+
+Choose **Sign in with ChatGPT** and complete the browser login. Restart `pnpm dev` afterward. The Conclave sidebar should change from `OpenAI not connected · mocks active` to your ChatGPT plan, and `/models` will expose the models Codex reports for that account.
+
+If Codex is authenticated with an API key, Conclave will leave OpenAI disconnected by design. Sign out of that Codex session and sign back in with ChatGPT if you want subscription-backed usage.
+
+You can inspect the local provider state at:
+
+```bash
+curl http://localhost:8787/providers
+```
+
 ## Verification
 
 ```bash
@@ -54,7 +84,7 @@ GitHub Actions runs the same checks on pull requests.
 
 ## Near-term roadmap
 
-1. OpenAI adapter via subscription-authenticated Codex runtime
+1. ✅ OpenAI adapter via subscription-authenticated Codex runtime
 2. Anthropic adapter via Claude Agent SDK/runtime
 3. xAI adapter via Grok ACP/headless runtime
 4. Streaming event protocol for partial output and tool calls

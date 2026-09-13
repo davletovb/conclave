@@ -18,6 +18,18 @@ export interface ModelRef {
   provider: ProviderId;
   model: string;
   label: string;
+  source?: "subscription" | "mock";
+  isDefault?: boolean;
+}
+
+export interface ProviderStatus {
+  id: ProviderId;
+  label: string;
+  available: boolean;
+  connected: boolean;
+  authMode?: string;
+  planType?: string;
+  message?: string;
 }
 
 export interface ProviderRequest {

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ModelRef, OrchestrationMode, OrchestrationResult } from "@conclave/core";
+import type { ModelRef, OrchestrationMode, OrchestrationResult, ProviderStatus } from "@conclave/core";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -12,8 +12,23 @@ const modes: { id: OrchestrationMode; label: string; description: string }[] = [
   { id: "critic-revise", label: "Critic → Revise", description: "Draft, critique, improve" },
 ];
 
+function modelKey(model: ModelRef) {
+  return `${model.provider}:${model.model}`;
+}
+
+function initialSelection(models: ModelRef[]) {
+  const subscriptionModels = models.filter(model => model.source === "subscription");
+  if (subscriptionModels.length === 0) return models.map(modelKey);
+
+  const primary = subscriptionModels.find(model => model.isDefault) ?? subscriptionModels[0];
+  const mockClaude = models.find(model => model.model === "mock-claude");
+  const mockGrok = models.find(model => model.model === "mock-grok");
+  return [primary, mockClaude, mockGrok].filter((model): model is ModelRef => Boolean(model)).map(modelKey);
+}
+
 function App() {
   const [models, setModels] = useState<ModelRef[]>([]);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [mode, setMode] = useState<OrchestrationMode>("panel");
   const [prompt, setPrompt] = useState("");
@@ -22,36 +37,45 @@ function App() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch(`${API}/models`)
-      .then(r => r.json())
-      .then((data: ModelRef[]) => {
-        setModels(data);
-        setSelected(data.map(model => model.model));
+    Promise.all([
+      fetch(`${API}/models`).then(r => r.json() as Promise<ModelRef[]>),
+      fetch(`${API}/providers`).then(r => r.json() as Promise<ProviderStatus[]>),
+    ])
+      .then(([modelData, providerData]) => {
+        setModels(modelData);
+        setProviders(providerData);
+        setSelected(initialSelection(modelData));
       })
       .catch(() => setError("Could not reach the Conclave server."));
   }, []);
 
   const participants = useMemo(
-    () => models.filter(model => selected.includes(model.model)),
+    () => models.filter(model => selected.includes(modelKey(model))),
     [models, selected],
   );
+
+  const openaiStatus = providers.find(provider => provider.id === "openai");
+  const runtimeLabel = openaiStatus?.connected
+    ? `ChatGPT ${openaiStatus.planType ?? ""} connected`.replace("  ", " ")
+    : "OpenAI not connected · mocks active";
 
   function selectMode(nextMode: OrchestrationMode) {
     setMode(nextMode);
     if (nextMode === "single") {
       setSelected(current => {
-        const model = current[0] ?? models[0]?.model;
+        const model = current[0] ?? (models[0] ? modelKey(models[0]) : undefined);
         return model ? [model] : [];
       });
     }
   }
 
-  function toggleModel(model: string) {
+  function toggleModel(model: ModelRef) {
+    const key = modelKey(model);
     if (mode === "single") {
-      setSelected([model]);
+      setSelected([key]);
       return;
     }
-    setSelected(current => current.includes(model) ? current.filter(id => id !== model) : [...current, model]);
+    setSelected(current => current.includes(key) ? current.filter(id => id !== key) : [...current, key]);
   }
 
   async function submit(event: React.FormEvent) {
@@ -92,7 +116,7 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="status"><span className="dot" /> Mock runtime connected</div>
+        <div className="status" title={openaiStatus?.message}><span className="dot" /> {runtimeLabel}</div>
       </aside>
 
       <section className="workspace">
@@ -109,8 +133,8 @@ function App() {
           </label>
           <div className="model-picker">
             {models.map(model => (
-              <button key={model.model} onClick={() => toggleModel(model.model)} className={selected.includes(model.model) ? "chip selected" : "chip"}>
-                {model.label.replace(" (mock)", "")}
+              <button key={modelKey(model)} onClick={() => toggleModel(model)} className={selected.includes(modelKey(model)) ? "chip selected" : "chip"}>
+                {model.label}
               </button>
             ))}
           </div>
@@ -137,7 +161,7 @@ function App() {
               <div className="step-grid">
                 {result.steps.map(step => (
                   <article className="step-card" key={step.id}>
-                    <div className="step-meta"><span>{step.model.label.replace(" (mock)", "")}</span><span>{step.kind}</span></div>
+                    <div className="step-meta"><span>{step.model.label}</span><span>{step.kind}</span></div>
                     <p>{step.content}</p>
                   </article>
                 ))}
