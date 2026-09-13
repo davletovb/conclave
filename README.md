@@ -67,9 +67,9 @@ Conclave exposes structured ChatGPT subscription-window usage when Codex makes `
 
 ## Custom workflows and run inspection
 
-Custom Workflow mode makes orchestration a first-class graph instead of a frontend shortcut. A workflow contains stable node IDs, a step kind, a participant/synthesizer selector, an optional dependency list, a prompt template, and one explicit output node. The server validates the complete graph before the first provider call, including participant indexes, dependency references, cycles, supported step kinds, and the run's call budget.
+Custom Workflow mode makes orchestration a first-class graph instead of a frontend shortcut. A workflow contains stable node IDs, a step kind, a participant/synthesizer selector, an optional dependency list, a prompt template, and one explicit output node. The server validates the complete graph before the run is persisted, including participant indexes, dependency references, cycles, supported step kinds, output reachability, and the run's call budget.
 
-Nodes whose prerequisites are satisfied can run concurrently. A dependent starts as soon as its own prerequisites finish rather than waiting for unrelated branches. If one workflow branch fails, Conclave aborts and settles the remaining in-flight workflow branches before the attempt is finalized.
+Nodes whose prerequisites are satisfied can run concurrently. A dependent starts as soon as its own prerequisites finish rather than waiting for unrelated branches. Every node must contribute to the output node, so disconnected leftovers cannot consume subscription calls. If one workflow branch fails, Conclave records the originating failed step, aborts and settles the remaining in-flight workflow branches, and distinguishes those aborted siblings in the inspector.
 
 Prompt templates support:
 
@@ -79,9 +79,9 @@ Prompt templates support:
 
 Interpolation is single-pass: placeholder-like text contained inside user input or model output remains literal and cannot become new workflow syntax.
 
-Conclave ships with three initial presets: **Triangulate**, **Challenge → Revise**, and **Decision Board**. The web UI can load a preset and optionally expose/edit its JSON graph before running it.
+Conclave ships with three initial presets: **Triangulate**, **Challenge → Revise**, and **Decision Board**. The web UI can load a preset, select the synthesizer, and optionally expose/edit its JSON graph before running it.
 
-The **Run Inspector** reconstructs execution from the durable event logs. It shows current and archived attempts, status, duration, calls/tokens where available, errors/rate limits, each step's model/kind/status/timing, and dependency lineage. This makes resumptions, cancellations, workflow branches, and failed attempts inspectable without depending on transient browser state.
+The **Run Inspector** reconstructs execution from the durable event logs. It shows current and archived attempts, status, duration, calls/tokens where available, errors/rate limits, each step's model/kind/status/timing, and dependency lineage. It refreshes while an active run is executing and ignores stale responses after the user changes conversations.
 
 ## Run locally
 
@@ -204,4 +204,7 @@ GitHub Actions runs the same checks on pull requests.
 6. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
 7. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
 8. ✅ Custom workflow graph/presets and richer run inspection
-9. Desktop/local-native packaging and an IPC boundary so the web transport can later be replaced without changing orchestration/provider core logic
+9. Web-first robustness: partial-provider failure handling, step-level retry, stalled-provider recovery, reconnect/reload stress coverage, and stronger lifecycle integration tests
+10. Web UI/UX: conversation management/search/export, collapsible model outputs, better long-run rendering, richer workflow authoring, keyboard shortcuts, and accessibility
+
+Desktop/local-native packaging and an IPC transport remain intentionally deferred. The orchestration/provider core should stay transport-independent so native packaging can be added later without driving current product design.
