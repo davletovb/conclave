@@ -1,0 +1,32 @@
+name: Run PR14 rate-limit fix
+on:
+  push:
+    branches:
+      - feat/partial-failure-recovery
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply targeted patch
+        run: python scripts/pr14_rate_limit_fix.py
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Commit fixes
+        run: |
+          git config user.name "Behruz"
+          git config user.email "behruz.davletov@carleton.ca"
+          git add apps/server/src/orchestrator.ts apps/server/src/orchestrator.test.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: never retry recognized rate limits"
+          git push
