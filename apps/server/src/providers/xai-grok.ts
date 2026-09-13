@@ -100,7 +100,6 @@ export class XaiGrokProvider implements ProviderAdapter {
 
       let sessionId = "";
       let streamedText = "";
-      let lastChunkAt = 0;
 
       unsubscribe = client.onNotification((notification: GrokAcpNotification) => {
         if (notification.method !== "session/update") return;
@@ -113,7 +112,6 @@ export class XaiGrokProvider implements ProviderAdapter {
         if (typeof content?.text !== "string") return;
 
         streamedText += content.text;
-        lastChunkAt = Date.now();
       });
 
       const session = await client.request<SessionNewResponse>("session/new", {
@@ -130,15 +128,20 @@ export class XaiGrokProvider implements ProviderAdapter {
         prompt: [{ type: "text", text: prompt }],
       }, timeoutMs);
 
-      // ACP returns completion metadata from session/prompt while final text
-      // arrives asynchronously as session/update chunks. Give late chunks a
-      // short quiet-period window before finalizing the response.
-      const quietWindowMs = 250;
-      const settleDeadline = Date.now() + 2_000;
-      while (Date.now() < settleDeadline) {
-        const sinceLastChunk = lastChunkAt === 0 ? quietWindowMs : Date.now() - lastChunkAt;
-        if (sinceLastChunk >= quietWindowMs) break;
-        await sleep(50);
+      // Grok's ACP contract returns completion metadata from session/prompt,
+      // while assistant text arrives on session/update. Follow the official
+      // integration pattern and wait until the captured text is stable across
+      // two checks so late stdout/JSON-RPC chunks are not dropped.
+      let lastLength = -1;
+      let stableChecks = 0;
+      while (stableChecks < 2) {
+        await sleep(150);
+        if (streamedText.length === lastLength) {
+          stableChecks += 1;
+        } else {
+          lastLength = streamedText.length;
+          stableChecks = 0;
+        }
       }
 
       const content = streamedText.trim();
