@@ -232,7 +232,7 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
 
   async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
     if (request.signal?.aborted) throw cancelledError();
-    await this.requireSubscriptionAccount();
+    await this.requireSubscriptionAccount(request.signal);
     const startedAt = Date.now();
     const prompt = this.buildPrompt(request);
     const timeoutMs = Number(process.env.CONCLAVE_CLAUDE_TURN_TIMEOUT_MS ?? 180_000);
@@ -278,8 +278,8 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
     };
   }
 
-  private async readAuthStatus(): Promise<ClaudeAuthStatus> {
-    const result = await this.runner.run(["auth", "status"], 15_000);
+  private async readAuthStatus(signal?: AbortSignal): Promise<ClaudeAuthStatus> {
+    const result = await this.runner.run(["auth", "status"], 15_000, undefined, signal);
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim();
       if (detail) throw new Error(`Claude Code authentication check failed: ${detail}`);
@@ -293,8 +293,8 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
     }
   }
 
-  private async requireSubscriptionAccount() {
-    const auth = await this.readAuthStatus();
+  private async requireSubscriptionAccount(signal?: AbortSignal) {
+    const auth = await this.readAuthStatus(signal);
     if (!auth.loggedIn) {
       throw new Error("Claude Code is not signed in. Run `claude auth login` and authenticate with your Claude subscription.");
     }
