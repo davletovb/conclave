@@ -22,6 +22,11 @@ new = '''      participants: [participants[0]],\n      budget: { maxCalls: 2, ma
 if old not in text:
     raise SystemExit('rate limit budget target not found')
 text = text.replace(old, new, 1)
+old = ''')).rejects.toThrow(/rate limit/i);\n\n    const notice = events.find'''
+new = ''')).rejects.toThrow(/too many requests/i);\n\n    const notice = events.find'''
+if old not in text:
+    raise SystemExit('rate limit error expectation target not found')
+text = text.replace(old, new, 1)
 old = '''    const notice = events.find((event): event is Extract<OrchestrationStreamEvent, { type: "rate_limit" }> => event.type === "rate_limit");\n    expect(notice?.notice).toMatchObject({ provider: "mock", model: "mock-gpt", stepId: "answer-1" });\n'''
 new = '''    const notice = events.find((event): event is Extract<OrchestrationStreamEvent, { type: "rate_limit" }> => event.type === "rate_limit");\n    expect(notice?.notice).toMatchObject({ provider: "mock", model: "mock-gpt", stepId: "answer-1" });\n    expect(limited.calls).toBe(1);\n    expect(events.some(event => event.type === "step_retrying")).toBe(false);\n'''
 if old not in text:
