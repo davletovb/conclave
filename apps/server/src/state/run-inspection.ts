@@ -40,32 +40,20 @@ async function allRecords(dataDir: string, runId: string) {
   const runsDir = join(dataDir, "runs");
   const entries = await readdir(runsDir, { withFileTypes: true });
   const names = entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name)
-    .filter(
-      (name) =>
-        name === `${runId}.ndjson` ||
-        (name.startsWith(`${runId}.attempt-`) && name.endsWith(".ndjson")),
-    );
+    .filter(entry => entry.isFile())
+    .map(entry => entry.name)
+    .filter(name => name === `${runId}.ndjson` || name.startsWith(`${runId}.attempt-`) && name.endsWith(".ndjson"));
 
-  const records = (
-    await Promise.all(names.map((name) => readRecords(join(runsDir, name))))
-  ).flat();
+  const records = (await Promise.all(names.map(name => readRecords(join(runsDir, name))))).flat();
   return records.sort((a, b) => a.attempt - b.attempt || a.seq - b.seq);
 }
 
-function attemptStatus(
-  records: RunEventRecord[],
-  fallback: RunStatus,
-): RunStatus {
-  const terminal = [...records]
-    .reverse()
-    .find(
-      (record) =>
-        record.event.type === "run_completed" ||
-        record.event.type === "run_cancelled" ||
-        record.event.type === "error",
-    );
+function attemptStatus(records: RunEventRecord[], fallback: RunStatus): RunStatus {
+  const terminal = [...records].reverse().find(record => (
+    record.event.type === "run_completed"
+    || record.event.type === "run_cancelled"
+    || record.event.type === "error"
+  ));
   if (terminal?.event.type === "run_completed") return "completed";
   if (terminal?.event.type === "run_cancelled") return "cancelled";
   if (terminal?.event.type === "error") return "failed";
@@ -85,16 +73,8 @@ function finishRunningSteps(
   }
 }
 
-function summarizeAttempt(
-  run: StoredRun,
-  attempt: number,
-  records: RunEventRecord[],
-): RunAttemptInspection {
+function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventRecord[]): RunAttemptInspection {
   const steps = new Map<string, RunStepInspection>();
-  const retryUsageBase = new Map<
-    string,
-    { inputTokens: number; outputTokens: number }
-  >();
   let usage = emptyRunUsage();
   let rateLimit = undefined as RunAttemptInspection["rateLimit"];
   let error = undefined as string | undefined;
@@ -117,25 +97,13 @@ function summarizeAttempt(
         attempts: 1,
       });
     } else if (event.type === "step_retrying") {
-      const existing = steps.get(event.stepId) ?? {
-        id: event.stepId,
-        dependsOn: [],
-        status: "running" as const,
-      };
+      const existing = steps.get(event.stepId) ?? { id: event.stepId, dependsOn: [], status: "running" as const };
       existing.attempts = event.attempt;
       existing.error = event.message;
-      retryUsageBase.set(event.stepId, {
-        inputTokens: existing.inputTokens ?? 0,
-        outputTokens: existing.outputTokens ?? 0,
-      });
       steps.set(event.stepId, existing);
     } else if (event.type === "step_failed") {
       sawStepFailure = true;
-      const existing = steps.get(event.failure.stepId) ?? {
-        id: event.failure.stepId,
-        dependsOn: [],
-        status: "running" as const,
-      };
+      const existing = steps.get(event.failure.stepId) ?? { id: event.failure.stepId, dependsOn: [], status: "running" as const };
       existing.kind = event.failure.kind;
       existing.model = event.failure.model;
       existing.status = "failed";
@@ -150,14 +118,8 @@ function summarizeAttempt(
         dependsOn: [],
         status: "running" as const,
       };
-      const base = retryUsageBase.get(event.stepId) ?? {
-        inputTokens: 0,
-        outputTokens: 0,
-      };
-      if (event.inputTokens !== undefined)
-        step.inputTokens = base.inputTokens + event.inputTokens;
-      if (event.outputTokens !== undefined)
-        step.outputTokens = base.outputTokens + event.outputTokens;
+      if (event.inputTokens !== undefined) step.inputTokens = event.inputTokens;
+      if (event.outputTokens !== undefined) step.outputTokens = event.outputTokens;
       steps.set(event.stepId, step);
     } else if (event.type === "step_completed") {
       const existing = steps.get(event.step.id) ?? {
@@ -190,11 +152,7 @@ function summarizeAttempt(
         // Once the actual failing step has been identified, any still-running
         // sibling work in the same failed attempt was aborted by workflow
         // teardown rather than independently failing.
-        finishRunningSteps(
-          steps,
-          sawStepFailure ? "cancelled" : "failed",
-          record.at,
-        );
+        finishRunningSteps(steps, sawStepFailure ? "cancelled" : "failed", record.at);
       }
     } else if (event.type === "run_cancelled") {
       error = event.message;
@@ -209,9 +167,7 @@ function summarizeAttempt(
   const fallback: RunStatus = isCurrent ? run.status : "interrupted";
   const status = attemptStatus(records, fallback);
   const startedAt = records[0]?.at ?? (isCurrent ? run.createdAt : undefined);
-  const completedAt =
-    terminalAt ??
-    (!isCurrent && records.length > 0 ? records.at(-1)?.at : undefined);
+  const completedAt = terminalAt ?? (!isCurrent && records.length > 0 ? records.at(-1)?.at : undefined);
 
   return {
     attempt,
@@ -223,20 +179,11 @@ function summarizeAttempt(
     usage,
     steps: [...steps.values()],
     rateLimit,
-    error:
-      error ??
-      (isCurrent
-        ? run.error
-        : status === "interrupted"
-          ? "Attempt was interrupted before a terminal event was written."
-          : undefined),
+    error: error ?? (isCurrent ? run.error : status === "interrupted" ? "Attempt was interrupted before a terminal event was written." : undefined),
   };
 }
 
-export async function inspectRun(
-  store: FileStateStore,
-  run: StoredRun,
-): Promise<RunInspection> {
+export async function inspectRun(store: FileStateStore, run: StoredRun): Promise<RunInspection> {
   const records = await allRecords(store.dataDir, run.id);
   const grouped = new Map<number, RunEventRecord[]>();
   for (const record of records) {
@@ -248,9 +195,7 @@ export async function inspectRun(
 
   const attempts = [...grouped.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([attempt, attemptRecords]) =>
-      summarizeAttempt(run, attempt, attemptRecords),
-    );
+    .map(([attempt, attemptRecords]) => summarizeAttempt(run, attempt, attemptRecords));
 
   return { run, attempts };
 }

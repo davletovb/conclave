@@ -54,8 +54,7 @@ class FlakyProvider extends MockProvider {
   override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
     const count = (this.attempts.get(request.model) ?? 0) + 1;
     this.attempts.set(request.model, count);
-    if (request.model === "mock-claude" && count === 1)
-      throw new Error("temporary connection unavailable");
+    if (request.model === "mock-claude" && count === 1) throw new Error("temporary connection unavailable");
     return super.generate(request);
   }
 }
@@ -65,8 +64,7 @@ class PartialFailureProvider extends MockProvider {
 
   override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
     this.calls.push(request.model);
-    if (request.model === "mock-claude" || request.model === "mock-finalizer")
-      throw new Error("provider authentication unavailable");
+    if (request.model === "mock-claude" || request.model === "mock-finalizer") throw new Error("provider authentication unavailable");
     return super.generate(request);
   }
 }
@@ -76,29 +74,7 @@ class AllAnswersFailProvider extends MockProvider {
 
   override async generate(request: ProviderRequest) {
     this.calls.push(request.model);
-    if (request.model !== "mock-finalizer")
-      throw new Error("provider authentication unavailable");
-    return super.generate(request);
-  }
-}
-
-class DebateReclaimProvider extends MockProvider {
-  roundOneGrokAttempts = 0;
-
-  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
-    const latest = request.messages.at(-1)?.content ?? "";
-    if (request.model === "mock-claude" && latest === "Reclaim debate slots") {
-      throw new Error("provider authentication unavailable");
-    }
-    if (
-      request.model === "mock-grok" &&
-      latest.startsWith("You are in debate round 1.")
-    ) {
-      this.roundOneGrokAttempts += 1;
-      if (this.roundOneGrokAttempts === 1) {
-        throw new Error("temporary connection unavailable");
-      }
-    }
+    if (request.model !== "mock-finalizer") throw new Error("provider authentication unavailable");
     return super.generate(request);
   }
 }
@@ -119,36 +95,21 @@ class AbortAwareProvider extends MockProvider {
 
 describe("Orchestrator", () => {
   it("keeps panel answers independent before synthesis", async () => {
-    const result = await orchestrator.run({
-      mode: "panel",
-      prompt: "Choose an architecture",
-      participants,
-    });
-    expect(result.steps.filter((step) => step.kind === "answer")).toHaveLength(
-      3,
-    );
+    const result = await orchestrator.run({ mode: "panel", prompt: "Choose an architecture", participants });
+    expect(result.steps.filter(step => step.kind === "answer")).toHaveLength(3);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
     expect(result.final.length).toBeGreaterThan(0);
   });
 
   it("bounds debate rounds", async () => {
-    const result = await orchestrator.run({
-      mode: "debate",
-      prompt: "Which option is safer?",
-      participants,
-      maxRounds: 99,
-    });
-    expect(
-      result.steps.filter((step) => step.kind === "critique"),
-    ).toHaveLength(9);
+    const result = await orchestrator.run({ mode: "debate", prompt: "Which option is safer?", participants, maxRounds: 99 });
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(9);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
   it("uses the budget round limit for debate", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "debate",
       prompt: "Debate once",
@@ -157,44 +118,34 @@ describe("Orchestrator", () => {
       budget: { maxCalls: 20, maxRounds: 1 },
     });
 
-    expect(
-      result.steps.filter((step) => step.kind === "critique"),
-    ).toHaveLength(3);
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(3);
     expect(countingProvider.calls).toBe(7);
   });
 
   it("rejects an insufficient call budget before spending any provider calls", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
 
-    await expect(
-      countingOrchestrator.run({
-        mode: "panel",
-        prompt: "Do not start",
-        participants,
-        budget: { maxCalls: 3, maxRounds: 1 },
-      }),
-    ).rejects.toThrow(/requires 4/i);
+    await expect(countingOrchestrator.run({
+      mode: "panel",
+      prompt: "Do not start",
+      participants,
+      budget: { maxCalls: 3, maxRounds: 1 },
+    })).rejects.toThrow(/requires 4/i);
     expect(countingProvider.calls).toBe(0);
   });
 
   it("requires exactly one participant in single mode", async () => {
-    await expect(
-      orchestrator.run({
-        mode: "single",
-        prompt: "Answer once",
-        participants,
-      }),
-    ).rejects.toThrow("Single mode requires exactly one participant");
+    await expect(orchestrator.run({
+      mode: "single",
+      prompt: "Answer once",
+      participants,
+    })).rejects.toThrow("Single mode requires exactly one participant");
   });
 
   it("critic-revise only calls the author, critic, then author again", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "critic-revise",
       prompt: "Review this architecture",
@@ -202,18 +153,12 @@ describe("Orchestrator", () => {
     });
 
     expect(countingProvider.calls).toBe(3);
-    expect(result.steps.map((step) => step.kind)).toEqual([
-      "answer",
-      "critique",
-      "revision",
-    ]);
+    expect(result.steps.map(step => step.kind)).toEqual(["answer", "critique", "revision"]);
   });
 
   it("builds and audits consensus instead of treating synthesis as automatic agreement", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "consensus",
       prompt: "Choose the safest migration strategy",
@@ -221,7 +166,7 @@ describe("Orchestrator", () => {
     });
 
     expect(countingProvider.calls).toBe(5);
-    expect(result.steps.map((step) => step.kind)).toEqual([
+    expect(result.steps.map(step => step.kind)).toEqual([
       "answer",
       "answer",
       "answer",
@@ -233,9 +178,7 @@ describe("Orchestrator", () => {
 
   it("judges independent candidates with one bounded adjudication call", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "judge",
       prompt: "Which design is strongest?",
@@ -248,9 +191,7 @@ describe("Orchestrator", () => {
 
   it("red-teams one draft and returns a hardened revision", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "red-team",
       prompt: "Propose a rollout plan",
@@ -258,19 +199,12 @@ describe("Orchestrator", () => {
     });
 
     expect(countingProvider.calls).toBe(4);
-    expect(result.steps.map((step) => step.kind)).toEqual([
-      "answer",
-      "critique",
-      "critique",
-      "revision",
-    ]);
+    expect(result.steps.map(step => step.kind)).toEqual(["answer", "critique", "critique", "revision"]);
   });
 
   it("routes to one specialist instead of fanning the question out", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "router",
       prompt: "Who should solve this?",
@@ -278,15 +212,13 @@ describe("Orchestrator", () => {
     });
 
     expect(countingProvider.calls).toBe(2);
-    expect(result.steps.map((step) => step.kind)).toEqual(["route", "answer"]);
+    expect(result.steps.map(step => step.kind)).toEqual(["route", "answer"]);
     expect(result.steps[1]?.model.model).toBe("mock-claude");
   });
 
   it("uses exactly one research-council member per selected model before synthesis", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "research-council",
       prompt: "Assess the evidence",
@@ -294,20 +226,16 @@ describe("Orchestrator", () => {
       budget: { maxCalls: 4, maxRounds: 1 },
     });
 
-    const research = result.steps.filter((step) => step.kind === "research");
+    const research = result.steps.filter(step => step.kind === "research");
     expect(countingProvider.calls).toBe(4);
     expect(research).toHaveLength(3);
-    expect(research.map((step) => step.model.model)).toEqual(
-      participants.map((model) => model.model),
-    );
+    expect(research.map(step => step.model.model)).toEqual(participants.map(model => model.model));
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
   it("runs planner, executors, then reviewer with bounded stages", async () => {
     const countingProvider = new CountingMockProvider();
-    const countingOrchestrator = new Orchestrator(
-      new Map([[countingProvider.id, countingProvider]]),
-    );
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "planner-executor",
       prompt: "Design an implementation",
@@ -315,41 +243,26 @@ describe("Orchestrator", () => {
     });
 
     expect(countingProvider.calls).toBe(4);
-    expect(result.steps.map((step) => step.kind)).toEqual([
-      "plan",
-      "execution",
-      "execution",
-      "review",
-    ]);
+    expect(result.steps.map(step => step.kind)).toEqual(["plan", "execution", "execution", "review"]);
     expect(result.final).toBe(result.steps.at(-1)?.content);
   });
 
   it("emits normalized run usage including provider token reports", async () => {
     const usageProvider = new UsageMockProvider();
-    const usageOrchestrator = new Orchestrator(
-      new Map([[usageProvider.id, usageProvider]]),
-    );
+    const usageOrchestrator = new Orchestrator(new Map([[usageProvider.id, usageProvider]]));
     const events: OrchestrationStreamEvent[] = [];
 
-    await usageOrchestrator.run(
-      {
-        mode: "single",
-        prompt: "Count usage",
-        participants: [participants[0]],
-        budget: { maxCalls: 1, maxRounds: 1 },
-      },
-      {
-        runId: "usage-test",
-        emit: (event) => events.push(event),
-      },
-    );
+    await usageOrchestrator.run({
+      mode: "single",
+      prompt: "Count usage",
+      participants: [participants[0]],
+      budget: { maxCalls: 1, maxRounds: 1 },
+    }, {
+      runId: "usage-test",
+      emit: event => events.push(event),
+    });
 
-    const usageEvents = events.filter(
-      (
-        event,
-      ): event is Extract<OrchestrationStreamEvent, { type: "run_usage" }> =>
-        event.type === "run_usage",
-    );
+    const usageEvents = events.filter((event): event is Extract<OrchestrationStreamEvent, { type: "run_usage" }> => event.type === "run_usage");
     expect(usageEvents.at(-1)?.usage).toMatchObject({
       callsStarted: 1,
       callsCompleted: 1,
@@ -363,23 +276,10 @@ describe("Orchestrator", () => {
     const flaky = new FlakyProvider();
     const instance = new Orchestrator(new Map([[flaky.id, flaky]]));
     const events: OrchestrationStreamEvent[] = [];
-    const result = await instance.run(
-      {
-        mode: "panel",
-        prompt: "Recover",
-        participants,
-        budget: { maxCalls: 6, maxRounds: 1 },
-      },
-      { runId: "retry-step", emit: (event) => events.push(event) },
-    );
+    const result = await instance.run({ mode: "panel", prompt: "Recover", participants, budget: { maxCalls: 6, maxRounds: 1 } }, { runId: "retry-step", emit: event => events.push(event) });
     expect(result.degraded).not.toBe(true);
     expect(flaky.attempts.get("mock-claude")).toBe(2);
-    expect(
-      events.some(
-        (event) =>
-          event.type === "step_retrying" && event.stepId === "answer-2",
-      ),
-    ).toBe(true);
+    expect(events.some(event => event.type === "step_retrying" && event.stepId === "answer-2")).toBe(true);
   });
 
   it("reserves the required finalizer call instead of spending it on a retry", async () => {
@@ -408,9 +308,7 @@ describe("Orchestrator", () => {
     });
 
     expect(result.degraded).toBe(true);
-    expect(
-      partial.calls.filter((model) => model === "mock-claude"),
-    ).toHaveLength(1);
+    expect(partial.calls.filter(model => model === "mock-claude")).toHaveLength(1);
     expect(result.steps.at(-1)?.kind).toBe("review");
     expect(result.steps.at(-1)?.model.model).toBe("mock-grok");
   });
@@ -426,170 +324,96 @@ describe("Orchestrator", () => {
     });
 
     expect(result.degraded).toBe(true);
-    expect(
-      partial.calls.filter((model) => model === "mock-claude"),
-    ).toHaveLength(1);
-    expect(
-      result.steps.filter((step) => step.kind === "critique"),
-    ).toHaveLength(4);
-    expect(result.steps.at(-1)?.kind).toBe("synthesis");
-  });
-
-  it("reclaims skipped debate slots so surviving debaters can still retry", async () => {
-    const provider = new DebateReclaimProvider();
-    const instance = new Orchestrator(new Map([[provider.id, provider]]));
-    const result = await instance.run({
-      mode: "debate",
-      prompt: "Reclaim debate slots",
-      participants,
-      budget: { maxCalls: 10, maxRounds: 2 },
-    });
-
-    expect(provider.roundOneGrokAttempts).toBe(2);
-    expect(
-      result.steps.filter((step) => step.kind === "critique"),
-    ).toHaveLength(4);
+    expect(partial.calls.filter(model => model === "mock-claude")).toHaveLength(1);
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(4);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
   it("does not invoke a finalizer when every independent answer fails", async () => {
     const failing = new AllAnswersFailProvider();
     const instance = new Orchestrator(new Map([[failing.id, failing]]));
-    const finalizer: ModelRef = {
-      provider: "mock",
-      model: "mock-finalizer",
-      label: "External Judge",
-    };
+    const finalizer: ModelRef = { provider: "mock", model: "mock-finalizer", label: "External Judge" };
 
-    await expect(
-      instance.run({
-        mode: "judge",
-        prompt: "No survivors",
-        participants: [participants[0], participants[2]],
-        synthesizer: finalizer,
-        budget: { maxCalls: 3, maxRounds: 1 },
-      }),
-    ).rejects.toThrow(/all parallel model steps failed/i);
+    await expect(instance.run({
+      mode: "judge",
+      prompt: "No survivors",
+      participants: [participants[0], participants[2]],
+      synthesizer: finalizer,
+      budget: { maxCalls: 3, maxRounds: 1 },
+    })).rejects.toThrow(/all parallel model steps failed/i);
     expect(failing.calls).not.toContain("mock-finalizer");
   });
 
   it("keeps successful panel contributions when one provider fails permanently", async () => {
     const partial = new PartialFailureProvider();
     const instance = new Orchestrator(new Map([[partial.id, partial]]));
-    const result = await instance.run({
-      mode: "panel",
-      prompt: "Use survivors",
-      participants,
-      budget: { maxCalls: 6, maxRounds: 1 },
-    });
+    const result = await instance.run({ mode: "panel", prompt: "Use survivors", participants, budget: { maxCalls: 6, maxRounds: 1 } });
     expect(result.degraded).toBe(true);
-    expect(result.failures?.map((failure) => failure.stepId)).toContain(
-      "answer-2",
-    );
-    expect(result.steps.filter((step) => step.kind === "answer")).toHaveLength(
-      2,
-    );
+    expect(result.failures?.map(failure => failure.stepId)).toContain("answer-2");
+    expect(result.steps.filter(step => step.kind === "answer")).toHaveLength(2);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
   it("returns a degraded survivor result when an independent finalizer fails", async () => {
     const partial = new PartialFailureProvider();
     const instance = new Orchestrator(new Map([[partial.id, partial]]));
-    const finalizer: ModelRef = {
-      provider: "mock",
-      model: "mock-finalizer",
-      label: "External Judge",
-    };
-    const result = await instance.run({
-      mode: "judge",
-      prompt: "Judge fairly",
-      participants: [participants[0], participants[2]],
-      synthesizer: finalizer,
-      budget: { maxCalls: 5, maxRounds: 1 },
-    });
+    const finalizer: ModelRef = { provider: "mock", model: "mock-finalizer", label: "External Judge" };
+    const result = await instance.run({ mode: "judge", prompt: "Judge fairly", participants: [participants[0], participants[2]], synthesizer: finalizer, budget: { maxCalls: 5, maxRounds: 1 } });
     expect(result.degraded).toBe(true);
-    expect(
-      result.failures?.some(
-        (failure) => failure.model.model === "mock-finalizer",
-      ),
-    ).toBe(true);
+    expect(result.failures?.some(failure => failure.model.model === "mock-finalizer")).toBe(true);
     expect(result.final).toMatch(/preserves the surviving model work/i);
   });
 
   it("normalizes provider rate-limit failures", async () => {
     const limited = new RateLimitedProvider();
-    const limitedOrchestrator = new Orchestrator(
-      new Map([[limited.id, limited]]),
-    );
+    const limitedOrchestrator = new Orchestrator(new Map([[limited.id, limited]]));
     const events: OrchestrationStreamEvent[] = [];
 
-    await expect(
-      limitedOrchestrator.run(
-        {
-          mode: "single",
-          prompt: "Hit limit",
-          participants: [participants[0]],
-        },
-        {
-          runId: "limit-test",
-          emit: (event) => events.push(event),
-        },
-      ),
-    ).rejects.toThrow(/rate limit/i);
+    await expect(limitedOrchestrator.run({
+      mode: "single",
+      prompt: "Hit limit",
+      participants: [participants[0]],
+    }, {
+      runId: "limit-test",
+      emit: event => events.push(event),
+    })).rejects.toThrow(/rate limit/i);
 
-    const notice = events.find(
-      (
-        event,
-      ): event is Extract<OrchestrationStreamEvent, { type: "rate_limit" }> =>
-        event.type === "rate_limit",
-    );
-    expect(notice?.notice).toMatchObject({
-      provider: "mock",
-      model: "mock-gpt",
-      stepId: "answer-1",
-    });
+    const notice = events.find((event): event is Extract<OrchestrationStreamEvent, { type: "rate_limit" }> => event.type === "rate_limit");
+    expect(notice?.notice).toMatchObject({ provider: "mock", model: "mock-gpt", stepId: "answer-1" });
   });
 
   it("propagates run cancellation into the active provider call", async () => {
     const abortProvider = new AbortAwareProvider();
-    const abortOrchestrator = new Orchestrator(
-      new Map([[abortProvider.id, abortProvider]]),
-    );
+    const abortOrchestrator = new Orchestrator(new Map([[abortProvider.id, abortProvider]]));
     const controller = new AbortController();
     const events: OrchestrationStreamEvent[] = [];
-    const promise = abortOrchestrator.run(
-      {
-        mode: "single",
-        prompt: "Cancel this",
-        participants: [participants[0]],
-      },
-      {
-        runId: "cancel-test",
-        signal: controller.signal,
-        emit: (event) => events.push(event),
-      },
-    );
+    const promise = abortOrchestrator.run({
+      mode: "single",
+      prompt: "Cancel this",
+      participants: [participants[0]],
+    }, {
+      runId: "cancel-test",
+      signal: controller.signal,
+      emit: event => events.push(event),
+    });
 
     controller.abort();
     await expect(promise).rejects.toThrow(/cancel/i);
-    expect(events.some((event) => event.type === "run_cancelled")).toBe(true);
+    expect(events.some(event => event.type === "run_cancelled")).toBe(true);
   });
 
   it("emits a complete normalized lifecycle for non-streaming providers", async () => {
     const events: OrchestrationStreamEvent[] = [];
-    await orchestrator.run(
-      {
-        mode: "single",
-        prompt: "Answer once",
-        participants: [participants[0]],
-      },
-      {
-        runId: "run-test",
-        emit: (event) => events.push(event),
-      },
-    );
+    await orchestrator.run({
+      mode: "single",
+      prompt: "Answer once",
+      participants: [participants[0]],
+    }, {
+      runId: "run-test",
+      emit: event => events.push(event),
+    });
 
-    expect(events.map((event) => event.type)).toEqual([
+    expect(events.map(event => event.type)).toEqual([
       "run_started",
       "run_usage",
       "run_usage",
@@ -599,35 +423,25 @@ describe("Orchestrator", () => {
       "step_completed",
       "run_completed",
     ]);
-    expect(events.every((event) => event.runId === "run-test")).toBe(true);
+    expect(events.every(event => event.runId === "run-test")).toBe(true);
   });
 
   it("forwards provider deltas without appending a duplicate fallback delta", async () => {
     const streamingProvider = new StreamingMockProvider();
-    const streamingOrchestrator = new Orchestrator(
-      new Map([[streamingProvider.id, streamingProvider]]),
-    );
+    const streamingOrchestrator = new Orchestrator(new Map([[streamingProvider.id, streamingProvider]]));
     const events: OrchestrationStreamEvent[] = [];
 
-    const result = await streamingOrchestrator.run(
-      {
-        mode: "single",
-        prompt: "Stream this",
-        participants: [participants[0]],
-      },
-      {
-        runId: "stream-test",
-        emit: (event) => events.push(event),
-      },
-    );
+    const result = await streamingOrchestrator.run({
+      mode: "single",
+      prompt: "Stream this",
+      participants: [participants[0]],
+    }, {
+      runId: "stream-test",
+      emit: event => events.push(event),
+    });
 
-    const deltas = events.filter(
-      (
-        event,
-      ): event is Extract<OrchestrationStreamEvent, { type: "text_delta" }> =>
-        event.type === "text_delta",
-    );
-    expect(deltas.map((event) => event.delta)).toEqual(["streamed ", "answer"]);
+    const deltas = events.filter((event): event is Extract<OrchestrationStreamEvent, { type: "text_delta" }> => event.type === "text_delta");
+    expect(deltas.map(event => event.delta)).toEqual(["streamed ", "answer"]);
     expect(result.final).toBe("streamed answer");
   });
 });

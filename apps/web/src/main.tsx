@@ -22,73 +22,23 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { Markdown } from "./markdown";
-import {
-  CouncilWork,
-  RunConfigSummary,
-  RunSetup,
-  defaultFinalizer,
-  modeUsesSynthesizer,
-} from "./reasoning-surface";
+import { CouncilWork, RunConfigSummary, RunSetup, defaultFinalizer, modeUsesSynthesizer } from "./reasoning-surface";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
 const modes: { id: OrchestrationMode; label: string; description: string }[] = [
   { id: "single", label: "Single", description: "One model, one answer" },
-  {
-    id: "compare",
-    label: "Compare",
-    description: "Independent answers side by side",
-  },
-  {
-    id: "panel",
-    label: "Panel",
-    description: "Independent answers, then synthesis",
-  },
-  {
-    id: "debate",
-    label: "Debate",
-    description: "Challenge positions, then judge",
-  },
-  {
-    id: "critic-revise",
-    label: "Critic → Revise",
-    description: "Draft, critique, improve",
-  },
-  {
-    id: "consensus",
-    label: "Consensus",
-    description: "Find agreement, then audit it",
-  },
-  {
-    id: "judge",
-    label: "Judge",
-    description: "Generate candidates, adjudicate once",
-  },
-  {
-    id: "red-team",
-    label: "Red Team",
-    description: "Attack a draft, then harden it",
-  },
-  {
-    id: "router",
-    label: "Router",
-    description: "Choose one specialist for the task",
-  },
-  {
-    id: "research-council",
-    label: "Research Council",
-    description: "Evidence, alternatives, risks, synthesis",
-  },
-  {
-    id: "planner-executor",
-    label: "Planner → Executors",
-    description: "Plan, execute in parallel, review",
-  },
-  {
-    id: "custom",
-    label: "Custom Workflow",
-    description: "Run a reusable or edited workflow graph",
-  },
+  { id: "compare", label: "Compare", description: "Independent answers side by side" },
+  { id: "panel", label: "Panel", description: "Independent answers, then synthesis" },
+  { id: "debate", label: "Debate", description: "Challenge positions, then judge" },
+  { id: "critic-revise", label: "Critic → Revise", description: "Draft, critique, improve" },
+  { id: "consensus", label: "Consensus", description: "Find agreement, then audit it" },
+  { id: "judge", label: "Judge", description: "Generate candidates, adjudicate once" },
+  { id: "red-team", label: "Red Team", description: "Attack a draft, then harden it" },
+  { id: "router", label: "Router", description: "Choose one specialist for the task" },
+  { id: "research-council", label: "Research Council", description: "Evidence, alternatives, risks, synthesis" },
+  { id: "planner-executor", label: "Planner → Executors", description: "Plan, execute in parallel, review" },
+  { id: "custom", label: "Custom Workflow", description: "Run a reusable or edited workflow graph" },
 ];
 
 const workflowKinds = new Set([
@@ -109,59 +59,35 @@ type Theme = "dark" | "light";
 function initialTheme(): Theme {
   const saved = localStorage.getItem("conclave.theme");
   if (saved === "dark" || saved === "light") return saved;
-  return window.matchMedia?.("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
 function minimumParticipants(mode: OrchestrationMode) {
-  return mode === "consensus" ||
-    mode === "judge" ||
-    mode === "router" ||
-    mode === "research-council"
-    ? 2
-    : 1;
+  return mode === "consensus" || mode === "judge" || mode === "router" || mode === "research-council" ? 2 : 1;
 }
 
 function requiredWorkflowParticipants(workflow?: WorkflowGraph) {
   if (!workflow) return 1;
   const indices = workflow.nodes
-    .filter((node) => node?.model?.type === "participant")
-    .map((node) => (node.model.type === "participant" ? node.model.index : -1));
-  return Math.max(1, ...indices.map((index) => index + 1));
+    .filter(node => node?.model?.type === "participant")
+    .map(node => node.model.type === "participant" ? node.model.index : -1);
+  return Math.max(1, ...indices.map(index => index + 1));
 }
 
-function plannedCalls(
-  mode: OrchestrationMode,
-  participantCount: number,
-  rounds: number,
-  workflow?: WorkflowGraph,
-) {
+function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds: number, workflow?: WorkflowGraph) {
   switch (mode) {
-    case "single":
-      return 1;
-    case "compare":
-      return participantCount;
-    case "panel":
-      return participantCount + 1;
-    case "debate":
-      return participantCount + participantCount * rounds + 1;
-    case "critic-revise":
-      return 3;
-    case "consensus":
-      return participantCount + 2;
-    case "judge":
-      return participantCount + 1;
-    case "red-team":
-      return 1 + Math.max(participantCount - 1, 1) + 1;
-    case "router":
-      return 2;
-    case "research-council":
-      return participantCount + 1;
-    case "planner-executor":
-      return 1 + Math.max(participantCount - 1, 1) + 1;
-    case "custom":
-      return workflow?.nodes.length ?? 0;
+    case "single": return 1;
+    case "compare": return participantCount;
+    case "panel": return participantCount + 1;
+    case "debate": return participantCount + participantCount * rounds + 1;
+    case "critic-revise": return 3;
+    case "consensus": return participantCount + 2;
+    case "judge": return participantCount + 1;
+    case "red-team": return 1 + Math.max(participantCount - 1, 1) + 1;
+    case "router": return 2;
+    case "research-council": return participantCount + 1;
+    case "planner-executor": return 1 + Math.max(participantCount - 1, 1) + 1;
+    case "custom": return workflow?.nodes.length ?? 0;
   }
 }
 
@@ -177,16 +103,11 @@ function initialSelection(models: ModelRef[]) {
   ];
 
   return slots
-    .map((slot) => {
-      const realModels = models.filter(
-        (model) =>
-          model.provider === slot.provider && model.source === "subscription",
-      );
-      return (
-        realModels.find((model) => model.isDefault) ??
-        realModels[0] ??
-        models.find((model) => model.model === slot.mockModel)
-      );
+    .map(slot => {
+      const realModels = models.filter(model => model.provider === slot.provider && model.source === "subscription");
+      return realModels.find(model => model.isDefault)
+        ?? realModels[0]
+        ?? models.find(model => model.model === slot.mockModel);
     })
     .filter((model): model is ModelRef => Boolean(model))
     .map(modelKey);
@@ -201,13 +122,7 @@ function runtimeName(status: ProviderStatus) {
 }
 
 function freshUsage(): RunUsage {
-  return {
-    callsStarted: 0,
-    callsCompleted: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    tokenReports: 0,
-  };
+  return { callsStarted: 0, callsCompleted: 0, inputTokens: 0, outputTokens: 0, tokenReports: 0 };
 }
 
 function durationLabel(minutes?: number) {
@@ -229,197 +144,89 @@ function limitText(snapshot: ProviderLimitSnapshot) {
   if (!snapshot.available) return "";
   const windows = [snapshot.primary, snapshot.secondary]
     .filter((window): window is NonNullable<typeof window> => Boolean(window))
-    .map(
-      (window) =>
-        `${durationLabel(window.windowDurationMins)} ${window.usedPercent}% used`,
-    );
+    .map(window => `${durationLabel(window.windowDurationMins)} ${window.usedPercent}% used`);
   return windows.join(" · ");
 }
 
 async function readJson<T>(response: Response): Promise<T> {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message =
-      typeof (data as { error?: unknown }).error === "string"
-        ? (data as { error: string }).error
-        : `Request failed (${response.status})`;
+    const message = typeof (data as { error?: unknown }).error === "string"
+      ? (data as { error: string }).error
+      : `Request failed (${response.status})`;
     throw new Error(message);
   }
   return data as T;
 }
 
 function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function parseWorkflow(raw: string): { graph?: WorkflowGraph; error: string } {
-  if (!raw.trim())
-    return {
-      graph: undefined,
-      error: "Choose a preset or enter a workflow graph.",
-    };
+  if (!raw.trim()) return { graph: undefined, error: "Choose a preset or enter a workflow graph." };
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { graph: undefined, error: "Workflow JSON must be an object." };
     }
     const graph = parsed as WorkflowGraph;
-    if (
-      typeof graph.name !== "string" ||
-      !graph.name.trim() ||
-      !Array.isArray(graph.nodes) ||
-      typeof graph.outputNodeId !== "string" ||
-      !graph.outputNodeId.trim()
-    ) {
-      return {
-        graph: undefined,
-        error:
-          "Workflow JSON must include a string name, nodes array, and outputNodeId.",
-      };
+    if (typeof graph.name !== "string" || !graph.name.trim() || !Array.isArray(graph.nodes) || typeof graph.outputNodeId !== "string" || !graph.outputNodeId.trim()) {
+      return { graph: undefined, error: "Workflow JSON must include a string name, nodes array, and outputNodeId." };
     }
-    if (graph.nodes.length === 0)
-      return {
-        graph: undefined,
-        error: "Workflow must contain at least one node.",
-      };
-    if (graph.nodes.length > 64)
-      return {
-        graph: undefined,
-        error: "Workflow cannot contain more than 64 nodes.",
-      };
+    if (graph.nodes.length === 0) return { graph: undefined, error: "Workflow must contain at least one node." };
+    if (graph.nodes.length > 64) return { graph: undefined, error: "Workflow cannot contain more than 64 nodes." };
 
     const byId = new Map<string, WorkflowGraph["nodes"][number]>();
     for (const candidate of graph.nodes) {
-      if (
-        !candidate ||
-        typeof candidate !== "object" ||
-        Array.isArray(candidate)
-      ) {
-        return {
-          graph: undefined,
-          error: "Every workflow node must be an object.",
-        };
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return { graph: undefined, error: "Every workflow node must be an object." };
       }
-      if (
-        typeof candidate.id !== "string" ||
-        !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(candidate.id)
-      ) {
-        return {
-          graph: undefined,
-          error: `Invalid workflow node ID '${String(candidate.id)}'.`,
-        };
+      if (typeof candidate.id !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(candidate.id)) {
+        return { graph: undefined, error: `Invalid workflow node ID '${String(candidate.id)}'.` };
       }
-      if (byId.has(candidate.id))
-        return {
-          graph: undefined,
-          error: `Workflow node '${candidate.id}' is duplicated.`,
-        };
-      if (
-        typeof candidate.kind !== "string" ||
-        !workflowKinds.has(candidate.kind)
-      ) {
-        return {
-          graph: undefined,
-          error: `Workflow node '${candidate.id}' has unsupported kind '${String(candidate.kind)}'.`,
-        };
+      if (byId.has(candidate.id)) return { graph: undefined, error: `Workflow node '${candidate.id}' is duplicated.` };
+      if (typeof candidate.kind !== "string" || !workflowKinds.has(candidate.kind)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' has unsupported kind '${String(candidate.kind)}'.` };
       }
-      if (
-        typeof candidate.promptTemplate !== "string" ||
-        !candidate.promptTemplate.trim()
-      ) {
-        return {
-          graph: undefined,
-          error: `Workflow node '${candidate.id}' requires a string promptTemplate.`,
-        };
+      if (typeof candidate.promptTemplate !== "string" || !candidate.promptTemplate.trim()) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' requires a string promptTemplate.` };
       }
-      if (
-        !candidate.model ||
-        typeof candidate.model !== "object" ||
-        Array.isArray(candidate.model)
-      ) {
-        return {
-          graph: undefined,
-          error: `Workflow node '${candidate.id}' needs a model selector.`,
-        };
+      if (!candidate.model || typeof candidate.model !== "object" || Array.isArray(candidate.model)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' needs a model selector.` };
       }
       if (candidate.model.type === "participant") {
-        if (
-          !Number.isInteger(candidate.model.index) ||
-          candidate.model.index < 0
-        ) {
-          return {
-            graph: undefined,
-            error: `Workflow node '${candidate.id}' has an invalid participant index.`,
-          };
+        if (!Number.isInteger(candidate.model.index) || candidate.model.index < 0) {
+          return { graph: undefined, error: `Workflow node '${candidate.id}' has an invalid participant index.` };
         }
       } else if (candidate.model.type !== "synthesizer") {
-        return {
-          graph: undefined,
-          error: `Workflow node '${candidate.id}' has an unsupported model selector.`,
-        };
+        return { graph: undefined, error: `Workflow node '${candidate.id}' has an unsupported model selector.` };
       }
-      if (
-        candidate.dependsOn !== undefined &&
-        !Array.isArray(candidate.dependsOn)
-      ) {
-        return {
-          graph: undefined,
-          error: `Workflow node '${candidate.id}' dependsOn must be an array.`,
-        };
+      if (candidate.dependsOn !== undefined && !Array.isArray(candidate.dependsOn)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' dependsOn must be an array.` };
       }
-      if (
-        (candidate.dependsOn ?? []).some(
-          (dependency) => typeof dependency !== "string",
-        )
-      ) {
-        return {
-          graph: undefined,
-          error: `Workflow node '${candidate.id}' dependencies must be node IDs.`,
-        };
+      if ((candidate.dependsOn ?? []).some(dependency => typeof dependency !== "string")) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' dependencies must be node IDs.` };
       }
       byId.set(candidate.id, candidate);
     }
 
     if (!byId.has(graph.outputNodeId)) {
-      return {
-        graph: undefined,
-        error: `Workflow output node '${graph.outputNodeId}' does not exist.`,
-      };
+      return { graph: undefined, error: `Workflow output node '${graph.outputNodeId}' does not exist.` };
     }
 
     for (const node of graph.nodes) {
       const dependencies = node.dependsOn ?? [];
       if (new Set(dependencies).size !== dependencies.length) {
-        return {
-          graph: undefined,
-          error: `Workflow node '${node.id}' contains duplicate dependencies.`,
-        };
+        return { graph: undefined, error: `Workflow node '${node.id}' contains duplicate dependencies.` };
       }
       for (const dependency of dependencies) {
-        if (dependency === node.id)
-          return {
-            graph: undefined,
-            error: `Workflow node '${node.id}' cannot depend on itself.`,
-          };
-        if (!byId.has(dependency))
-          return {
-            graph: undefined,
-            error: `Workflow node '${node.id}' depends on missing node '${dependency}'.`,
-          };
+        if (dependency === node.id) return { graph: undefined, error: `Workflow node '${node.id}' cannot depend on itself.` };
+        if (!byId.has(dependency)) return { graph: undefined, error: `Workflow node '${node.id}' depends on missing node '${dependency}'.` };
       }
-      const explicitRefs = [
-        ...node.promptTemplate.matchAll(
-          /\{\{dep\.([A-Za-z][A-Za-z0-9_-]{0,63})\}\}/g,
-        ),
-      ].map((match) => match[1]);
-      const hidden = explicitRefs.find(
-        (reference) => !dependencies.includes(reference),
-      );
-      if (hidden)
-        return {
-          graph: undefined,
-          error: `Workflow node '${node.id}' references '${hidden}' without declaring it in dependsOn.`,
-        };
+      const explicitRefs = [...node.promptTemplate.matchAll(/\{\{dep\.([A-Za-z][A-Za-z0-9_-]{0,63})\}\}/g)].map(match => match[1]);
+      const hidden = explicitRefs.find(reference => !dependencies.includes(reference));
+      if (hidden) return { graph: undefined, error: `Workflow node '${node.id}' references '${hidden}' without declaring it in dependsOn.` };
     }
 
     const state = new Map<string, "visiting" | "done">();
@@ -435,40 +242,25 @@ function parseWorkflow(raw: string): { graph?: WorkflowGraph; error: string } {
       state.set(nodeId, "done");
       return true;
     };
-    if (!graph.nodes.every((node) => visit(node.id))) {
-      return {
-        graph: undefined,
-        error: "Workflow graph contains a dependency cycle.",
-      };
+    if (!graph.nodes.every(node => visit(node.id))) {
+      return { graph: undefined, error: "Workflow graph contains a dependency cycle." };
     }
 
     const outputCone = new Set<string>();
     const includeAncestors = (nodeId: string) => {
       if (outputCone.has(nodeId)) return;
       outputCone.add(nodeId);
-      for (const dependency of byId.get(nodeId)?.dependsOn ?? [])
-        includeAncestors(dependency);
+      for (const dependency of byId.get(nodeId)?.dependsOn ?? []) includeAncestors(dependency);
     };
     includeAncestors(graph.outputNodeId);
-    const unused = graph.nodes
-      .filter((node) => !outputCone.has(node.id))
-      .map((node) => node.id);
+    const unused = graph.nodes.filter(node => !outputCone.has(node.id)).map(node => node.id);
     if (unused.length > 0) {
-      return {
-        graph: undefined,
-        error: `Workflow node${unused.length === 1 ? "" : "s"} not connected to output: ${unused.join(", ")}.`,
-      };
+      return { graph: undefined, error: `Workflow node${unused.length === 1 ? "" : "s"} not connected to output: ${unused.join(", ")}.` };
     }
 
     return { graph, error: "" };
   } catch (cause) {
-    return {
-      graph: undefined,
-      error:
-        cause instanceof Error
-          ? `Invalid workflow JSON: ${cause.message}`
-          : "Invalid workflow JSON.",
-    };
+    return { graph: undefined, error: cause instanceof Error ? `Invalid workflow JSON: ${cause.message}` : "Invalid workflow JSON." };
   }
 }
 
@@ -479,9 +271,7 @@ function App() {
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [providersLoading, setProvidersLoading] = useState(true);
   const [providersError, setProvidersError] = useState("");
-  const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>(
-    [],
-  );
+  const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);
   const [workflowPresets, setWorkflowPresets] = useState<WorkflowPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [workflowText, setWorkflowText] = useState("");
@@ -550,53 +340,36 @@ function App() {
   }, [inspectorOpen, activeRunId, loading]);
 
   const participants = useMemo(
-    () =>
-      selected
-        .map((key) => models.find((model) => modelKey(model) === key))
-        .filter((model): model is ModelRef => Boolean(model)),
+    () => selected
+      .map(key => models.find(model => modelKey(model) === key))
+      .filter((model): model is ModelRef => Boolean(model)),
     [models, selected],
   );
   const selectedSynthesizer = synthesizerKey
-    ? models.find((model) => modelKey(model) === synthesizerKey)
+    ? models.find(model => modelKey(model) === synthesizerKey)
     : undefined;
   const effectiveSynthesizer = modeUsesSynthesizer(mode)
-    ? (selectedSynthesizer ?? defaultFinalizer(mode, participants, models))
+    ? selectedSynthesizer ?? defaultFinalizer(mode, participants, models)
     : undefined;
-  const workflowState = useMemo(
-    () => parseWorkflow(workflowText),
-    [workflowText],
-  );
+  const workflowState = useMemo(() => parseWorkflow(workflowText), [workflowText]);
   const activeWorkflow = mode === "custom" ? workflowState.graph : undefined;
   const workflowInvalid = mode === "custom" && !activeWorkflow;
-  const requiredParticipants =
-    mode === "custom"
-      ? requiredWorkflowParticipants(activeWorkflow)
-      : minimumParticipants(mode);
+  const requiredParticipants = mode === "custom"
+    ? requiredWorkflowParticipants(activeWorkflow)
+    : minimumParticipants(mode);
   const participantShortfall = participants.length < requiredParticipants;
-  const expectedCalls = plannedCalls(
-    mode,
-    participants.length,
-    maxRounds,
-    activeWorkflow,
-  );
-  const budgetShortfall =
-    !participantShortfall && !workflowInvalid && expectedCalls > maxCalls;
+  const expectedCalls = plannedCalls(mode, participants.length, maxRounds, activeWorkflow);
+  const budgetShortfall = !participantShortfall && !workflowInvalid && expectedCalls > maxCalls;
 
   const priorMessages = useMemo(
-    () =>
-      conversation?.messages.filter(
-        (message) =>
-          !(message.runId === activeRunId && message.role === "assistant"),
-      ) ?? [],
+    () => conversation?.messages.filter(
+      message => !(message.runId === activeRunId && message.role === "assistant"),
+    ) ?? [],
     [conversation, activeRunId],
   );
 
-  const subscriptionProviders = providers.filter(
-    (provider) => provider.id !== "mock",
-  );
-  const connectedProviders = subscriptionProviders.filter(
-    (provider) => provider.connected,
-  );
+  const subscriptionProviders = providers.filter(provider => provider.id !== "mock");
+  const connectedProviders = subscriptionProviders.filter(provider => provider.connected);
   const runtimeLabel = providersLoading
     ? "Checking subscription runtimes…"
     : connectedProviders.length > 0
@@ -606,22 +379,12 @@ function App() {
         : "Subscription runtimes not connected · mocks active";
   const runtimeTitle = providersLoading
     ? "Checking local subscription runtimes…"
-    : providersError ||
-      subscriptionProviders
-        .map(
-          (provider) =>
-            `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`,
-        )
-        .join("\n");
-  const quotaSummary = providerLimits
-    .map(limitText)
-    .filter(Boolean)
-    .join(" · ");
+    : providersError || subscriptionProviders
+      .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
+      .join("\n");
+  const quotaSummary = providerLimits.map(limitText).filter(Boolean).join(" · ");
   const quotaTitle = providerLimits
-    .map(
-      (snapshot) =>
-        `${snapshot.provider}: ${limitText(snapshot) || snapshot.message || "structured limits unavailable"}`,
-    )
+    .map(snapshot => `${snapshot.provider}: ${limitText(snapshot) || snapshot.message || "structured limits unavailable"}`)
     .join("\n");
 
   function beginViewOperation() {
@@ -637,9 +400,7 @@ function App() {
 
   function setPreset(presetId: string) {
     setSelectedPresetId(presetId);
-    const preset = workflowPresetsRef.current.find(
-      (item) => item.id === presetId,
-    );
+    const preset = workflowPresetsRef.current.find(item => item.id === presetId);
     if (preset) setWorkflowText(JSON.stringify(preset.graph, null, 2));
   }
 
@@ -649,25 +410,19 @@ function App() {
     setCancelling(run.status === "cancelling");
     setMode(run.request.mode);
     setSelected(run.request.participants.map(modelKey));
-    setSynthesizerKey(
-      run.request.synthesizer ? modelKey(run.request.synthesizer) : "",
-    );
+    setSynthesizerKey(run.request.synthesizer ? modelKey(run.request.synthesizer) : "");
     setMaxCalls(run.request.budget?.maxCalls ?? 12);
     setMaxRounds(run.request.budget?.maxRounds ?? run.request.maxRounds ?? 1);
     if (run.request.mode === "custom" && run.request.workflow) {
       setWorkflowText(JSON.stringify(run.request.workflow, null, 2));
-      const preset = workflowPresetsRef.current.find(
-        (item) => item.graph.id && item.graph.id === run.request.workflow?.id,
-      );
+      const preset = workflowPresetsRef.current.find(item => item.graph.id && item.graph.id === run.request.workflow?.id);
       setSelectedPresetId(preset?.id ?? "");
     }
   }
 
   async function refreshLimits(epoch?: number) {
     try {
-      const limits = await fetch(`${API}/provider-limits`).then((response) =>
-        readJson<ProviderLimitSnapshot[]>(response),
-      );
+      const limits = await fetch(`${API}/provider-limits`).then(response => readJson<ProviderLimitSnapshot[]>(response));
       if (epoch === undefined || isCurrent(epoch)) setProviderLimits(limits);
     } catch {
       // Quota telemetry is optional; a provider/runtime can omit it without
@@ -681,19 +436,13 @@ function App() {
       setModelsError("");
     }
     try {
-      const data = await fetch(`${API}/models`).then((response) =>
-        readJson<ModelRef[]>(response),
-      );
+      const data = await fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response));
       if (!isCurrent(epoch)) return;
       setModels(data);
-      setSelected((current) =>
-        current.length > 0 ? current : initialSelection(data),
-      );
+      setSelected(current => current.length > 0 ? current : initialSelection(data));
     } catch (cause) {
       if (!isCurrent(epoch)) return;
-      setModelsError(
-        cause instanceof Error ? cause.message : "Could not load models.",
-      );
+      setModelsError(cause instanceof Error ? cause.message : "Could not load models.");
     } finally {
       if (isCurrent(epoch)) setModelsLoading(false);
     }
@@ -705,19 +454,13 @@ function App() {
       setProvidersError("");
     }
     try {
-      const data = await fetch(`${API}/providers`).then((response) =>
-        readJson<ProviderStatus[]>(response),
-      );
+      const data = await fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response));
       if (!isCurrent(epoch)) return;
       setProviders(data);
     } catch (cause) {
       if (!isCurrent(epoch)) return;
       setProviders([]);
-      setProvidersError(
-        cause instanceof Error
-          ? cause.message
-          : "Could not load runtime status.",
-      );
+      setProvidersError(cause instanceof Error ? cause.message : "Could not load runtime status.");
     } finally {
       if (isCurrent(epoch)) setProvidersLoading(false);
     }
@@ -735,11 +478,9 @@ function App() {
     void refreshRuntimeCatalog(epoch);
     try {
       const [conversationData, presetData] = await Promise.all([
-        fetch(`${API}/conversations`).then((response) =>
-          readJson<ConversationSummary[]>(response),
-        ),
+        fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),
         fetch(`${API}/workflow-presets`)
-          .then((response) => readJson<WorkflowPreset[]>(response))
+          .then(response => readJson<WorkflowPreset[]>(response))
           .catch(() => [] as WorkflowPreset[]),
       ]);
       if (!isCurrent(epoch)) return;
@@ -752,32 +493,21 @@ function App() {
       }
 
       const rememberedRun = localStorage.getItem("conclave.activeRunId");
-      const rememberedConversation = localStorage.getItem(
-        "conclave.conversationId",
-      );
+      const rememberedConversation = localStorage.getItem("conclave.conversationId");
       if (rememberedRun) {
         await recoverRun(rememberedRun, epoch);
-      } else if (
-        rememberedConversation &&
-        conversationData.some((item) => item.id === rememberedConversation)
-      ) {
+      } else if (rememberedConversation && conversationData.some(item => item.id === rememberedConversation)) {
         await loadConversation(rememberedConversation, epoch);
       }
     } catch (cause) {
       if (isCurrent(epoch)) {
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "Could not load local conversation history.",
-        );
+        setError(cause instanceof Error ? cause.message : "Could not load local conversation history.");
       }
     }
   }
 
   async function refreshConversations(epoch?: number) {
-    const data = await fetch(`${API}/conversations`).then((response) =>
-      readJson<ConversationSummary[]>(response),
-    );
+    const data = await fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response));
     if (epoch === undefined || isCurrent(epoch)) setConversations(data);
   }
 
@@ -797,18 +527,14 @@ function App() {
       setInspectorOpen(false);
     }
 
-    const data = await fetch(`${API}/conversations/${id}`).then((response) =>
-      readJson<Conversation>(response),
-    );
+    const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
     if (!isCurrent(epoch)) return;
     setConversation(data);
     setSetupOpen(false);
     localStorage.setItem("conclave.conversationId", id);
 
     if (data.lastRunId) {
-      const run = await fetch(`${API}/runs/${data.lastRunId}`).then(
-        (response) => readJson<StoredRun>(response),
-      );
+      const run = await fetch(`${API}/runs/${data.lastRunId}`).then(response => readJson<StoredRun>(response));
       if (!isCurrent(epoch)) return;
       adoptRun(run);
       setActiveRunId(run.id);
@@ -817,7 +543,7 @@ function App() {
         setError("");
         setResult(run.result);
         setLiveSteps(run.result.steps);
-        setCompletedStepIds(run.result.steps.map((step) => step.id));
+        setCompletedStepIds(run.result.steps.map(step => step.id));
         setResumeRunId(null);
       } else if (["running", "queued", "cancelling"].includes(run.status)) {
         await recoverRun(run.id, epoch);
@@ -843,17 +569,13 @@ function App() {
   async function recoverRun(runId: string, existingEpoch?: number) {
     const epoch = existingEpoch ?? beginViewOperation();
     try {
-      const run = await fetch(`${API}/runs/${runId}`).then((response) =>
-        readJson<StoredRun>(response),
-      );
+      const run = await fetch(`${API}/runs/${runId}`).then(response => readJson<StoredRun>(response));
       if (!isCurrent(epoch)) return;
       adoptRun(run);
       setActiveRunId(run.id);
       localStorage.setItem("conclave.activeRunId", run.id);
       localStorage.setItem("conclave.conversationId", run.conversationId);
-      const thread = await fetch(
-        `${API}/conversations/${run.conversationId}`,
-      ).then((response) => readJson<Conversation>(response));
+      const thread = await fetch(`${API}/conversations/${run.conversationId}`).then(response => readJson<Conversation>(response));
       if (!isCurrent(epoch)) return;
       setConversation(thread);
       setSetupOpen(false);
@@ -862,7 +584,7 @@ function App() {
         setError("");
         setResult(run.result);
         setLiveSteps(run.result.steps);
-        setCompletedStepIds(run.result.steps.map((step) => step.id));
+        setCompletedStepIds(run.result.steps.map(step => step.id));
         setLoading(false);
         setCancelling(false);
         setResumeRunId(null);
@@ -882,23 +604,18 @@ function App() {
       setResult(null);
       setLiveSteps([]);
       setCompletedStepIds([]);
-      setError(
-        run.status === "cancelling" ? "Stopping the active provider call…" : "",
-      );
+      setError(run.status === "cancelling" ? "Stopping the active provider call…" : "");
       setResumeRunId(null);
       setLoading(true);
       const attached = await consumeRun(run.id, epoch);
-      if (attached && isCurrent(epoch))
-        await refreshConversation(run.conversationId, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(run.conversationId, epoch);
     } finally {
       if (isCurrent(epoch)) setLoading(false);
     }
   }
 
   async function refreshConversation(id: string, epoch?: number) {
-    const data = await fetch(`${API}/conversations/${id}`).then((response) =>
-      readJson<Conversation>(response),
-    );
+    const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
     if (epoch !== undefined && !isCurrent(epoch)) return;
     setConversation(data);
     await refreshConversations(epoch);
@@ -930,20 +647,18 @@ function App() {
     setMode(nextMode);
     if (nextMode === "single") {
       setSynthesizerKey("");
-      setSelected((current) => {
-        const model =
-          current[0] ?? (models[0] ? modelKey(models[0]) : undefined);
+      setSelected(current => {
+        const model = current[0] ?? (models[0] ? modelKey(models[0]) : undefined);
         return model ? [model] : [];
       });
       return;
     }
 
-    const minimum =
-      nextMode === "custom"
-        ? requiredWorkflowParticipants(parseWorkflow(workflowText).graph)
-        : minimumParticipants(nextMode);
+    const minimum = nextMode === "custom"
+      ? requiredWorkflowParticipants(parseWorkflow(workflowText).graph)
+      : minimumParticipants(nextMode);
     if (minimum > 1) {
-      setSelected((current) => {
+      setSelected(current => {
         const next = [...current];
         for (const model of models) {
           const key = modelKey(model);
@@ -961,10 +676,10 @@ function App() {
       setSelected([key]);
       return;
     }
-    setSelected((current) => {
+    setSelected(current => {
       if (current.includes(key)) {
         if (synthesizerKey === key) setSynthesizerKey("");
-        return current.filter((id) => id !== key);
+        return current.filter(id => id !== key);
       }
       return [...current, key];
     });
@@ -989,79 +704,46 @@ function App() {
     }
 
     if (streamEvent.type === "step_started") {
-      setCompletedStepIds((current) =>
-        current.filter((id) => id !== streamEvent.stepId),
-      );
-      setLiveSteps((current) =>
-        current.some((step) => step.id === streamEvent.stepId)
-          ? current
-          : [
-              ...current,
-              {
-                id: streamEvent.stepId,
-                kind: streamEvent.kind,
-                model: streamEvent.model,
-                content: "",
-                dependsOn: streamEvent.dependsOn,
-              },
-            ],
-      );
+      setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
+      setLiveSteps(current => current.some(step => step.id === streamEvent.stepId)
+        ? current
+        : [...current, {
+            id: streamEvent.stepId,
+            kind: streamEvent.kind,
+            model: streamEvent.model,
+            content: "",
+            dependsOn: streamEvent.dependsOn,
+          }]);
       return;
     }
 
     if (streamEvent.type === "step_retrying") {
-      setCompletedStepIds((current) =>
-        current.filter((id) => id !== streamEvent.stepId),
-      );
-      setLiveSteps((current) =>
-        current.map((step) =>
-          step.id === streamEvent.stepId ? { ...step, content: "" } : step,
-        ),
-      );
-      return;
-    }
-
-    if (streamEvent.type === "step_failed") {
-      setCompletedStepIds((current) =>
-        current.filter((id) => id !== streamEvent.failure.stepId),
-      );
-      setLiveSteps((current) =>
-        current.filter((step) => step.id !== streamEvent.failure.stepId),
-      );
+      setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
+      setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
+        ? { ...step, content: "" }
+        : step));
       return;
     }
 
     if (streamEvent.type === "text_delta") {
-      setLiveSteps((current) =>
-        current.map((step) =>
-          step.id === streamEvent.stepId
-            ? { ...step, content: step.content + streamEvent.delta }
-            : step,
-        ),
-      );
+      setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
+        ? { ...step, content: step.content + streamEvent.delta }
+        : step));
       return;
     }
 
     if (streamEvent.type === "step_completed") {
-      setLiveSteps((current) =>
-        current.some((step) => step.id === streamEvent.step.id)
-          ? current.map((step) =>
-              step.id === streamEvent.step.id ? streamEvent.step : step,
-            )
-          : [...current, streamEvent.step],
-      );
-      setCompletedStepIds((current) =>
-        current.includes(streamEvent.step.id)
-          ? current
-          : [...current, streamEvent.step.id],
-      );
+      setLiveSteps(current => current.some(step => step.id === streamEvent.step.id)
+        ? current.map(step => step.id === streamEvent.step.id ? streamEvent.step : step)
+        : [...current, streamEvent.step]);
+      setCompletedStepIds(current => current.includes(streamEvent.step.id) ? current : [...current, streamEvent.step.id]);
       return;
     }
 
     if (streamEvent.type === "run_completed") {
       setResult(streamEvent.result);
       setLiveSteps(streamEvent.result.steps);
-      setCompletedStepIds(streamEvent.result.steps.map((step) => step.id));
+      setCompletedStepIds(streamEvent.result.steps.map(step => step.id));
       setResumeRunId(null);
       setCancelling(false);
       return;
@@ -1077,9 +759,7 @@ function App() {
     setLiveSteps([]);
     setCompletedStepIds([]);
 
-    const response = await fetch(
-      `${API}/runs/${runId}/events?after=0&follow=0`,
-    );
+    const response = await fetch(`${API}/runs/${runId}/events?after=0&follow=0`);
     if (!response.ok) await readJson(response);
     const body = await response.text();
     if (!isCurrent(epoch)) return false;
@@ -1102,23 +782,18 @@ function App() {
     try {
       while (isCurrent(epoch) && !controller.signal.aborted) {
         try {
-          const response = await fetch(
-            `${API}/runs/${runId}/events?after=${cursor}&follow=1`,
-            {
-              signal: controller.signal,
-            },
-          );
+          const response = await fetch(`${API}/runs/${runId}/events?after=${cursor}&follow=1`, {
+            signal: controller.signal,
+          });
           if (!response.ok) await readJson(response);
-          if (!response.body)
-            throw new Error("This browser did not expose the response stream.");
+          if (!response.body) throw new Error("This browser did not expose the response stream.");
 
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
           const consumeLine = (line: string) => {
             const trimmed = line.trim();
-            if (!trimmed || !isCurrent(epoch) || controller.signal.aborted)
-              return;
+            if (!trimmed || !isCurrent(epoch) || controller.signal.aborted) return;
             const record = JSON.parse(trimmed) as RunEventRecord;
             cursor = Math.max(cursor, record.seq);
             applyStreamEvent(record.event);
@@ -1126,9 +801,7 @@ function App() {
 
           while (true) {
             const { done, value } = await reader.read();
-            buffer += decoder.decode(value ?? new Uint8Array(), {
-              stream: !done,
-            });
+            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
             const lines = buffer.split("\n");
             buffer = lines.pop() ?? "";
             for (const line of lines) consumeLine(line);
@@ -1143,9 +816,8 @@ function App() {
 
         let run!: StoredRun;
         try {
-          run = await fetch(`${API}/runs/${runId}`, {
-            signal: controller.signal,
-          }).then((next) => readJson<StoredRun>(next));
+          run = await fetch(`${API}/runs/${runId}`, { signal: controller.signal })
+            .then(next => readJson<StoredRun>(next));
         } catch (cause) {
           if (controller.signal.aborted || !isCurrent(epoch)) return false;
           await sleep(600);
@@ -1161,7 +833,7 @@ function App() {
             setError("");
             setResult(run.result);
             setLiveSteps(run.result.steps);
-            setCompletedStepIds(run.result.steps.map((step) => step.id));
+            setCompletedStepIds(run.result.steps.map(step => step.id));
           }
           setResumeRunId(null);
           await refreshLimits(epoch);
@@ -1183,37 +855,17 @@ function App() {
     }
   }
 
-  function handlePromptKeyDown(
-    event: React.KeyboardEvent<HTMLTextAreaElement>,
-  ) {
-    if (
-      event.key !== "Enter" ||
-      event.shiftKey ||
-      event.nativeEvent.isComposing
-    )
-      return;
+  function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    if (
-      !loading &&
-      prompt.trim() &&
-      !participantShortfall &&
-      !budgetShortfall &&
-      !workflowInvalid
-    ) {
+    if (!loading && prompt.trim() && !participantShortfall && !budgetShortfall && !workflowInvalid) {
       composerRef.current?.requestSubmit();
     }
   }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (
-      !prompt.trim() ||
-      participantShortfall ||
-      budgetShortfall ||
-      workflowInvalid ||
-      loading
-    )
-      return;
+    if (!prompt.trim() || participantShortfall || budgetShortfall || workflowInvalid || loading) return;
     const epoch = beginViewOperation();
     setLoading(true);
     setCancelling(false);
@@ -1242,7 +894,7 @@ function App() {
             budget: { maxCalls, maxRounds },
           },
         }),
-      }).then((response) => readJson<StartRunResponse>(response));
+      }).then(response => readJson<StartRunResponse>(response));
       if (!isCurrent(epoch)) return;
 
       setSetupOpen(false);
@@ -1253,13 +905,10 @@ function App() {
       await refreshConversation(started.conversationId, epoch);
       if (!isCurrent(epoch)) return;
       const attached = await consumeRun(started.runId, epoch);
-      if (attached && isCurrent(epoch))
-        await refreshConversation(started.conversationId, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(started.conversationId, epoch);
     } catch (cause) {
       if (isCurrent(epoch)) {
-        setError(
-          cause instanceof Error ? cause.message : "Orchestration failed",
-        );
+        setError(cause instanceof Error ? cause.message : "Orchestration failed");
       }
     } finally {
       if (isCurrent(epoch)) {
@@ -1276,9 +925,8 @@ function App() {
     setCancelling(true);
     setError("Stopping the active provider call…");
     try {
-      const run = await fetch(`${API}/runs/${runId}/cancel`, {
-        method: "POST",
-      }).then((response) => readJson<StoredRun>(response));
+      const run = await fetch(`${API}/runs/${runId}/cancel`, { method: "POST" })
+        .then(response => readJson<StoredRun>(response));
       if (!isCurrent(epoch)) return;
       setRunUsage(run.usage ?? freshUsage());
       if (run.status === "completed") {
@@ -1287,7 +935,7 @@ function App() {
         if (run.result) {
           setResult(run.result);
           setLiveSteps(run.result.steps);
-          setCompletedStepIds(run.result.steps.map((step) => step.id));
+          setCompletedStepIds(run.result.steps.map(step => step.id));
         }
       }
     } catch (cause) {
@@ -1312,47 +960,33 @@ function App() {
     setInspection(null);
     setInspectorOpen(false);
     try {
-      const resumed = await fetch(`${API}/runs/${runId}/resume`, {
-        method: "POST",
-      }).then((response) => readJson<StartRunResponse>(response));
+      const resumed = await fetch(`${API}/runs/${runId}/resume`, { method: "POST" })
+        .then(response => readJson<StartRunResponse>(response));
       if (!isCurrent(epoch)) return;
       setActiveRunId(resumed.runId);
       setResumeRunId(null);
       localStorage.setItem("conclave.activeRunId", resumed.runId);
       localStorage.setItem("conclave.conversationId", resumed.conversationId);
       const attached = await consumeRun(resumed.runId, epoch);
-      if (attached && isCurrent(epoch))
-        await refreshConversation(resumed.conversationId, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(resumed.conversationId, epoch);
     } catch (cause) {
       if (isCurrent(epoch)) {
-        setError(
-          cause instanceof Error ? cause.message : "Could not resume run",
-        );
+        setError(cause instanceof Error ? cause.message : "Could not resume run");
       }
     } finally {
       if (isCurrent(epoch)) setLoading(false);
     }
   }
 
-  async function refreshInspector(
-    runId: string,
-    epoch: number,
-    showLoading: boolean,
-  ) {
+  async function refreshInspector(runId: string, epoch: number, showLoading: boolean) {
     if (showLoading && isCurrent(epoch)) setInspectorLoading(true);
     try {
-      const data = await fetch(`${API}/runs/${runId}/inspection`).then(
-        (response) => readJson<RunInspection>(response),
-      );
+      const data = await fetch(`${API}/runs/${runId}/inspection`).then(response => readJson<RunInspection>(response));
       if (!isCurrent(epoch)) return;
       setInspection(data);
     } catch (cause) {
       if (showLoading && isCurrent(epoch)) {
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "Could not load run inspection",
-        );
+        setError(cause instanceof Error ? cause.message : "Could not load run inspection");
       }
     } finally {
       if (showLoading && isCurrent(epoch)) setInspectorLoading(false);
@@ -1370,13 +1004,10 @@ function App() {
   }
 
   const displayedSteps = result?.steps ?? liveSteps;
-  const tokenText =
-    runUsage.tokenReports > 0
-      ? `${runUsage.inputTokens.toLocaleString()} in · ${runUsage.outputTokens.toLocaleString()} out`
-      : "token telemetry unavailable";
-  const selectedPreset = workflowPresets.find(
-    (item) => item.id === selectedPresetId,
-  );
+  const tokenText = runUsage.tokenReports > 0
+    ? `${runUsage.inputTokens.toLocaleString()} in · ${runUsage.outputTokens.toLocaleString()} out`
+    : "token telemetry unavailable";
+  const selectedPreset = workflowPresets.find(item => item.id === selectedPresetId);
 
   return (
     <main className="shell">
@@ -1386,20 +1017,14 @@ function App() {
           <h1>Conclave</h1>
           <p className="muted">Many models. One reasoning space.</p>
         </div>
-        <button className="new-chat" onClick={newConversation}>
-          + New conversation
-        </button>
+        <button className="new-chat" onClick={newConversation}>+ New conversation</button>
         {conversations.length > 0 && (
           <div className="conversation-list">
             <span className="eyebrow">RECENT</span>
-            {conversations.slice(0, 8).map((item) => (
+            {conversations.slice(0, 8).map(item => (
               <button
                 key={item.id}
-                className={
-                  conversation?.id === item.id
-                    ? "conversation-link active"
-                    : "conversation-link"
-                }
+                className={conversation?.id === item.id ? "conversation-link active" : "conversation-link"}
                 onClick={() => void loadConversation(item.id)}
                 title={item.title}
               >
@@ -1409,30 +1034,23 @@ function App() {
             ))}
           </div>
         )}
-        {quotaSummary && (
-          <div className="quota" title={quotaTitle}>
-            {quotaSummary}
-          </div>
-        )}
+        {quotaSummary && <div className="quota" title={quotaTitle}>{quotaSummary}</div>}
         <div className="sidebar-footer">
           <button
             className="theme-toggle"
             type="button"
             aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
             title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-            onClick={() =>
-              setTheme((current) => (current === "dark" ? "light" : "dark"))
-            }
+            onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
           >
             {theme === "dark" ? "☀" : "☾"}
           </button>
-          <div className="status" title={runtimeTitle}>
-            <span className="dot" /> {runtimeLabel}
-          </div>
+          <div className="status" title={runtimeTitle}><span className="dot" /> {runtimeLabel}</div>
         </div>
       </aside>
 
       <section className="workspace">
+
         <div className="content">
           {setupOpen && (
             <RunSetup
@@ -1443,9 +1061,7 @@ function App() {
               models={models}
               modelsLoading={modelsLoading}
               modelsError={modelsError}
-              onRetryModels={() =>
-                void refreshRuntimeCatalog(viewEpochRef.current)
-              }
+              onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current)}
               selectedKeys={selected}
               participants={participants}
               onToggleModel={toggleModel}
@@ -1465,34 +1081,19 @@ function App() {
                 <div>
                   <span className="eyebrow">WORKFLOW GRAPH</span>
                   <h3>{activeWorkflow?.name ?? "Custom workflow"}</h3>
-                  <p>
-                    {activeWorkflow?.description ??
-                      selectedPreset?.description ??
-                      "Build a bounded dependency graph for this run."}
-                  </p>
+                  <p>{activeWorkflow?.description ?? selectedPreset?.description ?? "Build a bounded dependency graph for this run."}</p>
                 </div>
                 <label className="workflow-preset-picker">
                   <span>Preset</span>
-                  <select
-                    value={selectedPresetId}
-                    disabled={loading}
-                    onChange={(event) => setPreset(event.target.value)}
-                  >
+                  <select value={selectedPresetId} disabled={loading} onChange={event => setPreset(event.target.value)}>
                     <option value="">Edited / custom</option>
-                    {workflowPresets.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.name}
-                      </option>
-                    ))}
+                    {workflowPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
                   </select>
                 </label>
               </div>
               <div className="workflow-summary">
                 <span>{activeWorkflow?.nodes.length ?? 0} nodes</span>
-                <span>
-                  {requiredParticipants} participant slot
-                  {requiredParticipants === 1 ? "" : "s"}
-                </span>
+                <span>{requiredParticipants} participant slot{requiredParticipants === 1 ? "" : "s"}</span>
                 <span>output · {activeWorkflow?.outputNodeId ?? "—"}</span>
               </div>
               <details className="workflow-editor">
@@ -1501,81 +1102,47 @@ function App() {
                   value={workflowText}
                   disabled={loading}
                   spellCheck={false}
-                  onChange={(event) => {
+                  onChange={event => {
                     setWorkflowText(event.target.value);
                     setSelectedPresetId("");
                   }}
                 />
-                {workflowState.error && (
-                  <div className="workflow-error">{workflowState.error}</div>
-                )}
-                <p>
-                  Templates support <code>{"{{prompt}}"}</code>,{" "}
-                  <code>{"{{dependencies}}"}</code>, and declared{" "}
-                  <code>{"{{dep.nodeId}}"}</code> references.
-                </p>
+                {workflowState.error && <div className="workflow-error">{workflowState.error}</div>}
+                <p>Templates support <code>{"{{prompt}}"}</code>, <code>{"{{dependencies}}"}</code>, and declared <code>{"{{dep.nodeId}}"}</code> references.</p>
               </details>
             </section>
           )}
 
           {priorMessages.length > 0 && (
-            <section
-              className="conversation-history"
-              aria-label="Conversation history"
-            >
-              {priorMessages.map((message) => (
+            <section className="conversation-history" aria-label="Conversation history">
+              {priorMessages.map(message => (
                 <article key={message.id} className={`message ${message.role}`}>
-                  <span className="eyebrow">
-                    {message.role === "user" ? "YOU" : "CONCLAVE"}
-                  </span>
+                  <span className="eyebrow">{message.role === "user" ? "YOU" : "CONCLAVE"}</span>
                   <Markdown content={message.content} />
                 </article>
               ))}
             </section>
           )}
 
-          {!result &&
-            !loading &&
-            displayedSteps.length === 0 &&
-            priorMessages.length === 0 &&
-            mode !== "custom" &&
-            !setupOpen && (
-              <section className="hero">
-                <span className="eyebrow">CONVENE THE COUNCIL</span>
-                <h3>Ask once. Let different minds work the problem.</h3>
-                <p>
-                  Compare, debate, route to a specialist, red-team a draft,
-                  build consensus, or run a plan through executors and review.
-                </p>
-              </section>
-            )}
+          {!result && !loading && displayedSteps.length === 0 && priorMessages.length === 0 && mode !== "custom" && !setupOpen && (
+            <section className="hero">
+              <span className="eyebrow">CONVENE THE COUNCIL</span>
+              <h3>Ask once. Let different minds work the problem.</h3>
+              <p>Compare, debate, route to a specialist, red-team a draft, build consensus, or run a plan through executors and review.</p>
+            </section>
+          )}
 
           {loading && displayedSteps.length === 0 && (
-            <div className="thinking">
-              <span /> <span /> <span />{" "}
-              {cancelling
-                ? "Stopping provider work…"
-                : "Run continues even if this tab disconnects…"}
-            </div>
+            <div className="thinking"><span /> <span /> <span /> {cancelling ? "Stopping provider work…" : "Run continues even if this tab disconnects…"}</div>
           )}
           {error && (
             <div className="error">
               <span>{error}</span>
-              {resumeRunId && !loading && (
-                <button
-                  type="button"
-                  onClick={() => void resumeInterruptedRun()}
-                >
-                  Resume run
-                </button>
-              )}
+              {resumeRunId && !loading && <button type="button" onClick={() => void resumeInterruptedRun()}>Resume run</button>}
             </div>
           )}
           {rateLimit && (
-            <div className="rate-limit">
-              Rate limit · {rateLimit.provider}/{rateLimit.model}:{" "}
-              {rateLimit.message}
-            </div>
+            <div className="rate-limit">Rate limit · {rateLimit.provider}/{rateLimit.model}: {rateLimit.message}</div>
           )}
 
           {inspectorOpen && (
@@ -1586,85 +1153,39 @@ function App() {
                   <h3>{inspection?.run.request.mode ?? mode}</h3>
                 </div>
                 <div className="inspector-head-actions">
-                  {inspection && (
-                    <span
-                      className={`run-state state-${inspection.run.status}`}
-                    >
-                      {inspection.run.status}
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    className="drawer-close"
-                    aria-label="Close run details"
-                    onClick={() => setInspectorOpen(false)}
-                  >
-                    ×
-                  </button>
+                  {inspection && <span className={`run-state state-${inspection.run.status}`}>{inspection.run.status}</span>}
+                  <button type="button" className="drawer-close" aria-label="Close run details" onClick={() => setInspectorOpen(false)}>×</button>
                 </div>
               </div>
-              {inspectorLoading && (
-                <p className="muted">Loading persisted attempts…</p>
-              )}
-              {inspection?.attempts.map((attempt) => (
-                <details
-                  className="attempt-card"
-                  key={attempt.attempt}
-                  open={attempt.attempt === inspection.run.attempt}
-                >
+              {inspectorLoading && <p className="muted">Loading persisted attempts…</p>}
+              {inspection?.attempts.map(attempt => (
+                <details className="attempt-card" key={attempt.attempt} open={attempt.attempt === inspection.run.attempt}>
                   <summary>
                     <strong>Attempt {attempt.attempt}</strong>
                     <span>{attempt.status}</span>
                     <span>{elapsedLabel(attempt.durationMs)}</span>
                     <span>{attempt.usage.callsStarted} calls</span>
-                    {attempt.usage.tokenReports > 0 && (
-                      <span>
-                        {attempt.usage.inputTokens} in /{" "}
-                        {attempt.usage.outputTokens} out
-                      </span>
-                    )}
+                    {attempt.usage.tokenReports > 0 && <span>{attempt.usage.inputTokens} in / {attempt.usage.outputTokens} out</span>}
                   </summary>
-                  {attempt.error && (
-                    <div className="attempt-error">{attempt.error}</div>
-                  )}
-                  {attempt.rateLimit && (
-                    <div className="attempt-rate-limit">
-                      {attempt.rateLimit.provider}/{attempt.rateLimit.model} ·{" "}
-                      {attempt.rateLimit.message}
-                    </div>
-                  )}
+                  {attempt.error && <div className="attempt-error">{attempt.error}</div>}
+                  {attempt.rateLimit && <div className="attempt-rate-limit">{attempt.rateLimit.provider}/{attempt.rateLimit.model} · {attempt.rateLimit.message}</div>}
                   <div className="inspection-steps">
-                    {attempt.steps.map((step) => (
+                    {attempt.steps.map(step => (
                       <div className="inspection-step" key={step.id}>
                         <div>
                           <strong>{step.id}</strong>
-                          <span>
-                            {step.kind ?? "step"} ·{" "}
-                            {step.model?.label ?? "model pending"}
-                          </span>
+                          <span>{step.kind ?? "step"} · {step.model?.label ?? "model pending"}</span>
                         </div>
                         <div className="inspection-step-meta">
                           <span>{step.status}</span>
-                          {step.attempts && step.attempts > 1 && (
-                            <span>{step.attempts} attempts</span>
-                          )}
+                          {step.attempts && step.attempts > 1 && <span>{step.attempts} attempts</span>}
                           <span>{elapsedLabel(step.durationMs)}</span>
-                          {(step.inputTokens !== undefined ||
-                            step.outputTokens !== undefined) && (
-                            <span>
-                              {step.inputTokens ?? 0} in /{" "}
-                              {step.outputTokens ?? 0} out
-                            </span>
+                          {(step.inputTokens !== undefined || step.outputTokens !== undefined) && (
+                            <span>{step.inputTokens ?? 0} in / {step.outputTokens ?? 0} out</span>
                           )}
                         </div>
-                        {step.error && (
-                          <small className="inspection-step-error">
-                            {step.error}
-                          </small>
-                        )}
-                        {step.dependsOn.length > 0 && (
-                          <small>after → {step.dependsOn.join(" · ")}</small>
-                        )}
+                        {step.error && <small className="inspection-step-error">{step.error}</small>}
+                        {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
                       </div>
                     ))}
                   </div>
@@ -1681,38 +1202,20 @@ function App() {
                   <Markdown content={result.final} />
                 </div>
               )}
-              {result?.degraded &&
-                result.failures &&
-                result.failures.length > 0 && (
-                  <div className="degraded-result">
-                    <strong>Completed with partial provider failures</strong>
-                    <span>
-                      {result.failures
-                        .map(
-                          (failure: StepFailure) =>
-                            `${failure.model.label}: ${failure.message}`,
-                        )
-                        .join(" · ")}
-                    </span>
-                  </div>
-                )}
-              <div className="run-telemetry">
-                <span>
-                  {runUsage.callsStarted}/{maxCalls} calls started
-                </span>
+              {result?.degraded && result.failures && result.failures.length > 0 && (
+      <div className="degraded-result">
+        <strong>Completed with partial provider failures</strong>
+        <span>{result.failures.map((failure: StepFailure) => `${failure.model.label}: ${failure.message}`).join(" · ")}</span>
+      </div>
+    )}
+    <div className="run-telemetry">
+                <span>{runUsage.callsStarted}/{maxCalls} calls started</span>
                 <span>{runUsage.callsCompleted} completed</span>
                 <span>{tokenText}</span>
               </div>
-              {loading && (
-                <div className="stream-status">
-                  <span className="dot" />{" "}
-                  {cancelling ? "Cancelling…" : "Live · persisted locally"}
-                </div>
-              )}
+              {loading && <div className="stream-status"><span className="dot" /> {cancelling ? "Cancelling…" : "Live · persisted locally"}</div>}
               {!loading && resumeRunId && displayedSteps.length > 0 && (
-                <div className="stream-status">
-                  Partial output · previous attempt
-                </div>
+                <div className="stream-status">Partial output · previous attempt</div>
               )}
               <CouncilWork
                 steps={displayedSteps}
@@ -1732,57 +1235,35 @@ function App() {
             participants={participants}
             models={models}
             synthesizer={effectiveSynthesizer}
-            onConfigure={() => setSetupOpen((current) => !current)}
+            onConfigure={() => setSetupOpen(current => !current)}
             onInspect={toggleInspector}
             canInspect={Boolean(activeRunId)}
           />
           <textarea
             ref={promptRef}
             value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={event => setPrompt(event.target.value)}
             onKeyDown={handlePromptKeyDown}
-            placeholder={
-              conversation
-                ? "Continue the conversation…"
-                : mode === "custom"
-                  ? "Give this workflow a task…"
-                  : "Ask the council…"
-            }
+            placeholder={conversation ? "Continue the conversation…" : mode === "custom" ? "Give this workflow a task…" : "Ask the council…"}
             rows={1}
           />
           <div className="composer-footer">
-            <span className="composer-hint">
-              {workflowInvalid
-                ? workflowState.error
-                : participantShortfall
-                  ? `${requiredParticipants} participants required for ${modes.find((item) => item.id === mode)?.label}`
-                  : budgetShortfall
-                    ? `Increase call budget to at least ${expectedCalls}`
-                    : conversation
-                      ? "Persistent conversation · Enter sends · Shift+Enter newline"
-                      : `${participants.length} participant${participants.length === 1 ? "" : "s"} · Enter sends`}
-            </span>
+            <span className="composer-hint">{workflowInvalid
+              ? workflowState.error
+              : participantShortfall
+                ? `${requiredParticipants} participants required for ${modes.find(item => item.id === mode)?.label}`
+                : budgetShortfall
+                  ? `Increase call budget to at least ${expectedCalls}`
+                  : conversation
+                    ? "Persistent conversation · Enter sends · Shift+Enter newline"
+                    : `${participants.length} participant${participants.length === 1 ? "" : "s"} · Enter sends`}</span>
             <div className="composer-actions">
               {loading && (
-                <button
-                  className="stop-run"
-                  type="button"
-                  disabled={cancelling}
-                  onClick={() => void cancelActiveRun()}
-                >
+                <button className="stop-run" type="button" disabled={cancelling} onClick={() => void cancelActiveRun()}>
                   {cancelling ? "Stopping…" : "Stop"}
                 </button>
               )}
-              <button
-                type="submit"
-                disabled={
-                  loading ||
-                  !prompt.trim() ||
-                  participantShortfall ||
-                  budgetShortfall ||
-                  workflowInvalid
-                }
-              >
+              <button type="submit" disabled={loading || !prompt.trim() || participantShortfall || budgetShortfall || workflowInvalid}>
                 {loading ? "Running…" : "Convene"}
               </button>
             </div>
@@ -1793,8 +1274,4 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
