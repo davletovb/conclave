@@ -38,6 +38,8 @@ The adapters are intentionally subscription-first. Conclave refuses OpenAI API-k
 
 Claude paid plans can separately enable Anthropic **usage credits**. If usage credits are enabled on the Claude account, Anthropic may use them after included subscription limits are exhausted. That is an account-level Claude setting; Conclave cannot override it.
 
+Conclave also has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`) and delivered to the browser over newline-delimited JSON. OpenAI Codex and Grok ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
+
 ## Run locally
 
 Requirements: Node.js 22+ and pnpm 10+.
@@ -51,6 +53,8 @@ pnpm dev
 - Server: `http://localhost:8787`
 
 Override the server URL with `VITE_CONCLAVE_API` when needed.
+
+The normal request endpoint remains available at `POST /orchestrate`. The web app uses `POST /orchestrate/stream`, which responds as `application/x-ndjson` and renders each step while it is still running.
 
 ## Connect your ChatGPT subscription
 
@@ -127,7 +131,7 @@ GitHub Actions runs the same checks on pull requests.
 1. ✅ OpenAI adapter via subscription-authenticated Codex runtime
 2. ✅ Anthropic adapter via subscription-authenticated Claude Code runtime
 3. ✅ xAI adapter via Grok Build ACP runtime
-4. Streaming event protocol for partial output and tool calls
+4. ✅ Normalized streaming event protocol for partial output and future tool events
 5. Persistent conversations and resumable orchestration runs
 6. Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
 7. Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
