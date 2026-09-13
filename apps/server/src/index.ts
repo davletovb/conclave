@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import type { OrchestrationRequest, ProviderStatus } from "@conclave/core";
+import type { OrchestrationRequest, ProviderAdapter, ProviderStatus } from "@conclave/core";
 import { MockProvider } from "./providers/mock.js";
 import { OpenAICodexProvider } from "./providers/openai-codex.js";
 import { Orchestrator } from "./orchestrator.js";
@@ -10,10 +10,11 @@ await app.register(cors, { origin: true });
 
 const mock = new MockProvider();
 const openai = new OpenAICodexProvider();
-const orchestrator = new Orchestrator(new Map([
+const providers = new Map<string, ProviderAdapter>([
   [mock.id, mock],
   [openai.id, openai],
-]));
+]);
+const orchestrator = new Orchestrator(providers);
 
 app.get("/health", async () => ({ ok: true }));
 
