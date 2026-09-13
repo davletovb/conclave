@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ModelRef, OrchestrationMode, OrchestrationResult, ProviderStatus } from "@conclave/core";
+import type { ModelRef, OrchestrationMode, OrchestrationResult, ProviderId, ProviderStatus } from "@conclave/core";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -17,13 +17,29 @@ function modelKey(model: ModelRef) {
 }
 
 function initialSelection(models: ModelRef[]) {
-  const subscriptionModels = models.filter(model => model.source === "subscription");
-  if (subscriptionModels.length === 0) return models.map(modelKey);
+  const slots: Array<{ provider: ProviderId; mockModel: string }> = [
+    { provider: "openai", mockModel: "mock-gpt" },
+    { provider: "anthropic", mockModel: "mock-claude" },
+    { provider: "xai", mockModel: "mock-grok" },
+  ];
 
-  const primary = subscriptionModels.find(model => model.isDefault) ?? subscriptionModels[0];
-  const mockClaude = models.find(model => model.model === "mock-claude");
-  const mockGrok = models.find(model => model.model === "mock-grok");
-  return [primary, mockClaude, mockGrok].filter((model): model is ModelRef => Boolean(model)).map(modelKey);
+  return slots
+    .map(slot => {
+      const realModels = models.filter(model => model.provider === slot.provider && model.source === "subscription");
+      return realModels.find(model => model.isDefault)
+        ?? realModels[0]
+        ?? models.find(model => model.model === slot.mockModel);
+    })
+    .filter((model): model is ModelRef => Boolean(model))
+    .map(modelKey);
+}
+
+function runtimeName(status: ProviderStatus) {
+  const plan = status.planType ? ` ${status.planType}` : "";
+  if (status.id === "openai") return `ChatGPT${plan}`;
+  if (status.id === "anthropic") return `Claude${plan}`;
+  if (status.id === "xai") return `Grok${plan}`;
+  return status.label;
 }
 
 function App() {
@@ -54,10 +70,14 @@ function App() {
     [models, selected],
   );
 
-  const openaiStatus = providers.find(provider => provider.id === "openai");
-  const runtimeLabel = openaiStatus?.connected
-    ? `ChatGPT ${openaiStatus.planType ?? ""} connected`.replace("  ", " ")
-    : "OpenAI not connected · mocks active";
+  const subscriptionProviders = providers.filter(provider => provider.id !== "mock");
+  const connectedProviders = subscriptionProviders.filter(provider => provider.connected);
+  const runtimeLabel = connectedProviders.length > 0
+    ? `${connectedProviders.map(runtimeName).join(" · ")} connected`
+    : "Subscription runtimes not connected · mocks active";
+  const runtimeTitle = subscriptionProviders
+    .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
+    .join("\n");
 
   function selectMode(nextMode: OrchestrationMode) {
     setMode(nextMode);
@@ -116,7 +136,7 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="status" title={openaiStatus?.message}><span className="dot" /> {runtimeLabel}</div>
+        <div className="status" title={runtimeTitle}><span className="dot" /> {runtimeLabel}</div>
       </aside>
 
       <section className="workspace">
