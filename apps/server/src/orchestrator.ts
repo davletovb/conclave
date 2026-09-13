@@ -110,30 +110,42 @@ export class Orchestrator {
 
   private validateWorkflow(request: OrchestrationRequest): WorkflowGraph {
     const graph = request.workflow;
-    if (!graph) throw new Error("Custom mode requires a workflow graph");
-    if (!graph.name?.trim()) throw new Error("Workflow name is required");
+    if (!graph || typeof graph !== "object") throw new Error("Custom mode requires a workflow graph");
+    if (typeof graph.name !== "string" || !graph.name.trim()) throw new Error("Workflow name is required");
+    if (typeof graph.outputNodeId !== "string" || !graph.outputNodeId.trim()) {
+      throw new Error("Workflow outputNodeId is required");
+    }
     if (!Array.isArray(graph.nodes) || graph.nodes.length === 0) {
       throw new Error("Workflow must contain at least one node");
     }
     if (graph.nodes.length > 64) throw new Error("Workflow cannot contain more than 64 nodes");
 
     const byId = new Map<string, WorkflowNode>();
-    for (const node of graph.nodes) {
-      if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(node.id)) {
-        throw new Error(`Workflow node ID '${node.id}' must start with a letter and contain only letters, numbers, _ or -`);
+    for (const candidate of graph.nodes) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        throw new Error("Every workflow node must be an object");
+      }
+      const node = candidate as WorkflowNode;
+      if (typeof node.id !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(node.id)) {
+        throw new Error(`Workflow node ID '${String(node.id)}' must start with a letter and contain only letters, numbers, _ or -`);
       }
       if (byId.has(node.id)) throw new Error(`Workflow node ID '${node.id}' is duplicated`);
-      if (!workflowKinds.has(node.kind)) {
+      if (typeof node.kind !== "string" || !workflowKinds.has(node.kind as OrchestrationStepKind)) {
         throw new Error(`Workflow node '${node.id}' has unsupported kind '${String(node.kind)}'`);
       }
-      if (!node.promptTemplate?.trim()) throw new Error(`Workflow node '${node.id}' requires a prompt template`);
+      if (typeof node.promptTemplate !== "string" || !node.promptTemplate.trim()) {
+        throw new Error(`Workflow node '${node.id}' requires a string prompt template`);
+      }
       if (node.promptTemplate.length > 20_000) throw new Error(`Workflow node '${node.id}' prompt template is too long`);
+      if (!node.model || typeof node.model !== "object" || Array.isArray(node.model)) {
+        throw new Error(`Workflow node '${node.id}' has an unsupported model selector`);
+      }
 
-      if (node.model?.type === "participant") {
+      if (node.model.type === "participant") {
         if (!Number.isInteger(node.model.index) || node.model.index < 0 || node.model.index >= request.participants.length) {
           throw new Error(`Workflow node '${node.id}' requires participant ${node.model.index + 1}, but only ${request.participants.length} participant${request.participants.length === 1 ? " is" : "s are"} selected`);
         }
-      } else if (node.model?.type !== "synthesizer") {
+      } else if (node.model.type !== "synthesizer") {
         throw new Error(`Workflow node '${node.id}' has an unsupported model selector`);
       }
       byId.set(node.id, node);
@@ -146,6 +158,9 @@ export class Orchestrator {
     for (const node of graph.nodes) {
       const dependencies = node.dependsOn ?? [];
       if (!Array.isArray(dependencies)) throw new Error(`Workflow node '${node.id}' dependsOn must be an array`);
+      if (dependencies.some(dependency => typeof dependency !== "string")) {
+        throw new Error(`Workflow node '${node.id}' dependencies must be node IDs`);
+      }
       if (new Set(dependencies).size !== dependencies.length) {
         throw new Error(`Workflow node '${node.id}' contains duplicate dependencies`);
       }
@@ -182,6 +197,20 @@ export class Orchestrator {
       }
     }
     if (visited !== graph.nodes.length) throw new Error("Workflow graph contains a dependency cycle");
+
+    const outputCone = new Set<string>();
+    const includeAncestors = (nodeId: string) => {
+      if (outputCone.has(nodeId)) return;
+      outputCone.add(nodeId);
+      const node = byId.get(nodeId);
+      for (const dependency of node?.dependsOn ?? []) includeAncestors(dependency);
+    };
+    includeAncestors(graph.outputNodeId);
+    const unused = graph.nodes.filter(node => !outputCone.has(node.id)).map(node => node.id);
+    if (unused.length > 0) {
+      throw new Error(`Workflow contains node${unused.length === 1 ? "" : "s"} not connected to output '${graph.outputNodeId}': ${unused.join(", ")}`);
+    }
+
     return graph;
   }
 
@@ -222,6 +251,11 @@ export class Orchestrator {
         throw new Error(`Run budget allows ${maxCalls} model call${maxCalls === 1 ? "" : "s"}, but ${request.mode} requires ${planned} with the current participants and rounds.`);
       }
     }
+  }
+
+  validateRequest(request: OrchestrationRequest) {
+    this.validateShape(request);
+    this.enforceBudget(request);
   }
 
   private throwIfCancelled(context: RunContext) {
@@ -328,18 +362,21 @@ export class Orchestrator {
       context.emit?.({ type: "step_completed", runId: context.runId, step });
       return step;
     } catch (error) {
-      if (!context.signal?.aborted && isRateLimitError(error)) {
-        context.emit?.({
-          type: "rate_limit",
-          runId: context.runId,
-          notice: {
-            provider: spec.model.provider,
-            model: spec.model.model,
-            stepId: spec.id,
-            message: errorMessage(error),
-            at: new Date().toISOString(),
-          },
-        });
+      if (!context.signal?.aborted) {
+        if (isRateLimitError(error)) {
+          context.emit?.({
+            type: "rate_limit",
+            runId: context.runId,
+            notice: {
+              provider: spec.model.provider,
+              model: spec.model.model,
+              stepId: spec.id,
+              message: errorMessage(error),
+              at: new Date().toISOString(),
+            },
+          });
+        }
+        context.emit?.({ type: "error", runId: context.runId, stepId: spec.id, message: errorMessage(error) });
       }
       throw error;
     }
@@ -473,8 +510,7 @@ export class Orchestrator {
     this.emitUsage(context);
 
     try {
-      this.validateShape(request);
-      this.enforceBudget(request);
+      this.validateRequest(request);
       this.throwIfCancelled(context);
 
       const complete = (result: OrchestrationResult) => {
