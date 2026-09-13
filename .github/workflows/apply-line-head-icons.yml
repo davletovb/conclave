@@ -6,7 +6,6 @@ permissions:
   contents: write
 jobs:
   apply:
-    if: ${{ github.event.head_commit.message == 'chore apply line-head model icons' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,34 +15,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Move provider marks to activity line heads
+      - name: Apply icon treatment
         run: |
           python - <<'PY'
           from pathlib import Path
           p = Path('apps/web/src/reasoning-surface.tsx')
           s = p.read_text()
-          s = s.replace('export function ProviderMark({ provider }: { provider: ModelRef["provider"] }) {\n  const mark = provider === "openai" ? "◎" : provider === "anthropic" ? "A" : provider === "xai" ? "x" : "M";\n  return <span className={`provider-mark provider-${provider}`} aria-label={providerText(provider)} title={providerText(provider)}>{mark}</span>;\n}', 'export function ProviderMark({ provider, active = false }: { provider: ModelRef["provider"]; active?: boolean }) {\n  const mark = provider === "openai" ? "◎" : provider === "anthropic" ? "A" : provider === "xai" ? "x" : "M";\n  return (\n    <span className={`provider-mark provider-${provider}${active ? " active" : ""}`} aria-label={providerText(provider)} title={providerText(provider)}>\n      <span className="provider-mark-glyph">{mark}</span>\n    </span>\n  );\n}', 1)
+          old = 'export function ProviderMark({ provider }: { provider: ModelRef["provider"] }) {\n  const mark = provider === "openai" ? "◎" : provider === "anthropic" ? "A" : provider === "xai" ? "x" : "M";\n  return <span className={`provider-mark provider-${provider}`} aria-label={providerText(provider)} title={providerText(provider)}>{mark}</span>;\n}'
+          new = 'export function ProviderMark({ provider, active = false }: { provider: ModelRef["provider"]; active?: boolean }) {\n  const mark = provider === "openai" ? "◎" : provider === "anthropic" ? "A" : provider === "xai" ? "x" : "M";\n  return <span className={`provider-mark provider-${provider}${active ? " active" : ""}`} aria-label={providerText(provider)} title={providerText(provider)}><span className="provider-mark-glyph">{mark}</span></span>;\n}'
+          if old not in s:
+              raise SystemExit('ProviderMark anchor not found')
+          s = s.replace(old, new, 1)
           old = '<span className="member-chevron">›</span>\n                <ModelIdentity model={step.model} compact />\n                <span className="member-role">{stepRole(step)}</span>'
           new = '<span className="member-chevron">›</span>\n                <ProviderMark provider={step.model.provider} active={status === "working" || status === "streaming"} />\n                <span className="member-model-name">{step.model.label}</span>\n                <span className="member-role">{stepRole(step)}</span>'
           if old not in s:
               raise SystemExit('member line anchor not found')
           p.write_text(s.replace(old, new, 1))
-
           css = Path('apps/web/src/styles.css')
           styles = css.read_text()
-          styles += '''
-
-/* model activity line heads */
-.member-line > summary { grid-template-columns: 16px 28px minmax(120px, 1fr) minmax(86px, auto) auto auto auto; }
-.member-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-card); }
-.member-line > summary .provider-mark { width: 26px; height: 26px; border-radius: 50%; position: relative; }
-.provider-mark-glyph { position: relative; z-index: 1; }
-.provider-mark.active::after { content: ""; position: absolute; inset: -4px; border: 1px solid var(--link); border-radius: 50%; opacity: .7; animation: model-activity-pulse 1.35s ease-out infinite; }
-@keyframes model-activity-pulse { 0% { transform: scale(.82); opacity: .75; } 75%, 100% { transform: scale(1.25); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .provider-mark.active::after { animation: none; opacity: .45; } }
-@media (max-width: 980px) { .member-line > summary { grid-template-columns: 16px 28px minmax(110px, 1fr) auto auto; } .member-role, .member-stat { display: none; } }
-@media (max-width: 760px) { .member-line > summary { grid-template-columns: 16px 28px minmax(0, 1fr) auto; } .member-role, .member-stat { display: none; } }
-'''
+          styles += '\n\n/* model activity line heads */\n.member-line > summary { grid-template-columns: 16px 28px minmax(120px, 1fr) minmax(86px, auto) auto auto auto; }\n.member-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-card); }\n.member-line > summary .provider-mark { width: 26px; height: 26px; border-radius: 50%; position: relative; }\n.provider-mark-glyph { position: relative; z-index: 1; }\n.provider-mark.active::after { content: ""; position: absolute; inset: -4px; border: 1px solid var(--link); border-radius: 50%; opacity: .7; animation: model-activity-pulse 1.35s ease-out infinite; }\n@keyframes model-activity-pulse { 0% { transform: scale(.82); opacity: .75; } 75%, 100% { transform: scale(1.25); opacity: 0; } }\n@media (prefers-reduced-motion: reduce) { .provider-mark.active::after { animation: none; opacity: .45; } }\n@media (max-width: 980px) { .member-line > summary { grid-template-columns: 16px 28px minmax(110px, 1fr) auto auto; } .member-role, .member-stat { display: none; } }\n@media (max-width: 760px) { .member-line > summary { grid-template-columns: 16px 28px minmax(0, 1fr) auto; } .member-role, .member-stat { display: none; } }\n'
           css.write_text(styles)
           PY
       - run: pnpm install --no-frozen-lockfile
