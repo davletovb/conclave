@@ -22,6 +22,7 @@ jobs:
         run: |
           if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
           python scripts/pr14_review_fix.py
+          python scripts/pr14_escape_fix.py
       - name: Format orchestrator
         run: |
           if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
