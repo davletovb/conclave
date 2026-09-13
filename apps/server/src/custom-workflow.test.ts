@@ -22,6 +22,33 @@ class RecordingProvider extends MockProvider {
   }
 }
 
+class SchedulingProvider extends MockProvider {
+  started: string[] = [];
+  slowReleased = false;
+  private releaseSlow!: () => void;
+  private readonly slowGate = new Promise<void>(resolve => { this.releaseSlow = resolve; });
+
+  release() {
+    this.slowReleased = true;
+    this.releaseSlow();
+  }
+
+  override async generate(request: ProviderRequest) {
+    const prompt = request.messages.at(-1)?.content ?? "";
+    this.started.push(prompt);
+    if (prompt === "slow-root") await this.slowGate;
+    return super.generate(request);
+  }
+}
+
+async function waitFor(predicate: () => boolean) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  throw new Error("condition was not reached");
+}
+
 const graph: WorkflowGraph = {
   name: "Parallel then synthesize",
   outputNodeId: "final",
@@ -84,6 +111,53 @@ describe("custom workflow graphs", () => {
     expect(started?.dependsOn).toEqual(["left", "right"]);
   });
 
+  it("does not recursively expand placeholder-like text inserted from the user prompt", async () => {
+    const provider = new RecordingProvider();
+    const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
+
+    await orchestrator.run({
+      mode: "custom",
+      prompt: "Explain {{dependencies}} and {{dep.other}} literally",
+      participants: [participants[0]],
+      workflow: {
+        name: "Literal placeholders",
+        outputNodeId: "only",
+        nodes: [
+          { id: "only", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: "{{prompt}}" },
+        ],
+      },
+    });
+
+    expect(provider.calls[0]?.messages.at(-1)?.content).toBe("Explain {{dependencies}} and {{dep.other}} literally");
+  });
+
+  it("starts a dependent as soon as its own prerequisite finishes", async () => {
+    const provider = new SchedulingProvider();
+    const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
+    const run = orchestrator.run({
+      mode: "custom",
+      prompt: "schedule",
+      participants,
+      workflow: {
+        name: "Independent branches",
+        outputNodeId: "final",
+        nodes: [
+          { id: "slow", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: "slow-root" },
+          { id: "fast", kind: "answer", model: { type: "participant", index: 1 }, promptTemplate: "fast-root" },
+          { id: "next", kind: "research", model: { type: "participant", index: 1 }, dependsOn: ["fast"], promptTemplate: "after-fast" },
+          { id: "final", kind: "synthesis", model: { type: "participant", index: 0 }, dependsOn: ["slow", "next"], promptTemplate: "final" },
+        ],
+      },
+      budget: { maxCalls: 4, maxRounds: 1 },
+    });
+
+    await waitFor(() => provider.started.includes("after-fast"));
+    expect(provider.slowReleased).toBe(false);
+    provider.release();
+    await run;
+    expect(provider.started.indexOf("after-fast")).toBeLessThan(provider.started.indexOf("final"));
+  });
+
   it("rejects cycles before spending provider calls", async () => {
     const provider = new RecordingProvider();
     const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
@@ -101,6 +175,27 @@ describe("custom workflow graphs", () => {
         ],
       },
     })).rejects.toThrow(/cycle/i);
+
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("rejects unsupported node kinds before spending provider calls", async () => {
+    const provider = new RecordingProvider();
+    const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
+    const invalid = {
+      name: "Invalid kind",
+      outputNodeId: "bad",
+      nodes: [
+        { id: "bad", kind: "arbitrary", model: { type: "participant", index: 0 }, promptTemplate: "No" },
+      ],
+    } as unknown as WorkflowGraph;
+
+    await expect(orchestrator.run({
+      mode: "custom",
+      prompt: "Do not run",
+      participants,
+      workflow: invalid,
+    })).rejects.toThrow(/unsupported kind/i);
 
     expect(provider.calls).toHaveLength(0);
   });
