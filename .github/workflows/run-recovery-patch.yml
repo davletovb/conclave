@@ -33,6 +33,16 @@ jobs:
           body = body.replace(r'debateTranscript += "\n\n" +', r'debateTranscript += "\\n\\n" +')
           body = body.replace(r'.join("\n\n");', r'.join("\\n\\n");')
           exec(compile(body, 'apply-recovery.py', 'exec'))
+
+          tests = Path('apps/server/src/orchestrator.test.ts')
+          text = tests.read_text().replace('return super.generate(request, emit);', 'return super.generate(request);')
+          tests.write_text(text)
+
+          orchestrator = Path('apps/server/src/orchestrator.ts')
+          text = orchestrator.read_text()
+          duplicate = '      const failures: StepFailure[] = [...independentOutcome.failures];\n      const independent = await this.independentAnswers(request, context);\n'
+          text = text.replace(duplicate, '      const failures: StepFailure[] = [...independentOutcome.failures];\n', 1)
+          orchestrator.write_text(text)
           PY
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
