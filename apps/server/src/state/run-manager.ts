@@ -43,6 +43,7 @@ export class RunManager {
   async start(input: StartRunRequest): Promise<StartRunResponse> {
     const request = this.normalizeRequest(input.request);
     this.validate(request);
+    this.orchestrator.validateRequest(request);
     const reservedConversationId = input.conversationId;
     if (reservedConversationId) this.reserveConversation(reservedConversationId);
 
@@ -61,6 +62,9 @@ export class RunManager {
   async resume(runId: string): Promise<StartRunResponse> {
     const existing = await this.store.getRun(runId);
     if (!existing) throw new Error(`Run ${runId} was not found`);
+    const request = this.normalizeRequest(existing.request);
+    this.validate(request);
+    this.orchestrator.validateRequest(request);
     this.reserveConversation(existing.conversationId);
 
     try {
@@ -122,9 +126,9 @@ export class RunManager {
   }
 
   async inspect(runId: string) {
+    await this.flush(runId);
     const run = await this.store.getRun(runId);
     if (!run) return null;
-    await this.flush(runId);
     return inspectRun(this.store, run);
   }
 
