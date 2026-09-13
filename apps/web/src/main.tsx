@@ -365,7 +365,7 @@ function App() {
 
         if (controller.signal.aborted || !isCurrent(epoch)) return false;
 
-        let run: StoredRun | null = null;
+        let run!: StoredRun;
         try {
           run = await fetch(`${API}/runs/${runId}`, { signal: controller.signal })
             .then(next => readJson<StoredRun>(next));
