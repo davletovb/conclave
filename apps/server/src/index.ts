@@ -4,6 +4,7 @@ import type {
   OrchestrationRequest,
   OrchestrationStreamEvent,
   ProviderAdapter,
+  ProviderLimitSnapshot,
   ProviderStatus,
   RunEventRecord,
   StartRunRequest,
@@ -70,6 +71,28 @@ app.get("/providers", async (): Promise<ProviderStatus[]> => {
   ];
 });
 
+app.get("/provider-limits", async (): Promise<ProviderLimitSnapshot[]> => {
+  const openaiLimits = await openai.limits().catch(error => ({
+    provider: "openai" as const,
+    available: false,
+    message: error instanceof Error ? error.message : "OpenAI rate limits unavailable",
+  }));
+
+  return [
+    openaiLimits,
+    {
+      provider: "anthropic",
+      available: false,
+      message: "Claude Code does not expose a stable structured subscription-limit snapshot to Conclave.",
+    },
+    {
+      provider: "xai",
+      available: false,
+      message: "Grok Build ACP does not expose a stable structured subscription-limit snapshot to Conclave.",
+    },
+  ];
+});
+
 app.get("/models", async () => {
   const mockModels = await mock.listModels();
   const [openaiModels, anthropicModels, xaiModels] = await Promise.all([
@@ -113,6 +136,16 @@ app.get<{ Params: { id: string } }>("/runs/:id", async (request, reply) => {
   return run;
 });
 
+app.post<{ Params: { id: string } }>("/runs/:id/cancel", async (request, reply) => {
+  try {
+    return await runManager.cancel(request.params.id);
+  } catch (error) {
+    return reply.code(409).send({
+      error: error instanceof Error ? error.message : "Could not cancel run",
+    });
+  }
+});
+
 app.post<{ Params: { id: string } }>("/runs/:id/resume", async (request, reply) => {
   try {
     return await runManager.resume(request.params.id);
@@ -145,7 +178,11 @@ app.get<{
   let replaying = true;
   let closed = false;
   const buffered: RunEventRecord[] = [];
-  const terminal = (record: RunEventRecord) => record.event.type === "run_completed" || record.event.type === "error";
+  const terminal = (record: RunEventRecord) => (
+    record.event.type === "run_completed"
+    || record.event.type === "run_cancelled"
+    || record.event.type === "error"
+  );
   const write = (record: RunEventRecord) => {
     if (closed || record.seq <= cursor || raw.destroyed || raw.writableEnded) return;
     cursor = record.seq;
@@ -173,7 +210,7 @@ app.get<{
     for (const record of buffered.sort((a, b) => a.seq - b.seq)) write(record);
 
     const latest = await runManager.getRun(run.id);
-    if (!follow || !latest || ["completed", "failed", "interrupted"].includes(latest.status)) finish();
+    if (!follow || !latest || ["completed", "failed", "interrupted", "cancelled"].includes(latest.status)) finish();
   } catch (error) {
     request.log.error(error);
     finish();
