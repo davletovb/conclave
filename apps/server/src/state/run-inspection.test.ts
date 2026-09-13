@@ -36,7 +36,9 @@ describe("run inspection", () => {
       { seq: 1, attempt: 1, at: "2026-09-13T00:00:00.000Z", event: { type: "run_started", runId, mode: "single" } },
       { seq: 2, attempt: 1, at: "2026-09-13T00:00:01.000Z", event: { type: "step_started", runId, stepId: "answer-1", kind: "answer", model } },
       { seq: 3, attempt: 1, at: "2026-09-13T00:00:02.000Z", event: { type: "run_usage", runId, usage: { callsStarted: 1, callsCompleted: 0, inputTokens: 10, outputTokens: 3, tokenReports: 1 } } },
-      { seq: 4, attempt: 1, at: "2026-09-13T00:00:03.000Z", event: { type: "error", runId, stepId: "answer-1", message: "temporary failure" } },
+      // The orchestrator's terminal error is run-level and may not identify the
+      // provider step that was active when it failed.
+      { seq: 4, attempt: 1, at: "2026-09-13T00:00:03.000Z", event: { type: "error", runId, message: "temporary failure" } },
     ];
     for (const record of first) await store.appendRunEvent(record);
     await store.updateRun(runId, { status: "failed", error: "temporary failure" });
