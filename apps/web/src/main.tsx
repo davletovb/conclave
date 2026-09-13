@@ -181,6 +181,7 @@ function App() {
       setActiveRunId(run.id);
       localStorage.setItem("conclave.activeRunId", run.id);
       if (run.status === "completed" && run.result) {
+        setError("");
         setResult(run.result);
         setLiveSteps(run.result.steps);
         setResumeRunId(null);
@@ -193,6 +194,7 @@ function App() {
         setError(run.error ?? "This run was interrupted before it completed.");
       }
     } else {
+      setError("");
       setActiveRunId(null);
       setResult(null);
       setLiveSteps([]);
@@ -214,6 +216,7 @@ function App() {
       setConversation(thread);
 
       if (run.status === "completed" && run.result) {
+        setError("");
         setResult(run.result);
         setLiveSteps(run.result.steps);
         setLoading(false);
@@ -378,6 +381,7 @@ function App() {
         if (!isCurrent(epoch)) return false;
         if (run.status === "completed") {
           if (run.result) {
+            setError("");
             setResult(run.result);
             setLiveSteps(run.result.steps);
           }
