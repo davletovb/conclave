@@ -19,9 +19,9 @@ const participants: ModelRef[] = [
 class CountingMockProvider extends MockProvider {
   calls = 0;
 
-  override async generate(request: ProviderRequest) {
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
     this.calls += 1;
-    return super.generate(request);
+    return super.generate(request, emit);
   }
 }
 
@@ -31,6 +31,34 @@ class StreamingMockProvider extends MockProvider {
     emit?.({ type: "text_delta", delta: "answer" });
     const response = await super.generate(request);
     return { ...response, content: "streamed answer" };
+  }
+}
+
+class UsageMockProvider extends MockProvider {
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    emit?.({ type: "usage", inputTokens: 10, outputTokens: 2 });
+    emit?.({ type: "usage", inputTokens: 10, outputTokens: 5 });
+    return super.generate(request);
+  }
+}
+
+class RateLimitedProvider extends MockProvider {
+  override async generate() {
+    throw new Error("Rate limit exceeded; try again later");
+  }
+}
+
+class AbortAwareProvider extends MockProvider {
+  override async generate(request: ProviderRequest) {
+    return new Promise<never>((_resolve, reject) => {
+      const fail = () => {
+        const error = new Error("cancelled");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (request.signal?.aborted) return fail();
+      request.signal?.addEventListener("abort", fail, { once: true });
+    });
   }
 }
 
@@ -46,6 +74,34 @@ describe("Orchestrator", () => {
     const result = await orchestrator.run({ mode: "debate", prompt: "Which option is safer?", participants, maxRounds: 99 });
     expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(9);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("uses the budget round limit for debate", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+    const result = await countingOrchestrator.run({
+      mode: "debate",
+      prompt: "Debate once",
+      participants,
+      maxRounds: 3,
+      budget: { maxCalls: 20, maxRounds: 1 },
+    });
+
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(3);
+    expect(countingProvider.calls).toBe(7);
+  });
+
+  it("rejects an insufficient call budget before spending any provider calls", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+
+    await expect(countingOrchestrator.run({
+      mode: "panel",
+      prompt: "Do not start",
+      participants,
+      budget: { maxCalls: 3, maxRounds: 1 },
+    })).rejects.toThrow(/requires 4/i);
+    expect(countingProvider.calls).toBe(0);
   });
 
   it("requires exactly one participant in single mode", async () => {
@@ -126,8 +182,6 @@ describe("Orchestrator", () => {
 
     expect(countingProvider.calls).toBe(2);
     expect(result.steps.map(step => step.kind)).toEqual(["route", "answer"]);
-    // Mock output has no ROUTE marker, so the fail-safe route is the first
-    // non-router participant rather than another fanout.
     expect(result.steps[1]?.model.model).toBe("mock-claude");
   });
 
@@ -159,6 +213,69 @@ describe("Orchestrator", () => {
     expect(result.final).toBe(result.steps.at(-1)?.content);
   });
 
+  it("emits normalized run usage including provider token reports", async () => {
+    const usageProvider = new UsageMockProvider();
+    const usageOrchestrator = new Orchestrator(new Map([[usageProvider.id, usageProvider]]));
+    const events: OrchestrationStreamEvent[] = [];
+
+    await usageOrchestrator.run({
+      mode: "single",
+      prompt: "Count usage",
+      participants: [participants[0]],
+      budget: { maxCalls: 1, maxRounds: 1 },
+    }, {
+      runId: "usage-test",
+      emit: event => events.push(event),
+    });
+
+    const usageEvents = events.filter((event): event is Extract<OrchestrationStreamEvent, { type: "run_usage" }> => event.type === "run_usage");
+    expect(usageEvents.at(-1)?.usage).toMatchObject({
+      callsStarted: 1,
+      callsCompleted: 1,
+      inputTokens: 10,
+      outputTokens: 5,
+      tokenReports: 2,
+    });
+  });
+
+  it("normalizes provider rate-limit failures", async () => {
+    const limited = new RateLimitedProvider();
+    const limitedOrchestrator = new Orchestrator(new Map([[limited.id, limited]]));
+    const events: OrchestrationStreamEvent[] = [];
+
+    await expect(limitedOrchestrator.run({
+      mode: "single",
+      prompt: "Hit limit",
+      participants: [participants[0]],
+    }, {
+      runId: "limit-test",
+      emit: event => events.push(event),
+    })).rejects.toThrow(/rate limit/i);
+
+    const notice = events.find((event): event is Extract<OrchestrationStreamEvent, { type: "rate_limit" }> => event.type === "rate_limit");
+    expect(notice?.notice).toMatchObject({ provider: "mock", model: "mock-gpt", stepId: "answer-1" });
+  });
+
+  it("propagates run cancellation into the active provider call", async () => {
+    const abortProvider = new AbortAwareProvider();
+    const abortOrchestrator = new Orchestrator(new Map([[abortProvider.id, abortProvider]]));
+    const controller = new AbortController();
+    const events: OrchestrationStreamEvent[] = [];
+    const promise = abortOrchestrator.run({
+      mode: "single",
+      prompt: "Cancel this",
+      participants: [participants[0]],
+    }, {
+      runId: "cancel-test",
+      signal: controller.signal,
+      emit: event => events.push(event),
+    });
+
+    controller.abort();
+    await expect(promise).rejects.toThrow(/cancel/i);
+    expect(events.some(event => event.type === "run_cancelled")).toBe(true);
+  });
+
   it("emits a complete normalized lifecycle for non-streaming providers", async () => {
     const events: OrchestrationStreamEvent[] = [];
     await orchestrator.run({
@@ -172,7 +289,10 @@ describe("Orchestrator", () => {
 
     expect(events.map(event => event.type)).toEqual([
       "run_started",
+      "run_usage",
+      "run_usage",
       "step_started",
+      "run_usage",
       "text_delta",
       "step_completed",
       "run_completed",
