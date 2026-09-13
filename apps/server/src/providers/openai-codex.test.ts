@@ -10,6 +10,8 @@ class FakeCodexClient implements CodexClientLike {
   emitItemCompleted = true;
   emitUsage = false;
   holdTurn = false;
+  holdTurnStart = false;
+  releaseTurnStart: (() => void) | null = null;
 
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     this.requests.push({ method, params });
@@ -41,6 +43,9 @@ class FakeCodexClient implements CodexClientLike {
       return {} as T;
     }
     if (method === "turn/start") {
+      if (this.holdTurnStart) {
+        await new Promise<void>(resolve => { this.releaseTurnStart = resolve; });
+      }
       if (!this.holdTurn) {
         queueMicrotask(() => {
           if (this.emitUsage) {
@@ -200,6 +205,27 @@ describe("OpenAICodexProvider", () => {
       method: "turn/interrupt",
       params: { threadId: "thr-1", turnId: "turn-1" },
     });
+  });
+
+  it("handles cancellation safely while turn/start is still pending", async () => {
+    const client = new FakeCodexClient();
+    client.holdTurn = true;
+    client.holdTurnStart = true;
+    const provider = new OpenAICodexProvider(client);
+    const controller = new AbortController();
+    const promise = provider.generate({
+      model: "gpt-default",
+      messages: [{ role: "user", content: "Cancel during startup." }],
+      signal: controller.signal,
+    });
+
+    await waitForRequest(client, "turn/start");
+    controller.abort();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    client.releaseTurnStart?.();
+
+    await expect(promise).rejects.toThrow(/cancel/i);
+    expect(client.requests.some(request => request.method === "turn/interrupt")).toBe(true);
   });
 
   it("can recover the final answer from turn/completed when item events are absent", async () => {
