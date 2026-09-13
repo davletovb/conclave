@@ -40,7 +40,7 @@ Claude paid plans can separately enable Anthropic **usage credits**. If usage cr
 
 Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex and Grok ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
 
-Conversations and run state are persisted locally. A run is owned by the server rather than by one browser request, so closing or refreshing the page does not cancel it. The browser reconnects to the run event log and replays anything it missed. If the Conclave server itself stops during a run, that run is marked `interrupted` on the next startup and can be resumed as a new attempt in the same conversation.
+Conversations and run state are persisted locally. A run is owned by the server rather than by one browser request, so closing or refreshing the page does not cancel it. The browser reconnects to the run event log and replays anything it missed. If the Conclave server itself stops during a run, startup reconciles any already-persisted terminal event first; only genuinely unfinished work is marked `interrupted` and offered for a new attempt in the same conversation.
 
 ## Run locally
 
@@ -56,6 +56,8 @@ pnpm dev
 
 Override the server URL with `VITE_CONCLAVE_API` when needed.
 
+The server is local-only by default: it binds to `127.0.0.1`, and browser CORS is limited to `http://localhost:5173` and `http://127.0.0.1:5173`. `CONCLAVE_HOST` can override the bind address and `CONCLAVE_WEB_ORIGIN` can provide a comma-separated origin allowlist. Exposing the server beyond the local machine should be treated as an explicit deployment/security decision rather than the default personal-use setup.
+
 By default persistent state is stored under:
 
 ```text
@@ -64,7 +66,7 @@ By default persistent state is stored under:
   runs/<run-id>.ndjson
 ```
 
-Set `CONCLAVE_DATA_DIR` to use a different local directory.
+Set `CONCLAVE_DATA_DIR` to use a different local directory. On macOS/Linux, Conclave creates/tightens its data directories to owner-only `0700` and state/event files to owner-only `0600`, including existing persisted files discovered at startup.
 
 The persistent runtime API is:
 
