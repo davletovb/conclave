@@ -129,11 +129,12 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
       let stderr = "";
       let lineBuffer = "";
       let settled = false;
+      let timer: NodeJS.Timeout | undefined;
 
       const finishReject = (error: Error) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
         child.kill("SIGTERM");
         reject(error);
@@ -142,7 +143,7 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
       const onAbort = () => finishReject(cancelledError());
       signal?.addEventListener("abort", onAbort, { once: true });
 
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         finishReject(new Error("Claude CLI timed out"));
       }, timeoutMs);
 
@@ -165,7 +166,7 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
       child.once("close", code => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
         if (onStdoutLine && lineBuffer) onStdoutLine(lineBuffer);
         resolve({ stdout, stderr, code: code ?? 1 });
