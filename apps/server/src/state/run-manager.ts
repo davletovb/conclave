@@ -8,6 +8,7 @@ import type {
 } from "@conclave/core";
 import { Orchestrator } from "../orchestrator.js";
 import { FileStateStore } from "./file-store.js";
+import { inspectRun } from "./run-inspection.js";
 
 type RunListener = (record: RunEventRecord) => void;
 
@@ -118,6 +119,13 @@ export class RunManager {
 
   async getRun(runId: string) {
     return this.store.getRun(runId);
+  }
+
+  async inspect(runId: string) {
+    const run = await this.store.getRun(runId);
+    if (!run) return null;
+    await this.flush(runId);
+    return inspectRun(this.store, run);
   }
 
   async getConversation(conversationId: string) {
