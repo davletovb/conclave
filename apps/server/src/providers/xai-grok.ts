@@ -128,10 +128,16 @@ export class XaiGrokProvider implements ProviderAdapter {
         prompt: [{ type: "text", text: prompt }],
       }, timeoutMs);
 
-      // Grok's ACP contract returns completion metadata from session/prompt,
-      // while assistant text arrives on session/update. Follow the official
-      // integration pattern and wait until the captured text is stable across
-      // two checks so late stdout/JSON-RPC chunks are not dropped.
+      // session/prompt may resolve before stdout delivers the first
+      // session/update. Give that first chunk a bounded arrival window before
+      // applying the normal two-sample stability check used by xAI's ACP
+      // integration example.
+      const firstChunkWaitMs = Number(process.env.CONCLAVE_GROK_FIRST_CHUNK_WAIT_MS ?? 2_000);
+      const firstChunkDeadline = Date.now() + firstChunkWaitMs;
+      while (!streamedText && Date.now() < firstChunkDeadline) {
+        await sleep(50);
+      }
+
       let lastLength = -1;
       let stableChecks = 0;
       while (stableChecks < 2) {
