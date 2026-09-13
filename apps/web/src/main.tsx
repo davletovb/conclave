@@ -717,6 +717,14 @@ function App() {
       return;
     }
 
+    if (streamEvent.type === "step_retrying") {
+      setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
+      setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
+        ? { ...step, content: "" }
+        : step));
+      return;
+    }
+
     if (streamEvent.type === "text_delta") {
       setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
         ? { ...step, content: step.content + streamEvent.delta }
@@ -1170,13 +1178,14 @@ function App() {
                         </div>
                         <div className="inspection-step-meta">
                           <span>{step.status}</span>
+                          {step.attempts && step.attempts > 1 && <span>{step.attempts} attempts</span>}
                           <span>{elapsedLabel(step.durationMs)}</span>
                           {(step.inputTokens !== undefined || step.outputTokens !== undefined) && (
                             <span>{step.inputTokens ?? 0} in / {step.outputTokens ?? 0} out</span>
                           )}
                         </div>
                         {step.error && <small className="inspection-step-error">{step.error}</small>}
-              {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
+                        {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
                       </div>
                     ))}
                   </div>
@@ -1224,6 +1233,7 @@ function App() {
             mode={mode}
             modes={modes}
             participants={participants}
+            models={models}
             synthesizer={effectiveSynthesizer}
             onConfigure={() => setSetupOpen(current => !current)}
             onInspect={toggleInspector}

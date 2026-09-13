@@ -30,7 +30,8 @@ export function modeUsesSynthesizer(mode: OrchestrationMode) {
 
 export function defaultFinalizer(mode: OrchestrationMode, participants: ModelRef[], allModels: ModelRef[] = participants) {
   const participantKeys = new Set(participants.map(modelKey));
-  const independent = allModels.find(model => !participantKeys.has(modelKey(model)));
+  const independent = allModels.find(model => model.source !== "mock" && !participantKeys.has(modelKey(model)))
+    ?? allModels.find(model => !participantKeys.has(modelKey(model)));
   if (independent) return independent;
   if (participants.length === 0) return allModels[0];
   return mode === "planner-executor" ? participants.at(-1) : participants[0];
@@ -278,6 +279,7 @@ export function RunConfigSummary({
   mode,
   modes,
   participants,
+  models,
   synthesizer,
   onConfigure,
   onInspect,
@@ -286,13 +288,14 @@ export function RunConfigSummary({
   mode: OrchestrationMode;
   modes: ModeMeta[];
   participants: ModelRef[];
+  models: ModelRef[];
   synthesizer?: ModelRef;
   onConfigure: () => void;
   onInspect: () => void;
   canInspect: boolean;
 }) {
   const modeName = modes.find(item => item.id === mode)?.label ?? mode;
-  const synth = synthesizer ?? defaultFinalizer(mode, participants);
+  const synth = synthesizer ?? defaultFinalizer(mode, participants, models);
   return (
     <div className="run-config-summary">
       <button type="button" className="config-pill" onClick={onConfigure}>

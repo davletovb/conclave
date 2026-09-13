@@ -60,8 +60,21 @@ class FlakyProvider extends MockProvider {
 }
 
 class PartialFailureProvider extends MockProvider {
+  calls: string[] = [];
+
   override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    this.calls.push(request.model);
     if (request.model === "mock-claude" || request.model === "mock-finalizer") throw new Error("provider authentication unavailable");
+    return super.generate(request);
+  }
+}
+
+class AllAnswersFailProvider extends MockProvider {
+  calls: string[] = [];
+
+  override async generate(request: ProviderRequest) {
+    this.calls.push(request.model);
+    if (request.model !== "mock-finalizer") throw new Error("provider authentication unavailable");
     return super.generate(request);
   }
 }
@@ -267,6 +280,68 @@ describe("Orchestrator", () => {
     expect(result.degraded).not.toBe(true);
     expect(flaky.attempts.get("mock-claude")).toBe(2);
     expect(events.some(event => event.type === "step_retrying" && event.stepId === "answer-2")).toBe(true);
+  });
+
+  it("reserves the required finalizer call instead of spending it on a retry", async () => {
+    const flaky = new FlakyProvider();
+    const instance = new Orchestrator(new Map([[flaky.id, flaky]]));
+    const result = await instance.run({
+      mode: "panel",
+      prompt: "Protect the finalizer",
+      participants,
+      budget: { maxCalls: 4, maxRounds: 1 },
+    });
+
+    expect(flaky.attempts.get("mock-claude")).toBe(1);
+    expect(result.degraded).toBe(true);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("chooses a consensus verifier only from successful candidate models", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const result = await instance.run({
+      mode: "consensus",
+      prompt: "Use a surviving verifier",
+      participants,
+      budget: { maxCalls: 5, maxRounds: 1 },
+    });
+
+    expect(result.degraded).toBe(true);
+    expect(partial.calls.filter(model => model === "mock-claude")).toHaveLength(1);
+    expect(result.steps.at(-1)?.kind).toBe("review");
+    expect(result.steps.at(-1)?.model.model).toBe("mock-grok");
+  });
+
+  it("narrows debate rounds to providers that survived the previous stage", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const result = await instance.run({
+      mode: "debate",
+      prompt: "Drop failed debaters",
+      participants,
+      budget: { maxCalls: 10, maxRounds: 2 },
+    });
+
+    expect(result.degraded).toBe(true);
+    expect(partial.calls.filter(model => model === "mock-claude")).toHaveLength(1);
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(4);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("does not invoke a finalizer when every independent answer fails", async () => {
+    const failing = new AllAnswersFailProvider();
+    const instance = new Orchestrator(new Map([[failing.id, failing]]));
+    const finalizer: ModelRef = { provider: "mock", model: "mock-finalizer", label: "External Judge" };
+
+    await expect(instance.run({
+      mode: "judge",
+      prompt: "No survivors",
+      participants: [participants[0], participants[2]],
+      synthesizer: finalizer,
+      budget: { maxCalls: 3, maxRounds: 1 },
+    })).rejects.toThrow(/all parallel model steps failed/i);
+    expect(failing.calls).not.toContain("mock-finalizer");
   });
 
   it("keeps successful panel contributions when one provider fails permanently", async () => {
