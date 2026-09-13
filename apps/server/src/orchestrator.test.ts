@@ -103,6 +103,28 @@ class DebateReclaimProvider extends MockProvider {
   }
 }
 
+class StallThenRecoverProvider extends MockProvider {
+  calls = 0;
+  aborted = 0;
+
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    this.calls += 1;
+    if (this.calls > 1) return super.generate(request);
+
+    emit?.({ type: "text_delta", delta: "partial-before-stall" });
+    return new Promise<never>((_resolve, reject) => {
+      const abort = () => {
+        this.aborted += 1;
+        const error = new Error("stalled attempt aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (request.signal?.aborted) return abort();
+      request.signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+}
+
 class AbortAwareProvider extends MockProvider {
   override async generate(request: ProviderRequest) {
     return new Promise<never>((_resolve, reject) => {
@@ -403,6 +425,31 @@ describe("Orchestrator", () => {
     expect(result.degraded).toBe(true);
     expect(result.failures?.some(failure => failure.model.model === "mock-finalizer")).toBe(true);
     expect(result.final).toMatch(/preserves the surviving model work/i);
+  });
+
+  it("aborts a stalled provider attempt and retries only that step", async () => {
+    const stalled = new StallThenRecoverProvider();
+    const instance = new Orchestrator(
+      new Map([[stalled.id, stalled]]),
+      { stepStallTimeoutMs: 30 },
+    );
+    const events: OrchestrationStreamEvent[] = [];
+
+    const result = await instance.run({
+      mode: "single",
+      prompt: "Recover from a stalled runtime",
+      participants: [participants[0]],
+      budget: { maxCalls: 2, maxRounds: 1 },
+    }, {
+      runId: "stall-retry-test",
+      emit: event => events.push(event),
+    });
+
+    expect(stalled.calls).toBe(2);
+    expect(stalled.aborted).toBe(1);
+    expect(events.filter(event => event.type === "step_retrying")).toHaveLength(1);
+    expect(events.find(event => event.type === "step_retrying")?.message).toMatch(/stalled/i);
+    expect(result.final).toContain("Recover from a stalled runtime");
   });
 
   it("normalizes provider rate-limit failures", async () => {
