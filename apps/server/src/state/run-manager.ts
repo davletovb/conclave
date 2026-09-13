@@ -111,12 +111,15 @@ export class RunManager {
     };
 
     const previous = this.eventQueues.get(runId) ?? Promise.resolve();
-    const next = previous.then(() => this.store.appendRunEvent(record));
-    this.eventQueues.set(runId, next.catch(() => undefined));
-
-    for (const listener of this.listeners.get(runId) ?? []) {
-      listener(record);
-    }
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await this.store.appendRunEvent(record);
+        for (const listener of this.listeners.get(runId) ?? []) {
+          listener(record);
+        }
+      });
+    this.eventQueues.set(runId, next);
   }
 
   private async flush(runId: string) {
