@@ -38,7 +38,9 @@ The adapters are intentionally subscription-first. Conclave refuses OpenAI API-k
 
 Claude paid plans can separately enable Anthropic **usage credits**. If usage credits are enabled on the Claude account, Anthropic may use them after included subscription limits are exhausted. That is an account-level Claude setting; Conclave cannot override it.
 
-Conclave also has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`) and delivered to the browser over newline-delimited JSON. OpenAI Codex and Grok ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
+Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex and Grok ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
+
+Conversations and run state are persisted locally. A run is owned by the server rather than by one browser request, so closing or refreshing the page does not cancel it. The browser reconnects to the run event log and replays anything it missed. If the Conclave server itself stops during a run, that run is marked `interrupted` on the next startup and can be resumed as a new attempt in the same conversation.
 
 ## Run locally
 
@@ -54,7 +56,26 @@ pnpm dev
 
 Override the server URL with `VITE_CONCLAVE_API` when needed.
 
-The normal request endpoint remains available at `POST /orchestrate`. The web app uses `POST /orchestrate/stream`, which responds as `application/x-ndjson` and renders each step while it is still running.
+By default persistent state is stored under:
+
+```text
+~/.conclave/
+  state.json
+  runs/<run-id>.ndjson
+```
+
+Set `CONCLAVE_DATA_DIR` to use a different local directory.
+
+The persistent runtime API is:
+
+- `GET /conversations` — recent conversations
+- `GET /conversations/:id` — one conversation with messages
+- `POST /runs` — start a background orchestration run
+- `GET /runs/:id` — inspect persisted run state
+- `GET /runs/:id/events?after=<seq>&follow=1` — replay and follow the run's NDJSON event log
+- `POST /runs/:id/resume` — restart a failed/interrupted run as the next attempt
+
+The earlier `POST /orchestrate` and `POST /orchestrate/stream` endpoints remain available for compatibility, but the web app now uses persistent runs.
 
 ## Connect your ChatGPT subscription
 
@@ -132,6 +153,6 @@ GitHub Actions runs the same checks on pull requests.
 2. ✅ Anthropic adapter via subscription-authenticated Claude Code runtime
 3. ✅ xAI adapter via Grok Build ACP runtime
 4. ✅ Normalized streaming event protocol for partial output and future tool events
-5. Persistent conversations and resumable orchestration runs
+5. ✅ Persistent conversations and resumable orchestration runs
 6. Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
 7. Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
