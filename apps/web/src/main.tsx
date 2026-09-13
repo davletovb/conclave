@@ -83,7 +83,7 @@ function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds:
     case "judge": return participantCount + 1;
     case "red-team": return 1 + Math.max(participantCount - 1, 1) + 1;
     case "router": return 2;
-    case "research-council": return Math.max(4, participantCount) + 1;
+    case "research-council": return participantCount + 1;
     case "planner-executor": return 1 + Math.max(participantCount - 1, 1) + 1;
     case "custom": return workflow?.nodes.length ?? 0;
   }
