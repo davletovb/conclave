@@ -28,7 +28,9 @@ The browser never talks directly to provider runtimes. The server owns provider 
 
 OpenAI is connected through the official local `codex app-server` runtime. Anthropic is connected through the official Claude Code non-interactive runtime. When those runtimes are authenticated with the matching consumer subscriptions, Conclave exposes subscription-backed models from both providers. Grok remains a mock until its adapter lands.
 
-Both real adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions and refuses Claude Console/API-key or cloud-provider authentication rather than silently switching to metered API billing.
+Both real adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions and refuses Claude Console/API-key or cloud-provider authentication rather than silently choosing those metered developer routes.
+
+Claude paid plans can separately enable Anthropic **usage credits**. If usage credits are enabled on the Claude account, Anthropic may use them after included subscription limits are exhausted. That is an account-level Claude setting; Conclave cannot override it.
 
 ## Run locally
 
