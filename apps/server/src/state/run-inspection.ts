@@ -94,7 +94,24 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
         dependsOn: [...(event.dependsOn ?? [])],
         status: "running",
         startedAt: record.at,
+        attempts: 1,
       });
+    } else if (event.type === "step_retrying") {
+      const existing = steps.get(event.stepId) ?? { id: event.stepId, dependsOn: [], status: "running" as const };
+      existing.attempts = event.attempt;
+      existing.error = event.message;
+      steps.set(event.stepId, existing);
+    } else if (event.type === "step_failed") {
+      sawStepFailure = true;
+      const existing = steps.get(event.failure.stepId) ?? { id: event.failure.stepId, dependsOn: [], status: "running" as const };
+      existing.kind = event.failure.kind;
+      existing.model = event.failure.model;
+      existing.status = "failed";
+      existing.attempts = event.failure.attempts;
+      existing.error = event.failure.message;
+      existing.completedAt = record.at;
+      existing.durationMs = durationMs(existing.startedAt, record.at);
+      steps.set(event.failure.stepId, existing);
     } else if (event.type === "usage") {
       const step = steps.get(event.stepId) ?? {
         id: event.stepId,

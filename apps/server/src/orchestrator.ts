@@ -11,6 +11,7 @@ import type {
   ProviderStreamEvent,
   RunBudget,
   RunUsage,
+  StepFailure,
   WorkflowGraph,
   WorkflowNode,
 } from "@conclave/core";
@@ -86,6 +87,19 @@ function cancelledError() {
   const error = new Error("Run cancelled by user");
   error.name = "AbortError";
   return error;
+}
+
+function isRetryableStepError(error: unknown) {
+  const message = errorMessage(error);
+  if (/abort|cancel|rate.?limit|quota|usage limit|auth|login|billing|api.?key|permission|unsupported|invalid request/i.test(message)) return false;
+  return /timeout|timed out|temporar|connection|ECONN|EPIPE|socket|closed|EOF|unavailable|busy|overloaded|try again|exited|terminated|spawn/i.test(message);
+}
+
+class StepExecutionError extends Error {
+  constructor(readonly failure: StepFailure) {
+    super(failure.message);
+    this.name = "StepExecutionError";
+  }
 }
 
 export class Orchestrator {
@@ -314,84 +328,109 @@ export class Orchestrator {
 
   private async executeStep(spec: StepSpec, context: RunContext) {
     this.throwIfCancelled(context);
-    const maxCalls = context.budget?.maxCalls;
-    if (maxCalls !== undefined && context.usage.callsStarted >= maxCalls) {
-      throw new Error(`Run call budget exhausted at ${maxCalls} model calls.`);
-    }
+    let attempt = 0;
+    let announced = false;
 
-    context.usage.callsStarted += 1;
-    this.emitUsage(context);
-    context.emit?.({
-      type: "step_started",
-      runId: context.runId,
-      stepId: spec.id,
-      kind: spec.kind,
-      model: spec.model,
-      dependsOn: spec.dependsOn,
-    });
-
-    let emittedText = false;
-    try {
-      const response = await this.adapterFor(spec.model).generate({
-        model: spec.model.model,
-        messages: [
-          ...(spec.history ?? []),
-          { role: "user", content: spec.prompt },
-        ],
-        signal: context.signal,
-      }, event => {
-        if (event.type === "text_delta" && event.delta) emittedText = true;
-        this.mapProviderEvent(context, spec.id, event);
-      });
-
+    while (true) {
       this.throwIfCancelled(context);
-      context.usage.callsCompleted += 1;
-      this.emitUsage(context);
-
-      if (!emittedText && response.content) {
-        context.emit?.({ type: "text_delta", runId: context.runId, stepId: spec.id, delta: response.content });
-      }
-
-      const step: OrchestrationStep = {
-        id: spec.id,
-        kind: spec.kind,
-        model: spec.model,
-        content: response.content,
-        dependsOn: spec.dependsOn,
-      };
-      context.emit?.({ type: "step_completed", runId: context.runId, step });
-      return step;
-    } catch (error) {
-      if (!context.signal?.aborted) {
-        if (isRateLimitError(error)) {
-          context.emit?.({
-            type: "rate_limit",
-            runId: context.runId,
-            notice: {
-              provider: spec.model.provider,
-              model: spec.model.model,
-              stepId: spec.id,
-              message: errorMessage(error),
-              at: new Date().toISOString(),
-            },
-          });
+      const maxCalls = context.budget?.maxCalls;
+      if (maxCalls !== undefined && context.usage.callsStarted >= maxCalls) {
+        if (!announced) {
+context.emit?.({ type: "step_started", runId: context.runId, stepId: spec.id, kind: spec.kind, model: spec.model, dependsOn: spec.dependsOn });
         }
-        context.emit?.({ type: "error", runId: context.runId, stepId: spec.id, message: errorMessage(error) });
+        const failure: StepFailure = { stepId: spec.id, kind: spec.kind, model: spec.model, message: `Run call budget exhausted at ${maxCalls} model calls.`, retryable: false, attempts: attempt };
+        context.emit?.({ type: "step_failed", runId: context.runId, failure });
+        throw new StepExecutionError(failure);
       }
-      throw error;
+
+      context.usage.callsStarted += 1;
+      this.emitUsage(context);
+      attempt += 1;
+      if (!announced) {
+        announced = true;
+        context.emit?.({ type: "step_started", runId: context.runId, stepId: spec.id, kind: spec.kind, model: spec.model, dependsOn: spec.dependsOn });
+      }
+
+      let emittedText = false;
+      try {
+        const response = await this.adapterFor(spec.model).generate({
+model: spec.model.model,
+messages: [...(spec.history ?? []), { role: "user", content: spec.prompt }],
+signal: context.signal,
+        }, event => {
+if (event.type === "text_delta" && event.delta) emittedText = true;
+this.mapProviderEvent(context, spec.id, event);
+        });
+
+        this.throwIfCancelled(context);
+        context.usage.callsCompleted += 1;
+        this.emitUsage(context);
+        if (!emittedText && response.content) context.emit?.({ type: "text_delta", runId: context.runId, stepId: spec.id, delta: response.content });
+
+        const step: OrchestrationStep = { id: spec.id, kind: spec.kind, model: spec.model, content: response.content, dependsOn: spec.dependsOn };
+        context.emit?.({ type: "step_completed", runId: context.runId, step });
+        return step;
+      } catch (error) {
+        if (context.signal?.aborted) throw cancelledError();
+        const retryable = isRetryableStepError(error);
+        const hasRetryBudget = context.budget?.maxCalls === undefined || context.usage.callsStarted < context.budget.maxCalls;
+        if (retryable && attempt < 2 && hasRetryBudget) {
+context.stepUsage.delete(spec.id);
+context.emit?.({ type: "step_retrying", runId: context.runId, stepId: spec.id, attempt: attempt + 1, message: errorMessage(error) });
+continue;
+        }
+        if (isRateLimitError(error)) {
+context.emit?.({ type: "rate_limit", runId: context.runId, notice: { provider: spec.model.provider, model: spec.model.model, stepId: spec.id, message: errorMessage(error), at: new Date().toISOString() } });
+        }
+        const failure: StepFailure = { stepId: spec.id, kind: spec.kind, model: spec.model, message: errorMessage(error), retryable, attempts: attempt };
+        context.emit?.({ type: "step_failed", runId: context.runId, failure });
+        throw new StepExecutionError(failure);
+      }
     }
   }
 
+  private failureFrom(error: unknown) {
+    return error instanceof StepExecutionError ? error.failure : undefined;
+  }
+
+  private async settleSteps(specs: StepSpec[], context: RunContext, requireSuccess = true) {
+    const settled = await Promise.allSettled(specs.map(spec => this.executeStep(spec, context)));
+    this.throwIfCancelled(context);
+    const steps: OrchestrationStep[] = [];
+    const failures: StepFailure[] = [];
+    for (const item of settled) {
+      if (item.status === "fulfilled") steps.push(item.value);
+      else {
+        const failure = this.failureFrom(item.reason);
+        if (failure) failures.push(failure);
+        else throw item.reason;
+      }
+    }
+    if (requireSuccess && steps.length === 0) {
+      const detail = failures.map(failure => `${failure.model.label}: ${failure.message}`).join("; ");
+      throw new Error(`All parallel model steps failed${detail ? `: ${detail}` : "."}`);
+    }
+    return { steps, failures };
+  }
+
+  private buildResult(mode: OrchestrationRequest["mode"], steps: OrchestrationStep[], final: string, failures: StepFailure[] = []): OrchestrationResult {
+    return failures.length > 0 ? { mode, steps, final, degraded: true, failures } : { mode, steps, final };
+  }
+
+  private fallbackFinal(label: string, steps: OrchestrationStep[]) {
+    return `Conclave could not complete ${label}. The response below preserves the surviving model work without pretending the missing finalization succeeded.
+
+${transcript(steps)}`;
+  }
+
   private async independentAnswers(request: OrchestrationRequest, context: RunContext) {
-    return Promise.all(
-      request.participants.map((model, index) => this.executeStep({
-        id: makeStepId("answer", index),
-        kind: "answer",
-        model,
-        prompt: request.prompt,
-        history: request.history,
-      }, context)),
-    );
+    return this.settleSteps(request.participants.map((model, index) => ({
+      id: makeStepId("answer", index),
+      kind: "answer" as const,
+      model,
+      prompt: request.prompt,
+      history: request.history,
+    })), context);
   }
 
   private routedModel(route: string, participants: ModelRef[], router: ModelRef) {
@@ -537,63 +576,73 @@ export class Orchestrator {
       if (request.mode === "critic-revise") {
         const author = request.participants[0];
         const critic = request.participants[1] ?? author;
+        const failures: StepFailure[] = [];
         const draftId = makeStepId("answer", 0);
         const critiqueId = makeStepId("critique", 0);
-        const draft = await this.executeStep({
-          id: draftId,
-          kind: "answer",
-          model: author,
-          prompt: request.prompt,
-          history: request.history,
-        }, context);
-        const critique = await this.executeStep({
-          id: critiqueId,
-          kind: "critique",
-          model: critic,
-          prompt: `Critique this answer for factual gaps, weak reasoning, and missing alternatives.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
-          history: request.history,
-          dependsOn: [draftId],
-        }, context);
-        const revision = await this.executeStep({
-          id: makeStepId("revision", 0),
-          kind: "revision",
-          model: author,
-          prompt: `Revise your answer using the critique. Keep only improvements you can justify.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nCritique:\n${critique.content}`,
-          history: request.history,
-          dependsOn: [draftId, critiqueId],
-        }, context);
-        return complete({ mode: request.mode, steps: [draft, critique, revision], final: revision.content });
+        const draft = await this.executeStep({ id: draftId, kind: "answer", model: author, prompt: request.prompt, history: request.history }, context);
+        let critique: OrchestrationStep;
+        try {
+critique = await this.executeStep({ id: critiqueId, kind: "critique", model: critic, prompt: `Critique this answer for factual gaps, weak reasoning, and missing alternatives.
+
+Question:
+${request.prompt}
+
+Draft:
+${draft.content}`, history: request.history, dependsOn: [draftId] }, context);
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+failures.push(failure);
+return complete(this.buildResult(request.mode, [draft], draft.content, failures));
+        }
+        try {
+const revision = await this.executeStep({ id: makeStepId("revision", 0), kind: "revision", model: author, prompt: `Revise your answer using the critique. Keep only improvements you can justify.
+
+Question:
+${request.prompt}
+
+Draft:
+${draft.content}
+
+Critique:
+${critique.content}`, history: request.history, dependsOn: [draftId, critiqueId] }, context);
+return complete(this.buildResult(request.mode, [draft, critique, revision], revision.content, failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+failures.push(failure);
+return complete(this.buildResult(request.mode, [draft, critique], draft.content, failures));
+        }
       }
 
       if (request.mode === "red-team") {
         const author = request.participants[0];
         const draftId = makeStepId("answer", 0);
-        const draft = await this.executeStep({
-          id: draftId,
-          kind: "answer",
-          model: author,
-          prompt: request.prompt,
-          history: request.history,
-        }, context);
+        const draft = await this.executeStep({ id: draftId, kind: "answer", model: author, prompt: request.prompt, history: request.history }, context);
         const critics = request.participants.slice(1);
         const redTeam = critics.length > 0 ? critics : [author];
-        const critiques = await Promise.all(redTeam.map((model, index) => this.executeStep({
-          id: makeStepId("red-team", index),
-          kind: "critique",
-          model,
-          prompt: `Red-team the draft below. Look for false assumptions, counterexamples, safety or implementation failures, adversarial cases, and ways the conclusion could be wrong. Do not merely rewrite it.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
-          history: request.history,
-          dependsOn: [draftId],
-        }, context)));
-        const revision = await this.executeStep({
-          id: makeStepId("revision", 0),
-          kind: "revision",
-          model: author,
-          prompt: `Produce a hardened final answer after the red-team review. Address valid attacks, reject invalid ones explicitly when necessary, and preserve uncertainty.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nRed-team findings:\n${transcript(critiques, " critique")}`,
-          history: request.history,
-          dependsOn: [draftId, ...critiques.map(step => step.id)],
-        }, context);
-        return complete({ mode: request.mode, steps: [draft, ...critiques, revision], final: revision.content });
+        const settled = await this.settleSteps(redTeam.map((model, index) => ({ id: makeStepId("red-team", index), kind: "critique" as const, model, prompt: `Red-team the draft below. Look for false assumptions, counterexamples, safety or implementation failures, adversarial cases, and ways the conclusion could be wrong. Do not merely rewrite it.
+
+Question:
+${request.prompt}
+
+Draft:
+${draft.content}`, history: request.history, dependsOn: [draftId] })), context, false);
+        if (settled.steps.length === 0) return complete(this.buildResult(request.mode, [draft], draft.content, settled.failures));
+        try {
+const revision = await this.executeStep({ id: makeStepId("revision", 0), kind: "revision", model: author, prompt: `Produce a hardened final answer after the red-team review. Address valid attacks, reject invalid ones explicitly when necessary, and preserve uncertainty.
+
+Question:
+${request.prompt}
+
+Draft:
+${draft.content}
+
+Red-team findings:
+${transcript(settled.steps, " critique")}`, history: request.history, dependsOn: [draftId, ...settled.steps.map(step => step.id)] }, context);
+return complete(this.buildResult(request.mode, [draft, ...settled.steps, revision], revision.content, settled.failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+return complete(this.buildResult(request.mode, [draft, ...settled.steps], draft.content, [...settled.failures, failure]));
+        }
       }
 
       if (request.mode === "router") {
@@ -624,74 +673,70 @@ export class Orchestrator {
       if (request.mode === "planner-executor") {
         const planner = request.participants[0];
         const planId = makeStepId("plan", 0);
-        const plan = await this.executeStep({
-          id: planId,
-          kind: "plan",
-          model: planner,
-          prompt: `Create a concrete plan for solving the question or task. Break it into ordered work items, name assumptions and dependencies, and define what a good final answer must contain. Do not pretend to perform external actions.\n\nTask:\n${request.prompt}`,
-          history: request.history,
-        }, context);
+        const plan = await this.executeStep({ id: planId, kind: "plan", model: planner, prompt: `Create a concrete plan for solving the question or task. Break it into ordered work items, name assumptions and dependencies, and define what a good final answer must contain. Do not pretend to perform external actions.
+
+Task:
+${request.prompt}`, history: request.history }, context);
         const availableExecutors = request.participants.slice(1);
         const executors = availableExecutors.length > 0 ? availableExecutors : [planner];
-        const executions = await Promise.all(executors.map((model, index) => this.executeStep({
-          id: makeStepId("execution", index),
-          kind: "execution",
-          model,
-          prompt: `Act as executor ${index + 1}. Carry out the parts of the plan you can solve in text, produce concrete analysis/output, and flag any plan defect you discover. Do not claim external actions or research you did not perform.\n\nTask:\n${request.prompt}\n\nPlan:\n${plan.content}`,
-          history: request.history,
-          dependsOn: [planId],
-        }, context)));
+        const settled = await this.settleSteps(executors.map((model, index) => ({ id: makeStepId("execution", index), kind: "execution" as const, model, prompt: `Act as executor ${index + 1}. Carry out the parts of the plan you can solve in text, produce concrete analysis/output, and flag any plan defect you discover. Do not claim external actions or research you did not perform.
+
+Task:
+${request.prompt}
+
+Plan:
+${plan.content}`, history: request.history, dependsOn: [planId] })), context, false);
         const reviewer = request.synthesizer ?? request.participants.at(-1) ?? planner;
-        const review = await this.executeStep({
-          id: makeStepId("review", 0),
-          kind: "review",
-          model: reviewer,
-          prompt: `Review the plan and executor outputs. Resolve conflicts, correct mistakes, and return the best final answer to the original task. Do not narrate the workflow unless it helps the user.\n\nTask:\n${request.prompt}\n\nPlan:\n${plan.content}\n\nExecutor outputs:\n${transcript(executions, " execution")}`,
-          history: request.history,
-          dependsOn: [planId, ...executions.map(step => step.id)],
-        }, context);
-        return complete({ mode: request.mode, steps: [plan, ...executions, review], final: review.content });
+        try {
+const review = await this.executeStep({ id: makeStepId("review", 0), kind: "review", model: reviewer, prompt: `Review the plan and executor outputs. Resolve conflicts, correct mistakes, and return the best final answer to the original task. Do not narrate the workflow unless it helps the user.
+
+Task:
+${request.prompt}
+
+Plan:
+${plan.content}
+
+Executor outputs:
+${transcript(settled.steps, " execution")}`, history: request.history, dependsOn: [planId, ...settled.steps.map(step => step.id)] }, context);
+return complete(this.buildResult(request.mode, [plan, ...settled.steps, review], review.content, settled.failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+const survivors = settled.steps.length > 0 ? settled.steps : [plan];
+return complete(this.buildResult(request.mode, [plan, ...settled.steps], this.fallbackFinal("review", survivors), [...settled.failures, failure]));
+        }
       }
 
       if (request.mode === "research-council") {
         const researchBriefs = request.participants.map((_, memberIndex) => {
-          const assignedAngles = researchAngles.filter((_, angleIndex) => (
-            angleIndex % request.participants.length === memberIndex
-          ));
-          return assignedAngles.length > 0
-            ? assignedAngles.join(" ")
-            : "Independent analyst: approach the question from a distinct perspective not already covered by the other council members.";
+const assignedAngles = researchAngles.filter((_, angleIndex) => angleIndex % request.participants.length === memberIndex);
+return assignedAngles.length > 0 ? assignedAngles.join(" ") : "Independent analyst: approach the question from a distinct perspective not already covered by the other council members.";
         });
-        const research = await Promise.all(request.participants.map((model, index) => {
-          const angle = researchBriefs[index];
-          return this.executeStep({
-            id: makeStepId("research", index),
-            kind: "research",
-            model,
-            prompt: `You are one member of a research council. ${angle} Use only knowledge and context actually available to you; do not claim that you browsed, ran experiments, or consulted sources unless that happened in this run. Clearly mark uncertainty.\n\nQuestion:\n${request.prompt}`,
-            history: request.history,
-          }, context);
-        }));
+        const settled = await this.settleSteps(request.participants.map((model, index) => ({ id: makeStepId("research", index), kind: "research" as const, model, prompt: `You are one member of a research council. ${researchBriefs[index]} Use only knowledge and context actually available to you; do not claim that you browsed, ran experiments, or consulted sources unless that happened in this run. Clearly mark uncertainty.
+
+Question:
+${request.prompt}`, history: request.history })), context);
         const synthesizer = request.synthesizer ?? request.participants[0];
-        const synthesis = await this.executeStep({
-          id: makeStepId("synthesis", 0),
-          kind: "synthesis",
-          model: synthesizer,
-          prompt: `Synthesize the council reports into a rigorous answer. Reconcile compatible findings, preserve material disagreements, distinguish evidence from inference, and state what remains unknown. Do not invent citations or imply external research occurred.\n\nQuestion:\n${request.prompt}\n\nCouncil reports:\n${transcript(research, " report")}`,
-          history: request.history,
-          dependsOn: research.map(step => step.id),
-        }, context);
-        return complete({ mode: request.mode, steps: [...research, synthesis], final: synthesis.content });
+        try {
+const synthesis = await this.executeStep({ id: makeStepId("synthesis", 0), kind: "synthesis", model: synthesizer, prompt: `Synthesize the council reports into a rigorous answer. Reconcile compatible findings, preserve material disagreements, distinguish evidence from inference, and state what remains unknown. Do not invent citations or imply external research occurred.
+
+Question:
+${request.prompt}
+
+Council reports:
+${transcript(settled.steps, " report")}`, history: request.history, dependsOn: settled.steps.map(step => step.id) }, context);
+return complete(this.buildResult(request.mode, [...settled.steps, synthesis], synthesis.content, settled.failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+return complete(this.buildResult(request.mode, settled.steps, this.fallbackFinal("council synthesis", settled.steps), [...settled.failures, failure]));
+        }
       }
 
-      const independent = await this.independentAnswers(request, context);
+      const independentOutcome = await this.independentAnswers(request, context);
+      const independent = independentOutcome.steps;
+      const failures: StepFailure[] = [...independentOutcome.failures];
 
       if (request.mode === "compare") {
-        return complete({
-          mode: request.mode,
-          steps: independent,
-          final: independent.map(step => step.content).join("\n\n---\n\n"),
-        });
+        return complete(this.buildResult(request.mode, independent, independent.map(step => step.content).join("\n\n---\n\n"), failures));
       }
 
       const synthesizer = request.synthesizer ?? request.participants[0];
@@ -699,49 +744,69 @@ export class Orchestrator {
       const independentIds = independent.map(step => step.id);
 
       if (request.mode === "panel") {
-        const synthesis = await this.executeStep({
-          id: makeStepId("synthesis", 0),
-          kind: "synthesis",
-          model: synthesizer,
-          prompt: `Synthesize the independent answers below. Preserve useful disagreements and do not invent consensus.\n\nQuestion:\n${request.prompt}\n\nAnswers:\n${answersTranscript}`,
-          history: request.history,
-          dependsOn: independentIds,
-        }, context);
-        return complete({ mode: request.mode, steps: [...independent, synthesis], final: synthesis.content });
+        try {
+const synthesis = await this.executeStep({ id: makeStepId("synthesis", 0), kind: "synthesis", model: synthesizer, prompt: `Synthesize the independent answers below. Preserve useful disagreements and do not invent consensus.
+
+Question:
+${request.prompt}
+
+Answers:
+${answersTranscript}`, history: request.history, dependsOn: independentIds }, context);
+return complete(this.buildResult(request.mode, [...independent, synthesis], synthesis.content, failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+return complete(this.buildResult(request.mode, independent, this.fallbackFinal("panel synthesis", independent), [...failures, failure]));
+        }
       }
 
       if (request.mode === "judge") {
-        const judgment = await this.executeStep({
-          id: makeStepId("judgment", 0),
-          kind: "judgment",
-          model: synthesizer,
-          prompt: `Act as a judge. Evaluate the candidate answers for correctness, reasoning quality, completeness, calibration, and usefulness. Select or combine only the best-supported material and return the final answer to the user. Mention a material unresolved disagreement if it changes the recommendation.\n\nQuestion:\n${request.prompt}\n\nCandidates:\n${answersTranscript}`,
-          history: request.history,
-          dependsOn: independentIds,
-        }, context);
-        return complete({ mode: request.mode, steps: [...independent, judgment], final: judgment.content });
+        try {
+const judgment = await this.executeStep({ id: makeStepId("judgment", 0), kind: "judgment", model: synthesizer, prompt: `Act as a judge. Evaluate the candidate answers for correctness, reasoning quality, completeness, calibration, and usefulness. Select or combine only the best-supported material and return the final answer to the user. Mention a material unresolved disagreement if it changes the recommendation.
+
+Question:
+${request.prompt}
+
+Candidates:
+${answersTranscript}`, history: request.history, dependsOn: independentIds }, context);
+return complete(this.buildResult(request.mode, [...independent, judgment], judgment.content, failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+return complete(this.buildResult(request.mode, independent, this.fallbackFinal("judgment", independent), [...failures, failure]));
+        }
       }
 
       if (request.mode === "consensus") {
         const synthesisId = makeStepId("synthesis", 0);
-        const synthesis = await this.executeStep({
-          id: synthesisId,
-          kind: "synthesis",
-          model: synthesizer,
-          prompt: `Build a candidate consensus from these independent answers. Include only claims supported by multiple positions or strongly justified by one position. Explicitly retain important dissent rather than forcing agreement.\n\nQuestion:\n${request.prompt}\n\nAnswers:\n${answersTranscript}`,
-          history: request.history,
-          dependsOn: independentIds,
-        }, context);
+        let synthesis: OrchestrationStep;
+        try {
+synthesis = await this.executeStep({ id: synthesisId, kind: "synthesis", model: synthesizer, prompt: `Build a candidate consensus from these independent answers. Include only claims supported by multiple positions or strongly justified by one position. Explicitly retain important dissent rather than forcing agreement.
+
+Question:
+${request.prompt}
+
+Answers:
+${answersTranscript}`, history: request.history, dependsOn: independentIds }, context);
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+return complete(this.buildResult(request.mode, independent, this.fallbackFinal("consensus synthesis", independent), [...failures, failure]));
+        }
         const verifier = request.participants.find(model => !sameModel(model, synthesizer)) ?? request.participants[0];
-        const review = await this.executeStep({
-          id: makeStepId("review", 0),
-          kind: "review",
-          model: verifier,
-          prompt: `Audit the proposed consensus against the original independent answers. Remove false consensus, restore meaningful dissent, correct unsupported claims, and then output the corrected final answer.\n\nQuestion:\n${request.prompt}\n\nIndependent answers:\n${answersTranscript}\n\nProposed consensus:\n${synthesis.content}`,
-          history: request.history,
-          dependsOn: [...independentIds, synthesisId],
-        }, context);
-        return complete({ mode: request.mode, steps: [...independent, synthesis, review], final: review.content });
+        try {
+const review = await this.executeStep({ id: makeStepId("review", 0), kind: "review", model: verifier, prompt: `Audit the proposed consensus against the original independent answers. Remove false consensus, restore meaningful dissent, correct unsupported claims, and then output the corrected final answer.
+
+Question:
+${request.prompt}
+
+Independent answers:
+${answersTranscript}
+
+Proposed consensus:
+${synthesis.content}`, history: request.history, dependsOn: [...independentIds, synthesisId] }, context);
+return complete(this.buildResult(request.mode, [...independent, synthesis, review], review.content, failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+return complete(this.buildResult(request.mode, [...independent, synthesis], synthesis.content, [...failures, failure]));
+        }
       }
 
       if (request.mode === "debate") {
@@ -749,35 +814,35 @@ export class Orchestrator {
         const debateSteps: OrchestrationStep[] = [...independent];
         let debateTranscript = answersTranscript;
         let previousIds = independentIds;
-
         for (let round = 0; round < maxRounds; round += 1) {
-          this.throwIfCancelled(context);
-          const critiques = await Promise.all(
-            request.participants.map((model, index) => this.executeStep({
-              id: makeStepId(`critique-r${round + 1}`, index),
-              kind: "critique",
-              model,
-              prompt: `You are in debate round ${round + 1}. Identify the strongest disagreement or weakness in the other positions and state what should change.\n\nQuestion:\n${request.prompt}\n\nCurrent positions:\n${debateTranscript}`,
-              history: request.history,
-              dependsOn: previousIds,
-            }, context)),
-          );
-          debateSteps.push(...critiques);
-          previousIds = critiques.map(step => step.id);
-          debateTranscript += "\n\n" + critiques
-            .map(step => `${step.model.label} critique:\n${step.content}`)
-            .join("\n\n");
-        }
+this.throwIfCancelled(context);
+const settled = await this.settleSteps(request.participants.map((model, index) => ({ id: makeStepId(`critique-r${round + 1}`, index), kind: "critique" as const, model, prompt: `You are in debate round ${round + 1}. Identify the strongest disagreement or weakness in the other positions and state what should change.
 
-        const synthesis = await this.executeStep({
-          id: makeStepId("synthesis", 0),
-          kind: "synthesis",
-          model: synthesizer,
-          prompt: `Judge the debate. Produce the best-supported answer, explicitly noting unresolved disagreements and uncertainty.\n\nQuestion:\n${request.prompt}\n\nDebate:\n${debateTranscript}`,
-          history: request.history,
-          dependsOn: debateSteps.map(step => step.id),
-        }, context);
-        return complete({ mode: request.mode, steps: [...debateSteps, synthesis], final: synthesis.content });
+Question:
+${request.prompt}
+
+Current positions:
+${debateTranscript}`, history: request.history, dependsOn: previousIds })), context, false);
+failures.push(...settled.failures);
+if (settled.steps.length === 0) break;
+debateSteps.push(...settled.steps);
+previousIds = settled.steps.map(step => step.id);
+debateTranscript += "\n\n" + settled.steps.map(step => `${step.model.label} critique:
+${step.content}`).join("\n\n");
+        }
+        try {
+const synthesis = await this.executeStep({ id: makeStepId("synthesis", 0), kind: "synthesis", model: synthesizer, prompt: `Judge the debate. Produce the best-supported answer, explicitly noting unresolved disagreements and uncertainty.
+
+Question:
+${request.prompt}
+
+Debate:
+${debateTranscript}`, history: request.history, dependsOn: debateSteps.map(step => step.id) }, context);
+return complete(this.buildResult(request.mode, [...debateSteps, synthesis], synthesis.content, failures));
+        } catch (error) {
+const failure = this.failureFrom(error); if (!failure) throw error;
+return complete(this.buildResult(request.mode, debateSteps, this.fallbackFinal("debate judgment", debateSteps), [...failures, failure]));
+        }
       }
 
       throw new Error(`Unsupported orchestration mode: ${request.mode}`);

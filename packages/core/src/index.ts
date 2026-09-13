@@ -141,6 +141,15 @@ export interface RateLimitNotice {
   at: string;
 }
 
+export interface StepFailure {
+  stepId: string;
+  kind: OrchestrationStepKind;
+  model: ModelRef;
+  message: string;
+  retryable: boolean;
+  attempts: number;
+}
+
 export interface OrchestrationRequest {
   mode: OrchestrationMode;
   prompt: string;
@@ -179,6 +188,8 @@ export interface OrchestrationResult {
   mode: OrchestrationMode;
   steps: OrchestrationStep[];
   final: string;
+  degraded?: boolean;
+  failures?: StepFailure[];
 }
 
 export type OrchestrationStreamEvent =
@@ -187,6 +198,8 @@ export type OrchestrationStreamEvent =
   | { type: "run_cancelled"; runId: string; message: string }
   | { type: "rate_limit"; runId: string; notice: RateLimitNotice }
   | { type: "step_started"; runId: string; stepId: string; kind: OrchestrationStepKind; model: ModelRef; dependsOn?: string[] }
+  | { type: "step_retrying"; runId: string; stepId: string; attempt: number; message: string }
+  | { type: "step_failed"; runId: string; failure: StepFailure }
   | { type: "text_delta"; runId: string; stepId: string; delta: string }
   | { type: "status"; runId: string; stepId: string; message: string }
   | { type: "tool_call"; runId: string; stepId: string; id: string; name: string; input?: unknown }
@@ -261,6 +274,8 @@ export interface RunStepInspection {
   durationMs?: number;
   inputTokens?: number;
   outputTokens?: number;
+  attempts?: number;
+  error?: string;
 }
 
 export interface RunAttemptInspection {

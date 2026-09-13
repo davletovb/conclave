@@ -49,6 +49,23 @@ class RateLimitedProvider extends MockProvider {
   }
 }
 
+class FlakyProvider extends MockProvider {
+  attempts = new Map<string, number>();
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    const count = (this.attempts.get(request.model) ?? 0) + 1;
+    this.attempts.set(request.model, count);
+    if (request.model === "mock-claude" && count === 1) throw new Error("temporary connection unavailable");
+    return super.generate(request);
+  }
+}
+
+class PartialFailureProvider extends MockProvider {
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    if (request.model === "mock-claude" || request.model === "mock-finalizer") throw new Error("provider authentication unavailable");
+    return super.generate(request);
+  }
+}
+
 class AbortAwareProvider extends MockProvider {
   override async generate(request: ProviderRequest) {
     return new Promise<never>((_resolve, reject) => {
@@ -240,6 +257,36 @@ describe("Orchestrator", () => {
       outputTokens: 5,
       tokenReports: 2,
     });
+  });
+
+  it("retries one transient failed step without restarting successful siblings", async () => {
+    const flaky = new FlakyProvider();
+    const instance = new Orchestrator(new Map([[flaky.id, flaky]]));
+    const events: OrchestrationStreamEvent[] = [];
+    const result = await instance.run({ mode: "panel", prompt: "Recover", participants, budget: { maxCalls: 6, maxRounds: 1 } }, { runId: "retry-step", emit: event => events.push(event) });
+    expect(result.degraded).not.toBe(true);
+    expect(flaky.attempts.get("mock-claude")).toBe(2);
+    expect(events.some(event => event.type === "step_retrying" && event.stepId === "answer-2")).toBe(true);
+  });
+
+  it("keeps successful panel contributions when one provider fails permanently", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const result = await instance.run({ mode: "panel", prompt: "Use survivors", participants, budget: { maxCalls: 6, maxRounds: 1 } });
+    expect(result.degraded).toBe(true);
+    expect(result.failures?.map(failure => failure.stepId)).toContain("answer-2");
+    expect(result.steps.filter(step => step.kind === "answer")).toHaveLength(2);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("returns a degraded survivor result when an independent finalizer fails", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const finalizer: ModelRef = { provider: "mock", model: "mock-finalizer", label: "External Judge" };
+    const result = await instance.run({ mode: "judge", prompt: "Judge fairly", participants: [participants[0], participants[2]], synthesizer: finalizer, budget: { maxCalls: 5, maxRounds: 1 } });
+    expect(result.degraded).toBe(true);
+    expect(result.failures?.some(failure => failure.model.model === "mock-finalizer")).toBe(true);
+    expect(result.final).toMatch(/preserves the surviving model work/i);
   });
 
   it("normalizes provider rate-limit failures", async () => {

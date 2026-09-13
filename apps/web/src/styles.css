@@ -353,3 +353,7 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
   .sidebar .conversation-list > .eyebrow { display: none; }
   .sidebar .conversation-link { flex: 0 0 min(72vw, 250px); }
 }
+
+.degraded-result { border: 1px solid var(--border); background: var(--surface-soft); border-radius: 12px; padding: 11px 13px; display: grid; gap: 4px; }
+.degraded-result strong { font-size: 11px; }
+.degraded-result span, .inspection-step-error { color: var(--muted); font-size: 10px; line-height: 1.45; }

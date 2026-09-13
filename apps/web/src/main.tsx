@@ -13,6 +13,7 @@ import type {
   ProviderStatus,
   RateLimitNotice,
   RunEventRecord,
+  StepFailure,
   RunInspection,
   RunUsage,
   StartRunResponse,
@@ -21,7 +22,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { Markdown } from "./markdown";
-import { CouncilWork, RunConfigSummary, RunSetup } from "./reasoning-surface";
+import { CouncilWork, RunConfigSummary, RunSetup, defaultFinalizer, modeUsesSynthesizer } from "./reasoning-surface";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -345,7 +346,10 @@ function App() {
     [models, selected],
   );
   const selectedSynthesizer = synthesizerKey
-    ? participants.find(model => modelKey(model) === synthesizerKey)
+    ? models.find(model => modelKey(model) === synthesizerKey)
+    : undefined;
+  const effectiveSynthesizer = modeUsesSynthesizer(mode)
+    ? selectedSynthesizer ?? defaultFinalizer(mode, participants, models)
     : undefined;
   const workflowState = useMemo(() => parseWorkflow(workflowText), [workflowText]);
   const activeWorkflow = mode === "custom" ? workflowState.graph : undefined;
@@ -877,7 +881,7 @@ function App() {
             mode,
             prompt,
             participants,
-            synthesizer: selectedSynthesizer,
+            synthesizer: effectiveSynthesizer,
             workflow: mode === "custom" ? activeWorkflow : undefined,
             budget: { maxCalls, maxRounds },
           },
@@ -1171,7 +1175,8 @@ function App() {
                             <span>{step.inputTokens ?? 0} in / {step.outputTokens ?? 0} out</span>
                           )}
                         </div>
-                        {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
+                        {step.error && <small className="inspection-step-error">{step.error}</small>}
+              {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
                       </div>
                     ))}
                   </div>
@@ -1188,7 +1193,13 @@ function App() {
                   <Markdown content={result.final} />
                 </div>
               )}
-              <div className="run-telemetry">
+              {result?.degraded && result.failures && result.failures.length > 0 && (
+      <div className="degraded-result">
+        <strong>Completed with partial provider failures</strong>
+        <span>{result.failures.map((failure: StepFailure) => `${failure.model.label}: ${failure.message}`).join(" · ")}</span>
+      </div>
+    )}
+    <div className="run-telemetry">
                 <span>{runUsage.callsStarted}/{maxCalls} calls started</span>
                 <span>{runUsage.callsCompleted} completed</span>
                 <span>{tokenText}</span>
@@ -1213,7 +1224,7 @@ function App() {
             mode={mode}
             modes={modes}
             participants={participants}
-            synthesizer={selectedSynthesizer}
+            synthesizer={effectiveSynthesizer}
             onConfigure={() => setSetupOpen(current => !current)}
             onInspect={toggleInspector}
             canInspect={Boolean(activeRunId)}
