@@ -9,12 +9,15 @@ import type {
   OrchestrationStepKind,
   ProviderAdapter,
   ProviderStreamEvent,
+  RunBudget,
+  RunUsage,
 } from "@conclave/core";
-import { makeStepId } from "@conclave/core";
+import { emptyRunUsage, makeStepId } from "@conclave/core";
 
 type RunOptions = {
   runId?: string;
   emit?: OrchestrationEventSink;
+  signal?: AbortSignal;
 };
 
 type StepSpec = {
@@ -23,6 +26,15 @@ type StepSpec = {
   model: ModelRef;
   prompt: string;
   history?: ChatMessage[];
+};
+
+type RunContext = {
+  runId: string;
+  emit?: OrchestrationEventSink;
+  signal?: AbortSignal;
+  budget?: RunBudget;
+  usage: RunUsage;
+  stepUsage: Map<string, { inputTokens: number; outputTokens: number }>;
 };
 
 const researchAngles = [
@@ -46,6 +58,20 @@ function transcript(steps: OrchestrationStep[], suffix = "") {
     .join("\n\n");
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unknown orchestration error";
+}
+
+function isRateLimitError(error: unknown) {
+  return /rate.?limit|too many requests|quota|usage limit|capacity limit|exhausted/i.test(errorMessage(error));
+}
+
+function cancelledError() {
+  const error = new Error("Run cancelled by user");
+  error.name = "AbortError";
+  return error;
+}
+
 export class Orchestrator {
   constructor(private readonly providers: Map<string, ProviderAdapter>) {}
 
@@ -61,14 +87,83 @@ export class Orchestrator {
     }
   }
 
+  private debateRounds(request: OrchestrationRequest) {
+    const requested = request.budget?.maxRounds ?? request.maxRounds ?? 1;
+    return Math.max(1, Math.min(requested, 3));
+  }
+
+  private validateShape(request: OrchestrationRequest) {
+    if (request.participants.length === 0) throw new Error("At least one participant is required");
+    if (request.mode === "single" && request.participants.length !== 1) {
+      throw new Error("Single mode requires exactly one participant");
+    }
+    if (["router", "research-council", "judge", "consensus"].includes(request.mode)) {
+      this.requireParticipants(request, 2);
+    }
+  }
+
+  private plannedCalls(request: OrchestrationRequest) {
+    const count = request.participants.length;
+    switch (request.mode) {
+      case "single": return 1;
+      case "compare": return count;
+      case "panel": return count + 1;
+      case "debate": return count + (count * this.debateRounds(request)) + 1;
+      case "critic-revise": return 3;
+      case "consensus": return count + 2;
+      case "judge": return count + 1;
+      case "red-team": return 1 + Math.max(count - 1, 1) + 1;
+      case "router": return 2;
+      case "research-council": return Math.max(researchAngles.length, count) + 1;
+      case "planner-executor": return 1 + Math.max(count - 1, 1) + 1;
+    }
+  }
+
+  private enforceBudget(request: OrchestrationRequest) {
+    const maxCalls = request.budget?.maxCalls;
+    if (maxCalls !== undefined) {
+      const planned = this.plannedCalls(request);
+      if (planned > maxCalls) {
+        throw new Error(`Run budget allows ${maxCalls} model call${maxCalls === 1 ? "" : "s"}, but ${request.mode} requires ${planned} with the current participants and rounds.`);
+      }
+    }
+  }
+
+  private throwIfCancelled(context: RunContext) {
+    if (context.signal?.aborted) throw cancelledError();
+  }
+
+  private emitUsage(context: RunContext) {
+    context.emit?.({
+      type: "run_usage",
+      runId: context.runId,
+      usage: { ...context.usage },
+      budget: context.budget,
+    });
+  }
+
   private mapProviderEvent(
-    runId: string,
+    context: RunContext,
     stepId: string,
     event: ProviderStreamEvent,
-    emit?: OrchestrationEventSink,
   ) {
-    if (!emit) return;
+    const { runId, emit } = context;
+    if (event.type === "usage") {
+      const previous = context.stepUsage.get(stepId) ?? { inputTokens: 0, outputTokens: 0 };
+      const next = {
+        inputTokens: event.inputTokens ?? previous.inputTokens,
+        outputTokens: event.outputTokens ?? previous.outputTokens,
+      };
+      context.usage.inputTokens += Math.max(0, next.inputTokens - previous.inputTokens);
+      context.usage.outputTokens += Math.max(0, next.outputTokens - previous.outputTokens);
+      context.usage.tokenReports += 1;
+      context.stepUsage.set(stepId, next);
+      emit?.({ type: "usage", runId, stepId, inputTokens: event.inputTokens, outputTokens: event.outputTokens });
+      this.emitUsage(context);
+      return;
+    }
 
+    if (!emit) return;
     switch (event.type) {
       case "text_delta":
         emit({ type: "text_delta", runId, stepId, delta: event.delta });
@@ -85,58 +180,75 @@ export class Orchestrator {
       case "citation":
         emit({ type: "citation", runId, stepId, url: event.url, title: event.title });
         break;
-      case "usage":
-        emit({
-          type: "usage",
-          runId,
-          stepId,
-          inputTokens: event.inputTokens,
-          outputTokens: event.outputTokens,
-        });
-        break;
     }
   }
 
-  private async executeStep(spec: StepSpec, runId: string, emit?: OrchestrationEventSink) {
-    emit?.({
+  private async executeStep(spec: StepSpec, context: RunContext) {
+    this.throwIfCancelled(context);
+    const maxCalls = context.budget?.maxCalls;
+    if (maxCalls !== undefined && context.usage.callsStarted >= maxCalls) {
+      throw new Error(`Run call budget exhausted at ${maxCalls} model calls.`);
+    }
+
+    context.usage.callsStarted += 1;
+    this.emitUsage(context);
+    context.emit?.({
       type: "step_started",
-      runId,
+      runId: context.runId,
       stepId: spec.id,
       kind: spec.kind,
       model: spec.model,
     });
 
     let emittedText = false;
-    const response = await this.adapterFor(spec.model).generate({
-      model: spec.model.model,
-      messages: [
-        ...(spec.history ?? []),
-        { role: "user", content: spec.prompt },
-      ],
-    }, event => {
-      if (event.type === "text_delta" && event.delta) emittedText = true;
-      this.mapProviderEvent(runId, spec.id, event, emit);
-    });
+    try {
+      const response = await this.adapterFor(spec.model).generate({
+        model: spec.model.model,
+        messages: [
+          ...(spec.history ?? []),
+          { role: "user", content: spec.prompt },
+        ],
+        signal: context.signal,
+      }, event => {
+        if (event.type === "text_delta" && event.delta) emittedText = true;
+        this.mapProviderEvent(context, spec.id, event);
+      });
 
-    if (!emittedText && response.content) {
-      emit?.({ type: "text_delta", runId, stepId: spec.id, delta: response.content });
+      this.throwIfCancelled(context);
+      context.usage.callsCompleted += 1;
+      this.emitUsage(context);
+
+      if (!emittedText && response.content) {
+        context.emit?.({ type: "text_delta", runId: context.runId, stepId: spec.id, delta: response.content });
+      }
+
+      const step: OrchestrationStep = {
+        id: spec.id,
+        kind: spec.kind,
+        model: spec.model,
+        content: response.content,
+      };
+      context.emit?.({ type: "step_completed", runId: context.runId, step });
+      return step;
+    } catch (error) {
+      if (!context.signal?.aborted && isRateLimitError(error)) {
+        context.emit?.({
+          type: "rate_limit",
+          runId: context.runId,
+          notice: {
+            provider: spec.model.provider,
+            model: spec.model.model,
+            stepId: spec.id,
+            message: errorMessage(error),
+            at: new Date().toISOString(),
+          },
+        });
+      }
+      throw error;
     }
-
-    const step: OrchestrationStep = {
-      id: spec.id,
-      kind: spec.kind,
-      model: spec.model,
-      content: response.content,
-    };
-    emit?.({ type: "step_completed", runId, step });
-    return step;
   }
 
-  private async independentAnswers(
-    request: OrchestrationRequest,
-    runId: string,
-    emit?: OrchestrationEventSink,
-  ) {
+  private async independentAnswers(request: OrchestrationRequest, context: RunContext) {
     return Promise.all(
       request.participants.map((model, index) => this.executeStep({
         id: makeStepId("answer", index),
@@ -144,7 +256,7 @@ export class Orchestrator {
         model,
         prompt: request.prompt,
         history: request.history,
-      }, runId, emit)),
+      }, context)),
     );
   }
 
@@ -173,22 +285,29 @@ export class Orchestrator {
 
   async run(request: OrchestrationRequest, options: RunOptions = {}): Promise<OrchestrationResult> {
     const runId = options.runId ?? randomUUID();
-    const emit = options.emit;
-    emit?.({ type: "run_started", runId, mode: request.mode });
+    const context: RunContext = {
+      runId,
+      emit: options.emit,
+      signal: options.signal,
+      budget: request.budget,
+      usage: emptyRunUsage(),
+      stepUsage: new Map(),
+    };
+
+    context.emit?.({ type: "run_started", runId, mode: request.mode });
+    this.emitUsage(context);
 
     try {
-      if (request.participants.length === 0) throw new Error("At least one participant is required");
+      this.validateShape(request);
+      this.enforceBudget(request);
+      this.throwIfCancelled(context);
 
       const complete = (result: OrchestrationResult) => {
-        emit?.({ type: "run_completed", runId, result });
+        context.emit?.({ type: "run_completed", runId, result });
         return result;
       };
 
       if (request.mode === "single") {
-        if (request.participants.length !== 1) {
-          throw new Error("Single mode requires exactly one participant");
-        }
-
         const model = request.participants[0];
         const step = await this.executeStep({
           id: makeStepId("answer", 0),
@@ -196,7 +315,7 @@ export class Orchestrator {
           model,
           prompt: request.prompt,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [step], final: step.content });
       }
 
@@ -209,21 +328,21 @@ export class Orchestrator {
           model: author,
           prompt: request.prompt,
           history: request.history,
-        }, runId, emit);
+        }, context);
         const critique = await this.executeStep({
           id: makeStepId("critique", 0),
           kind: "critique",
           model: critic,
           prompt: `Critique this answer for factual gaps, weak reasoning, and missing alternatives.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         const revision = await this.executeStep({
           id: makeStepId("revision", 0),
           kind: "revision",
           model: author,
           prompt: `Revise your answer using the critique. Keep only improvements you can justify.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nCritique:\n${critique.content}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [draft, critique, revision], final: revision.content });
       }
 
@@ -235,7 +354,7 @@ export class Orchestrator {
           model: author,
           prompt: request.prompt,
           history: request.history,
-        }, runId, emit);
+        }, context);
         const critics = request.participants.slice(1);
         const redTeam = critics.length > 0 ? critics : [author];
         const critiques = await Promise.all(redTeam.map((model, index) => this.executeStep({
@@ -244,19 +363,18 @@ export class Orchestrator {
           model,
           prompt: `Red-team the draft below. Look for false assumptions, counterexamples, safety or implementation failures, adversarial cases, and ways the conclusion could be wrong. Do not merely rewrite it.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
           history: request.history,
-        }, runId, emit)));
+        }, context)));
         const revision = await this.executeStep({
           id: makeStepId("revision", 0),
           kind: "revision",
           model: author,
           prompt: `Produce a hardened final answer after the red-team review. Address valid attacks, reject invalid ones explicitly when necessary, and preserve uncertainty.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nRed-team findings:\n${transcript(critiques, " critique")}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [draft, ...critiques, revision], final: revision.content });
       }
 
       if (request.mode === "router") {
-        this.requireParticipants(request, 2);
         const router = request.participants[0];
         const choices = request.participants
           .map(model => `- ${modelKey(model)} — ${model.label}`)
@@ -267,7 +385,7 @@ export class Orchestrator {
           model: router,
           prompt: `Route the question to exactly one of the available models. On the first line output exactly ROUTE: provider:model using one key from the list. Then briefly explain why that model is the best fit. Do not answer the question itself.\n\nQuestion:\n${request.prompt}\n\nAvailable models:\n${choices}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         const specialist = this.routedModel(route.content, request.participants, router);
         const answer = await this.executeStep({
           id: makeStepId("answer", 0),
@@ -275,7 +393,7 @@ export class Orchestrator {
           model: specialist,
           prompt: `Answer the original question directly. You were selected by a routing step; the router's note is context, not authority.\n\nQuestion:\n${request.prompt}\n\nRouter note:\n${route.content}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [route, answer], final: answer.content });
       }
 
@@ -287,7 +405,7 @@ export class Orchestrator {
           model: planner,
           prompt: `Create a concrete plan for solving the question or task. Break it into ordered work items, name assumptions and dependencies, and define what a good final answer must contain. Do not pretend to perform external actions.\n\nTask:\n${request.prompt}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         const availableExecutors = request.participants.slice(1);
         const executors = availableExecutors.length > 0 ? availableExecutors : [planner];
         const executions = await Promise.all(executors.map((model, index) => this.executeStep({
@@ -296,7 +414,7 @@ export class Orchestrator {
           model,
           prompt: `Act as executor ${index + 1}. Carry out the parts of the plan you can solve in text, produce concrete analysis/output, and flag any plan defect you discover. Do not claim external actions or research you did not perform.\n\nTask:\n${request.prompt}\n\nPlan:\n${plan.content}`,
           history: request.history,
-        }, runId, emit)));
+        }, context)));
         const reviewer = request.synthesizer ?? request.participants.at(-1) ?? planner;
         const review = await this.executeStep({
           id: makeStepId("review", 0),
@@ -304,12 +422,11 @@ export class Orchestrator {
           model: reviewer,
           prompt: `Review the plan and executor outputs. Resolve conflicts, correct mistakes, and return the best final answer to the original task. Do not narrate the workflow unless it helps the user.\n\nTask:\n${request.prompt}\n\nPlan:\n${plan.content}\n\nExecutor outputs:\n${transcript(executions, " execution")}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [plan, ...executions, review], final: review.content });
       }
 
       if (request.mode === "research-council") {
-        this.requireParticipants(request, 2);
         const passCount = Math.max(researchAngles.length, request.participants.length);
         const research = await Promise.all(Array.from({ length: passCount }, (_, index) => {
           const model = request.participants[index % request.participants.length];
@@ -320,7 +437,7 @@ export class Orchestrator {
             model,
             prompt: `You are one member of a research council. ${angle} Use only knowledge and context actually available to you; do not claim that you browsed, ran experiments, or consulted sources unless that happened in this run. Clearly mark uncertainty.\n\nQuestion:\n${request.prompt}`,
             history: request.history,
-          }, runId, emit);
+          }, context);
         }));
         const synthesizer = request.synthesizer ?? request.participants[0];
         const synthesis = await this.executeStep({
@@ -329,15 +446,11 @@ export class Orchestrator {
           model: synthesizer,
           prompt: `Synthesize the council reports into a rigorous answer. Reconcile compatible findings, preserve material disagreements, distinguish evidence from inference, and state what remains unknown. Do not invent citations or imply external research occurred.\n\nQuestion:\n${request.prompt}\n\nCouncil reports:\n${transcript(research, " report")}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [...research, synthesis], final: synthesis.content });
       }
 
-      if (request.mode === "judge" || request.mode === "consensus") {
-        this.requireParticipants(request, 2);
-      }
-
-      const independent = await this.independentAnswers(request, runId, emit);
+      const independent = await this.independentAnswers(request, context);
 
       if (request.mode === "compare") {
         return complete({
@@ -357,7 +470,7 @@ export class Orchestrator {
           model: synthesizer,
           prompt: `Synthesize the independent answers below. Preserve useful disagreements and do not invent consensus.\n\nQuestion:\n${request.prompt}\n\nAnswers:\n${answersTranscript}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [...independent, synthesis], final: synthesis.content });
       }
 
@@ -368,7 +481,7 @@ export class Orchestrator {
           model: synthesizer,
           prompt: `Act as a judge. Evaluate the candidate answers for correctness, reasoning quality, completeness, calibration, and usefulness. Select or combine only the best-supported material and return the final answer to the user. Mention a material unresolved disagreement if it changes the recommendation.\n\nQuestion:\n${request.prompt}\n\nCandidates:\n${answersTranscript}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [...independent, judgment], final: judgment.content });
       }
 
@@ -379,7 +492,7 @@ export class Orchestrator {
           model: synthesizer,
           prompt: `Build a candidate consensus from these independent answers. Include only claims supported by multiple positions or strongly justified by one position. Explicitly retain important dissent rather than forcing agreement.\n\nQuestion:\n${request.prompt}\n\nAnswers:\n${answersTranscript}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         const verifier = request.participants.find(model => !sameModel(model, synthesizer)) ?? request.participants[0];
         const review = await this.executeStep({
           id: makeStepId("review", 0),
@@ -387,16 +500,17 @@ export class Orchestrator {
           model: verifier,
           prompt: `Audit the proposed consensus against the original independent answers. Remove false consensus, restore meaningful dissent, correct unsupported claims, and then output the corrected final answer.\n\nQuestion:\n${request.prompt}\n\nIndependent answers:\n${answersTranscript}\n\nProposed consensus:\n${synthesis.content}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [...independent, synthesis, review], final: review.content });
       }
 
       if (request.mode === "debate") {
-        const maxRounds = Math.max(1, Math.min(request.maxRounds ?? 1, 3));
+        const maxRounds = this.debateRounds(request);
         const debateSteps: OrchestrationStep[] = [...independent];
         let debateTranscript = answersTranscript;
 
         for (let round = 0; round < maxRounds; round += 1) {
+          this.throwIfCancelled(context);
           const critiques = await Promise.all(
             request.participants.map((model, index) => this.executeStep({
               id: makeStepId(`critique-r${round + 1}`, index),
@@ -404,7 +518,7 @@ export class Orchestrator {
               model,
               prompt: `You are in debate round ${round + 1}. Identify the strongest disagreement or weakness in the other positions and state what should change.\n\nQuestion:\n${request.prompt}\n\nCurrent positions:\n${debateTranscript}`,
               history: request.history,
-            }, runId, emit)),
+            }, context)),
           );
           debateSteps.push(...critiques);
           debateTranscript += "\n\n" + critiques
@@ -418,17 +532,17 @@ export class Orchestrator {
           model: synthesizer,
           prompt: `Judge the debate. Produce the best-supported answer, explicitly noting unresolved disagreements and uncertainty.\n\nQuestion:\n${request.prompt}\n\nDebate:\n${debateTranscript}`,
           history: request.history,
-        }, runId, emit);
+        }, context);
         return complete({ mode: request.mode, steps: [...debateSteps, synthesis], final: synthesis.content });
       }
 
       throw new Error(`Unsupported orchestration mode: ${request.mode}`);
     } catch (error) {
-      emit?.({
-        type: "error",
-        runId,
-        message: error instanceof Error ? error.message : "Unknown orchestration error",
-      });
+      if (context.signal?.aborted) {
+        context.emit?.({ type: "run_cancelled", runId, message: "Run cancelled by user" });
+        throw cancelledError();
+      }
+      context.emit?.({ type: "error", runId, message: errorMessage(error) });
       throw error;
     }
   }

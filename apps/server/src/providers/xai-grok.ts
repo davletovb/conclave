@@ -48,6 +48,12 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function cancelledError() {
+  const error = new Error("Grok ACP turn cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
 export class XaiGrokProvider implements ProviderAdapter {
   readonly id = "xai" as const;
   readonly label = "xAI via Grok Build";
@@ -92,12 +98,16 @@ export class XaiGrokProvider implements ProviderAdapter {
   }
 
   async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
+    if (request.signal?.aborted) throw cancelledError();
     const client = this.createClient();
     const startedAt = Date.now();
     let unsubscribe = () => {};
+    const onAbort = () => client.close();
+    request.signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
       await this.authenticateSubscription(client);
+      if (request.signal?.aborted) throw cancelledError();
 
       let sessionId = "";
       let streamedText = "";
@@ -122,6 +132,7 @@ export class XaiGrokProvider implements ProviderAdapter {
         _meta: { modelId: request.model },
       }, 30_000);
       sessionId = session.sessionId;
+      if (request.signal?.aborted) throw cancelledError();
 
       const prompt = this.buildPrompt(request);
       const timeoutMs = Number(process.env.CONCLAVE_GROK_TURN_TIMEOUT_MS ?? 180_000);
@@ -129,16 +140,19 @@ export class XaiGrokProvider implements ProviderAdapter {
         sessionId,
         prompt: [{ type: "text", text: prompt }],
       }, timeoutMs);
+      if (request.signal?.aborted) throw cancelledError();
 
       const firstChunkWaitMs = Number(process.env.CONCLAVE_GROK_FIRST_CHUNK_WAIT_MS ?? 2_000);
       const firstChunkDeadline = Date.now() + firstChunkWaitMs;
       while (!streamedText && Date.now() < firstChunkDeadline) {
+        if (request.signal?.aborted) throw cancelledError();
         await sleep(50);
       }
 
       let lastLength = -1;
       let stableChecks = 0;
       while (stableChecks < 2) {
+        if (request.signal?.aborted) throw cancelledError();
         await sleep(150);
         if (streamedText.length === lastLength) {
           stableChecks += 1;
@@ -159,7 +173,11 @@ export class XaiGrokProvider implements ProviderAdapter {
         content,
         latencyMs: Date.now() - startedAt,
       };
+    } catch (error) {
+      if (request.signal?.aborted) throw cancelledError();
+      throw error;
     } finally {
+      request.signal?.removeEventListener("abort", onAbort);
       unsubscribe();
       client.close();
     }

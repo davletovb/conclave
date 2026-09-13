@@ -17,10 +17,13 @@ import type {
   ConversationSummary,
   OrchestrationRequest,
   OrchestrationResult,
+  RateLimitNotice,
   RunEventRecord,
   RunStatus,
+  RunUsage,
   StoredRun,
 } from "@conclave/core";
+import { emptyRunUsage } from "@conclave/core";
 
 type PersistedState = {
   version: 1;
@@ -33,6 +36,9 @@ type RunPatch = {
   result?: OrchestrationResult;
   error?: string | undefined;
   attempt?: number;
+  usage?: RunUsage;
+  rateLimit?: RateLimitNotice | undefined;
+  cancelRequestedAt?: string | undefined;
 };
 
 export type CreatedRun = {
@@ -102,16 +108,31 @@ export class FileStateStore {
       let changed = false;
       const timestamp = now();
       for (const run of Object.values(this.state.runs)) {
-        if (run.status !== "queued" && run.status !== "running") continue;
+        if (!run.usage) {
+          run.usage = emptyRunUsage();
+          changed = true;
+        }
+
+        if (!["queued", "running", "cancelling"].includes(run.status)) continue;
 
         const records = await this.readRunEventFile(run.id);
         const terminal = [...records]
           .reverse()
           .find(record => record.attempt === run.attempt
-            && (record.event.type === "run_completed" || record.event.type === "error"));
+            && (record.event.type === "run_completed"
+              || record.event.type === "run_cancelled"
+              || record.event.type === "error"));
 
         if (terminal?.event.type === "run_completed") {
           this.applyCompletion(run, terminal.event.result, terminal.at);
+          changed = true;
+          continue;
+        }
+
+        if (terminal?.event.type === "run_cancelled") {
+          run.status = "cancelled";
+          run.updatedAt = terminal.at;
+          run.error = terminal.event.message;
           changed = true;
           continue;
         }
@@ -203,6 +224,7 @@ export class FileStateStore {
         status: "queued",
         attempt: 1,
         request: cleanRequest(request),
+        usage: emptyRunUsage(),
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -236,9 +258,18 @@ export class FileStateStore {
       if (!run) throw new Error(`Run ${runId} was not found`);
       if (patch.status !== undefined) run.status = patch.status;
       if (patch.result !== undefined) run.result = patch.result;
+      if (patch.usage !== undefined) run.usage = clone(patch.usage);
       if (Object.prototype.hasOwnProperty.call(patch, "error")) {
         if (patch.error === undefined) delete run.error;
         else run.error = patch.error;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, "rateLimit")) {
+        if (patch.rateLimit === undefined) delete run.rateLimit;
+        else run.rateLimit = clone(patch.rateLimit);
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, "cancelRequestedAt")) {
+        if (patch.cancelRequestedAt === undefined) delete run.cancelRequestedAt;
+        else run.cancelRequestedAt = patch.cancelRequestedAt;
       }
       if (patch.attempt !== undefined) run.attempt = patch.attempt;
       run.updatedAt = now();
@@ -252,6 +283,7 @@ export class FileStateStore {
     return this.enqueue(async () => {
       const run = this.state.runs[runId];
       if (!run) throw new Error(`Run ${runId} was not found`);
+      if (run.status === "cancelled" || run.status === "cancelling") return clone(run);
       this.applyCompletion(run, result, now());
       await this.persistState();
       return clone(run);
@@ -263,7 +295,7 @@ export class FileStateStore {
     return this.enqueue(async () => {
       const run = this.state.runs[runId];
       if (!run) throw new Error(`Run ${runId} was not found`);
-      if (run.status !== "failed" && run.status !== "interrupted") {
+      if (!["failed", "interrupted", "cancelled"].includes(run.status)) {
         throw new Error(`Run ${runId} cannot be resumed while it is ${run.status}`);
       }
 
@@ -271,9 +303,12 @@ export class FileStateStore {
       await this.archiveRunEvents(run.id, previousAttempt);
       run.status = "queued";
       run.attempt += 1;
+      run.usage = emptyRunUsage();
       run.updatedAt = now();
       delete run.error;
       delete run.result;
+      delete run.rateLimit;
+      delete run.cancelRequestedAt;
       await this.persistState();
       await this.clearRunEvents(run.id);
       return clone(run);
@@ -324,6 +359,7 @@ export class FileStateStore {
     run.status = "completed";
     run.result = result;
     delete run.error;
+    delete run.cancelRequestedAt;
     run.updatedAt = timestamp;
   }
 

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ModelRef } from "@conclave/core";
+import type { ModelRef, ProviderRequest } from "@conclave/core";
 import { MockProvider } from "../providers/mock.js";
 import { Orchestrator } from "../orchestrator.js";
 import { FileStateStore } from "./file-store.js";
@@ -11,14 +11,32 @@ import { RunManager } from "./run-manager.js";
 const tempDirs: string[] = [];
 const participant: ModelRef = { provider: "mock", model: "mock-gpt", label: "GPT (mock)" };
 
+class CancellableMockProvider extends MockProvider {
+  calls = 0;
+
+  override async generate(request: ProviderRequest) {
+    this.calls += 1;
+    if (this.calls > 1) return super.generate(request);
+
+    return new Promise<never>((_resolve, reject) => {
+      const cancel = () => {
+        const error = new Error("mock provider cancelled");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (request.signal?.aborted) return cancel();
+      request.signal?.addEventListener("abort", cancel, { once: true });
+    });
+  }
+}
+
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 
-async function makeManager() {
+async function makeManager(provider: MockProvider = new MockProvider()) {
   const dir = await mkdtemp(join(tmpdir(), "conclave-manager-"));
   tempDirs.push(dir);
-  const provider = new MockProvider();
   const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
   const store = new FileStateStore(dir);
   const manager = new RunManager(orchestrator, store);
@@ -27,12 +45,21 @@ async function makeManager() {
 }
 
 async function waitForTerminal(manager: RunManager, runId: string) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     const run = await manager.getRun(runId);
-    if (run && ["completed", "failed", "interrupted"].includes(run.status)) return run;
+    if (run && ["completed", "failed", "interrupted", "cancelled"].includes(run.status)) return run;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   throw new Error("run did not reach a terminal state");
+}
+
+async function waitForCalls(manager: RunManager, runId: string, minimum = 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const run = await manager.getRun(runId);
+    if ((run?.usage.callsStarted ?? 0) >= minimum) return run;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error("run did not start a provider call");
 }
 
 describe("RunManager", () => {
@@ -49,6 +76,8 @@ describe("RunManager", () => {
     const run = await waitForTerminal(manager, started.runId);
     expect(run.status).toBe("completed");
     expect(run.result?.final).toContain("Persist this run");
+    expect(run.request.budget).toEqual({ maxCalls: 12, maxRounds: 1 });
+    expect(run.usage).toMatchObject({ callsStarted: 1, callsCompleted: 1 });
 
     const conversation = await manager.getConversation(started.conversationId);
     expect(conversation?.messages).toHaveLength(2);
@@ -121,5 +150,55 @@ describe("RunManager", () => {
     });
     const completed = await waitForTerminal(manager, next.runId);
     expect(completed.status).toBe("completed");
+  });
+
+  it("cancels an active provider call, persists the terminal event, and can resume", async () => {
+    const provider = new CancellableMockProvider();
+    const { manager } = await makeManager(provider);
+    const started = await manager.start({
+      request: {
+        mode: "single",
+        prompt: "Cancel the first attempt",
+        participants: [participant],
+        budget: { maxCalls: 1, maxRounds: 1 },
+      },
+    });
+
+    await waitForCalls(manager, started.runId);
+    await manager.cancel(started.runId);
+    const cancelled = await waitForTerminal(manager, started.runId);
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.usage.callsStarted).toBe(1);
+    expect(cancelled.usage.callsCompleted).toBe(0);
+    expect((await manager.events(started.runId)).some(record => record.event.type === "run_cancelled")).toBe(true);
+
+    // Wait for the old task to release the conversation reservation before
+    // starting the next attempt.
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        const resumed = await manager.resume(started.runId);
+        const completed = await waitForTerminal(manager, resumed.runId);
+        expect(completed.status).toBe("completed");
+        expect(completed.attempt).toBe(2);
+        expect(completed.usage).toMatchObject({ callsStarted: 1, callsCompleted: 1 });
+        return;
+      } catch (error) {
+        if (!(error instanceof Error) || !/active run/i.test(error.message)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+    }
+    throw new Error("cancelled run never released its conversation reservation");
+  });
+
+  it("rejects invalid server-side budget values before creating a run", async () => {
+    const { manager } = await makeManager();
+    await expect(manager.start({
+      request: {
+        mode: "single",
+        prompt: "Bad budget",
+        participants: [participant],
+        budget: { maxCalls: 0, maxRounds: 1 },
+      },
+    })).rejects.toThrow(/maxCalls/);
   });
 });

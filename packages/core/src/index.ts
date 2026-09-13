@@ -28,6 +28,21 @@ export interface ModelRef {
   isDefault?: boolean;
 }
 
+export interface RateLimitWindow {
+  usedPercent: number;
+  windowDurationMins?: number;
+  resetsAt?: number;
+}
+
+export interface ProviderLimitSnapshot {
+  provider: ProviderId;
+  available: boolean;
+  primary?: RateLimitWindow;
+  secondary?: RateLimitWindow;
+  reachedType?: string;
+  message?: string;
+}
+
 export interface ProviderStatus {
   id: ProviderId;
   label: string;
@@ -42,6 +57,7 @@ export interface ProviderRequest {
   model: string;
   messages: ChatMessage[];
   system?: string;
+  signal?: AbortSignal;
 }
 
 export interface ProviderResponse {
@@ -66,6 +82,30 @@ export interface ProviderAdapter {
   readonly label: string;
   listModels(): Promise<ModelRef[]>;
   generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse>;
+  limits?(): Promise<ProviderLimitSnapshot>;
+}
+
+export interface RunBudget {
+  /** Hard cap on model calls for one orchestration attempt. */
+  maxCalls?: number;
+  /** Hard cap on Debate critique rounds. Other modes have fixed stage counts. */
+  maxRounds?: number;
+}
+
+export interface RunUsage {
+  callsStarted: number;
+  callsCompleted: number;
+  inputTokens: number;
+  outputTokens: number;
+  tokenReports: number;
+}
+
+export interface RateLimitNotice {
+  provider: ProviderId;
+  model: string;
+  stepId: string;
+  message: string;
+  at: string;
 }
 
 export interface OrchestrationRequest {
@@ -73,7 +113,9 @@ export interface OrchestrationRequest {
   prompt: string;
   participants: ModelRef[];
   synthesizer?: ModelRef;
+  /** @deprecated Prefer budget.maxRounds. Retained for compatibility. */
   maxRounds?: number;
+  budget?: RunBudget;
   /** Server-injected prior conversation context. Clients normally omit this. */
   history?: ChatMessage[];
 }
@@ -105,6 +147,9 @@ export interface OrchestrationResult {
 
 export type OrchestrationStreamEvent =
   | { type: "run_started"; runId: string; mode: OrchestrationMode }
+  | { type: "run_usage"; runId: string; usage: RunUsage; budget?: RunBudget }
+  | { type: "run_cancelled"; runId: string; message: string }
+  | { type: "rate_limit"; runId: string; notice: RateLimitNotice }
   | { type: "step_started"; runId: string; stepId: string; kind: OrchestrationStepKind; model: ModelRef }
   | { type: "text_delta"; runId: string; stepId: string; delta: string }
   | { type: "status"; runId: string; stepId: string; message: string }
@@ -144,7 +189,7 @@ export interface ConversationSummary {
   messageCount: number;
 }
 
-export type RunStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
+export type RunStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "interrupted" | "cancelled";
 
 export interface StoredRun {
   id: string;
@@ -153,10 +198,13 @@ export interface StoredRun {
   status: RunStatus;
   attempt: number;
   request: OrchestrationRequest;
+  usage: RunUsage;
   createdAt: string;
   updatedAt: string;
   result?: OrchestrationResult;
   error?: string;
+  rateLimit?: RateLimitNotice;
+  cancelRequestedAt?: string;
 }
 
 export interface RunEventRecord {
@@ -176,6 +224,16 @@ export interface StartRunResponse {
   runId: string;
   status: RunStatus;
   attempt: number;
+}
+
+export function emptyRunUsage(): RunUsage {
+  return {
+    callsStarted: 0,
+    callsCompleted: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    tokenReports: 0,
+  };
 }
 
 export function makeStepId(prefix: string, index: number) {

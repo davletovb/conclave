@@ -11,8 +11,15 @@ import { FileStateStore } from "./file-store.js";
 
 type RunListener = (record: RunEventRecord) => void;
 
+const DEFAULT_MAX_CALLS = 12;
+const ABSOLUTE_MAX_CALLS = 64;
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown orchestration error";
+}
+
+function isTerminal(status: StoredRun["status"]) {
+  return ["completed", "failed", "interrupted", "cancelled"].includes(status);
 }
 
 export class RunManager {
@@ -20,6 +27,7 @@ export class RunManager {
   private readonly eventQueues = new Map<string, Promise<void>>();
   private readonly nextSequence = new Map<string, number>();
   private readonly active = new Map<string, Promise<void>>();
+  private readonly activeControllers = new Map<string, AbortController>();
   private readonly activeConversations = new Set<string>();
 
   constructor(
@@ -32,12 +40,13 @@ export class RunManager {
   }
 
   async start(input: StartRunRequest): Promise<StartRunResponse> {
-    this.validate(input.request);
+    const request = this.normalizeRequest(input.request);
+    this.validate(request);
     const reservedConversationId = input.conversationId;
     if (reservedConversationId) this.reserveConversation(reservedConversationId);
 
     try {
-      const created = await this.store.createRun(input.request, reservedConversationId);
+      const created = await this.store.createRun(request, reservedConversationId);
       this.activeConversations.add(created.run.conversationId);
       this.nextSequence.set(created.run.id, 0);
       this.launch(created.run, created.history);
@@ -63,6 +72,48 @@ export class RunManager {
       this.activeConversations.delete(existing.conversationId);
       throw error;
     }
+  }
+
+  async cancel(runId: string) {
+    const run = await this.store.getRun(runId);
+    if (!run) throw new Error(`Run ${runId} was not found`);
+    if (isTerminal(run.status)) return run;
+
+    // Completion wins a race with cancellation once its terminal event is
+    // durable, even if state.json has not yet caught up.
+    await this.flush(runId);
+    const records = await this.store.readRunEvents(runId);
+    const durableCompletion = [...records]
+      .reverse()
+      .find(record => record.attempt === run.attempt && record.event.type === "run_completed");
+    if (durableCompletion?.event.type === "run_completed") {
+      return this.store.completeRun(runId, durableCompletion.event.result);
+    }
+
+    const requestedAt = new Date().toISOString();
+    const updated = await this.store.updateRun(runId, {
+      status: "cancelling",
+      cancelRequestedAt: requestedAt,
+      error: "Cancellation requested. Stopping the active provider call…",
+    });
+
+    const controller = this.activeControllers.get(runId);
+    if (controller) {
+      controller.abort();
+      return updated;
+    }
+
+    // Defensive path for a queued run that has not acquired its controller.
+    this.record(run.id, run.attempt, {
+      type: "run_cancelled",
+      runId: run.id,
+      message: "Run cancelled by user",
+    });
+    await this.flush(run.id);
+    return this.store.updateRun(run.id, {
+      status: "cancelled",
+      error: "Run cancelled by user",
+    });
   }
 
   async getRun(runId: string) {
@@ -100,28 +151,64 @@ export class RunManager {
 
   private launch(run: StoredRun, history: OrchestrationRequest["history"]) {
     if (this.active.has(run.id)) return;
-    const task = this.execute(run, history ?? [])
+    const controller = new AbortController();
+    this.activeControllers.set(run.id, controller);
+    const task = this.execute(run, history ?? [], controller.signal)
       .catch(() => undefined)
       .finally(() => {
         this.active.delete(run.id);
+        this.activeControllers.delete(run.id);
         this.activeConversations.delete(run.conversationId);
       });
     this.active.set(run.id, task);
   }
 
-  private async execute(run: StoredRun, history: NonNullable<OrchestrationRequest["history"]>) {
+  private async execute(
+    run: StoredRun,
+    history: NonNullable<OrchestrationRequest["history"]>,
+    signal: AbortSignal,
+  ) {
+    if (signal.aborted) {
+      await this.store.updateRun(run.id, { status: "cancelled", error: "Run cancelled by user" });
+      return;
+    }
+
     await this.store.updateRun(run.id, { status: "running", error: undefined });
-    const request: OrchestrationRequest = { ...run.request, history };
+    const request: OrchestrationRequest = { ...this.normalizeRequest(run.request), history };
 
     try {
       const result = await this.orchestrator.run(request, {
         runId: run.id,
+        signal,
         emit: event => this.record(run.id, run.attempt, event),
       });
       await this.flush(run.id);
+
+      if (signal.aborted) {
+        const records = await this.store.readRunEvents(run.id);
+        const hasCancellation = records.some(record => record.attempt === run.attempt && record.event.type === "run_cancelled");
+        if (!hasCancellation) {
+          this.record(run.id, run.attempt, {
+            type: "run_cancelled",
+            runId: run.id,
+            message: "Run cancelled by user",
+          });
+          await this.flush(run.id);
+        }
+        await this.store.updateRun(run.id, { status: "cancelled", error: "Run cancelled by user" });
+        return;
+      }
+
       await this.store.completeRun(run.id, result);
     } catch (error) {
       await this.flush(run.id);
+      if (signal.aborted) {
+        await this.store.updateRun(run.id, {
+          status: "cancelled",
+          error: "Run cancelled by user",
+        });
+        return;
+      }
       await this.store.updateRun(run.id, {
         status: "failed",
         error: errorMessage(error),
@@ -144,6 +231,13 @@ export class RunManager {
       .catch(() => undefined)
       .then(async () => {
         await this.store.appendRunEvent(record);
+        if (event.type === "run_usage") {
+          await this.store.updateRun(runId, { usage: event.usage });
+        } else if (event.type === "rate_limit") {
+          await this.store.updateRun(runId, { rateLimit: event.notice });
+        } else if (event.type === "run_cancelled") {
+          await this.store.updateRun(runId, { status: "cancelled", error: event.message });
+        }
         for (const listener of this.listeners.get(runId) ?? []) {
           listener(record);
         }
@@ -155,10 +249,30 @@ export class RunManager {
     await this.eventQueues.get(runId)?.catch(() => undefined);
   }
 
+  private normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
+    const legacyRounds = request.maxRounds;
+    return {
+      ...request,
+      budget: {
+        maxCalls: request.budget?.maxCalls ?? DEFAULT_MAX_CALLS,
+        maxRounds: request.budget?.maxRounds ?? legacyRounds ?? 1,
+      },
+    };
+  }
+
   private validate(request: OrchestrationRequest) {
     if (!request.prompt?.trim()) throw new Error("Prompt is required");
     if (!Array.isArray(request.participants) || request.participants.length === 0) {
       throw new Error("At least one participant is required");
+    }
+
+    const maxCalls = request.budget?.maxCalls;
+    if (!Number.isInteger(maxCalls) || (maxCalls ?? 0) < 1 || (maxCalls ?? 0) > ABSOLUTE_MAX_CALLS) {
+      throw new Error(`maxCalls must be an integer between 1 and ${ABSOLUTE_MAX_CALLS}`);
+    }
+    const maxRounds = request.budget?.maxRounds;
+    if (!Number.isInteger(maxRounds) || (maxRounds ?? 0) < 1 || (maxRounds ?? 0) > 3) {
+      throw new Error("maxRounds must be an integer between 1 and 3");
     }
   }
 

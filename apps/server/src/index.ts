@@ -4,6 +4,7 @@ import type {
   OrchestrationRequest,
   OrchestrationStreamEvent,
   ProviderAdapter,
+  ProviderLimitSnapshot,
   ProviderStatus,
   RunEventRecord,
   StartRunRequest,
@@ -15,6 +16,9 @@ import { XaiGrokProvider } from "./providers/xai-grok.js";
 import { Orchestrator } from "./orchestrator.js";
 import { FileStateStore } from "./state/file-store.js";
 import { RunManager } from "./state/run-manager.js";
+
+const DEFAULT_MAX_CALLS = 12;
+const ABSOLUTE_MAX_CALLS = 64;
 
 const allowedOrigins = (process.env.CONCLAVE_WEB_ORIGIN
   ? process.env.CONCLAVE_WEB_ORIGIN.split(",")
@@ -29,6 +33,21 @@ function applyStreamCors(raw: import("node:http").ServerResponse, origin?: strin
   if (!origin || !allowedOrigins.includes(origin)) return;
   raw.setHeader("access-control-allow-origin", origin);
   raw.setHeader("vary", "origin");
+}
+
+function controlledRequest(request: OrchestrationRequest): OrchestrationRequest {
+  const maxCalls = request.budget?.maxCalls ?? DEFAULT_MAX_CALLS;
+  const maxRounds = request.budget?.maxRounds ?? request.maxRounds ?? 1;
+  if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > ABSOLUTE_MAX_CALLS) {
+    throw new Error(`maxCalls must be an integer between 1 and ${ABSOLUTE_MAX_CALLS}`);
+  }
+  if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 3) {
+    throw new Error("maxRounds must be an integer between 1 and 3");
+  }
+  return {
+    ...request,
+    budget: { maxCalls, maxRounds },
+  };
 }
 
 const mock = new MockProvider();
@@ -66,6 +85,28 @@ app.get("/providers", async (): Promise<ProviderStatus[]> => {
       connected: true,
       authMode: "mock",
       message: "Fallback models remain available for providers that are not connected yet",
+    },
+  ];
+});
+
+app.get("/provider-limits", async (): Promise<ProviderLimitSnapshot[]> => {
+  const openaiLimits = await openai.limits().catch(error => ({
+    provider: "openai" as const,
+    available: false,
+    message: error instanceof Error ? error.message : "OpenAI rate limits unavailable",
+  }));
+
+  return [
+    openaiLimits,
+    {
+      provider: "anthropic",
+      available: false,
+      message: "Claude Code does not expose a stable structured subscription-limit snapshot to Conclave.",
+    },
+    {
+      provider: "xai",
+      available: false,
+      message: "Grok Build ACP does not expose a stable structured subscription-limit snapshot to Conclave.",
     },
   ];
 });
@@ -113,6 +154,16 @@ app.get<{ Params: { id: string } }>("/runs/:id", async (request, reply) => {
   return run;
 });
 
+app.post<{ Params: { id: string } }>("/runs/:id/cancel", async (request, reply) => {
+  try {
+    return await runManager.cancel(request.params.id);
+  } catch (error) {
+    return reply.code(409).send({
+      error: error instanceof Error ? error.message : "Could not cancel run",
+    });
+  }
+});
+
 app.post<{ Params: { id: string } }>("/runs/:id/resume", async (request, reply) => {
   try {
     return await runManager.resume(request.params.id);
@@ -145,7 +196,11 @@ app.get<{
   let replaying = true;
   let closed = false;
   const buffered: RunEventRecord[] = [];
-  const terminal = (record: RunEventRecord) => record.event.type === "run_completed" || record.event.type === "error";
+  const terminal = (record: RunEventRecord) => (
+    record.event.type === "run_completed"
+    || record.event.type === "run_cancelled"
+    || record.event.type === "error"
+  );
   const write = (record: RunEventRecord) => {
     if (closed || record.seq <= cursor || raw.destroyed || raw.writableEnded) return;
     cursor = record.seq;
@@ -173,7 +228,7 @@ app.get<{
     for (const record of buffered.sort((a, b) => a.seq - b.seq)) write(record);
 
     const latest = await runManager.getRun(run.id);
-    if (!follow || !latest || ["completed", "failed", "interrupted"].includes(latest.status)) finish();
+    if (!follow || !latest || ["completed", "failed", "interrupted", "cancelled"].includes(latest.status)) finish();
   } catch (error) {
     request.log.error(error);
     finish();
@@ -182,7 +237,7 @@ app.get<{
 
 app.post<{ Body: OrchestrationRequest }>("/orchestrate", async (request, reply) => {
   try {
-    return await orchestrator.run(request.body);
+    return await orchestrator.run(controlledRequest(request.body));
   } catch (error) {
     request.log.error(error);
     return reply.code(400).send({
@@ -193,6 +248,15 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate", async (request, reply) 
 
 // Compatibility endpoint for clients that have not moved to persistent runs yet.
 app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, reply) => {
+  let controlled: OrchestrationRequest;
+  try {
+    controlled = controlledRequest(request.body);
+  } catch (error) {
+    return reply.code(400).send({
+      error: error instanceof Error ? error.message : "Invalid orchestration budget",
+    });
+  }
+
   reply.hijack();
   const raw = reply.raw;
   raw.statusCode = 200;
@@ -209,7 +273,7 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, 
   };
 
   try {
-    await orchestrator.run(request.body, { emit });
+    await orchestrator.run(controlled, { emit });
   } catch (error) {
     request.log.error(error);
   } finally {

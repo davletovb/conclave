@@ -8,11 +8,30 @@ type PlannedRun = {
 };
 
 class FakeClaudeRunner implements ClaudeCliRunner {
-  calls: Array<{ args: string[]; timeoutMs?: number }> = [];
+  calls: Array<{ args: string[]; timeoutMs?: number; signal?: AbortSignal }> = [];
   planned: PlannedRun[] = [];
+  holdAuth = false;
 
-  async run(args: string[], timeoutMs?: number) {
-    this.calls.push({ args, timeoutMs });
+  async run(
+    args: string[],
+    timeoutMs?: number,
+    _onStdoutLine?: (line: string) => void,
+    signal?: AbortSignal,
+  ) {
+    this.calls.push({ args, timeoutMs, signal });
+
+    if (this.holdAuth && args[0] === "auth") {
+      return new Promise<never>((_resolve, reject) => {
+        const fail = () => {
+          const error = new Error("Claude Code turn cancelled");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (signal?.aborted) return fail();
+        signal?.addEventListener("abort", fail, { once: true });
+      });
+    }
+
     const next = this.planned.shift();
     if (!next) throw new Error(`Unexpected Claude CLI call: ${args.join(" ")}`);
     return {
@@ -30,6 +49,14 @@ const subscriptionAuth = JSON.stringify({
   subscriptionType: "max",
   email: "test@example.com",
 });
+
+async function waitForCall(runner: FakeClaudeRunner) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (runner.calls.length > 0) return;
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  throw new Error("Claude runner was not called");
+}
 
 describe("AnthropicClaudeProvider", () => {
   it("reports a connected claude.ai subscription and exposes safe model aliases", async () => {
@@ -98,6 +125,27 @@ describe("AnthropicClaudeProvider", () => {
     expect(printCall).toContain("mcp__*");
     expect(printCall).toContain("--model");
     expect(printCall).toContain("sonnet");
+  });
+
+  it("cancels promptly while the subscription auth check is still running", async () => {
+    const runner = new FakeClaudeRunner();
+    runner.holdAuth = true;
+    const provider = new AnthropicClaudeProvider(runner);
+    const controller = new AbortController();
+
+    const promise = provider.generate({
+      model: "sonnet",
+      messages: [{ role: "user", content: "Stop before generation starts." }],
+      signal: controller.signal,
+    });
+
+    await waitForCall(runner);
+    expect(runner.calls[0]?.args).toEqual(["auth", "status"]);
+    expect(runner.calls[0]?.signal).toBe(controller.signal);
+
+    controller.abort();
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    expect(runner.calls).toHaveLength(1);
   });
 
   it("uses the result event as a fallback when no assistant event is emitted", async () => {

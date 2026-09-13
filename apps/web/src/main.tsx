@@ -9,11 +9,15 @@ import type {
   OrchestrationStep,
   OrchestrationStreamEvent,
   ProviderId,
+  ProviderLimitSnapshot,
   ProviderStatus,
+  RateLimitNotice,
   RunEventRecord,
+  RunUsage,
   StartRunResponse,
   StoredRun,
 } from "@conclave/core";
+import { Markdown } from "./markdown";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -31,8 +35,32 @@ const modes: { id: OrchestrationMode; label: string; description: string }[] = [
   { id: "planner-executor", label: "Planner → Executors", description: "Plan, execute in parallel, review" },
 ];
 
+type Theme = "dark" | "light";
+
+function initialTheme(): Theme {
+  const saved = localStorage.getItem("conclave.theme");
+  if (saved === "dark" || saved === "light") return saved;
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
 function minimumParticipants(mode: OrchestrationMode) {
   return mode === "consensus" || mode === "judge" || mode === "router" || mode === "research-council" ? 2 : 1;
+}
+
+function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds: number) {
+  switch (mode) {
+    case "single": return 1;
+    case "compare": return participantCount;
+    case "panel": return participantCount + 1;
+    case "debate": return participantCount + participantCount * rounds + 1;
+    case "critic-revise": return 3;
+    case "consensus": return participantCount + 2;
+    case "judge": return participantCount + 1;
+    case "red-team": return 1 + Math.max(participantCount - 1, 1) + 1;
+    case "router": return 2;
+    case "research-council": return Math.max(4, participantCount) + 1;
+    case "planner-executor": return 1 + Math.max(participantCount - 1, 1) + 1;
+  }
 }
 
 function modelKey(model: ModelRef) {
@@ -65,6 +93,26 @@ function runtimeName(status: ProviderStatus) {
   return status.label;
 }
 
+function freshUsage(): RunUsage {
+  return { callsStarted: 0, callsCompleted: 0, inputTokens: 0, outputTokens: 0, tokenReports: 0 };
+}
+
+function durationLabel(minutes?: number) {
+  if (!minutes) return "window";
+  if (minutes % 10080 === 0) return `${minutes / 10080}w`;
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+
+function limitText(snapshot: ProviderLimitSnapshot) {
+  if (!snapshot.available) return "";
+  const windows = [snapshot.primary, snapshot.secondary]
+    .filter((window): window is NonNullable<typeof window> => Boolean(window))
+    .map(window => `${durationLabel(window.windowDurationMins)} ${window.usedPercent}% used`);
+  return windows.join(" · ");
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -83,8 +131,10 @@ function sleep(ms: number) {
 function App() {
   const [models, setModels] = useState<ModelRef[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [mode, setMode] = useState<OrchestrationMode>("panel");
+  const [theme, setTheme] = useState<Theme>(initialTheme);
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<OrchestrationResult | null>(null);
   const [liveSteps, setLiveSteps] = useState<OrchestrationStep[]>([]);
@@ -92,10 +142,17 @@ function App() {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [resumeRunId, setResumeRunId] = useState<string | null>(null);
+  const [runUsage, setRunUsage] = useState<RunUsage>(freshUsage);
+  const [rateLimit, setRateLimit] = useState<RateLimitNotice | null>(null);
+  const [maxCalls, setMaxCalls] = useState(12);
+  const [maxRounds, setMaxRounds] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const viewEpochRef = useRef(0);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const composerRef = useRef<HTMLFormElement | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     const epoch = beginViewOperation();
@@ -106,12 +163,28 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("conclave.theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const textarea = promptRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    const nextHeight = Math.max(36, Math.min(textarea.scrollHeight, 180));
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 180 ? "auto" : "hidden";
+  }, [prompt]);
+
   const participants = useMemo(
     () => models.filter(model => selected.includes(modelKey(model))),
     [models, selected],
   );
   const requiredParticipants = minimumParticipants(mode);
   const participantShortfall = participants.length < requiredParticipants;
+  const expectedCalls = plannedCalls(mode, participants.length, maxRounds);
+  const budgetShortfall = !participantShortfall && expectedCalls > maxCalls;
 
   const priorMessages = useMemo(
     () => conversation?.messages.filter(
@@ -128,6 +201,10 @@ function App() {
   const runtimeTitle = subscriptionProviders
     .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
     .join("\n");
+  const quotaSummary = providerLimits.map(limitText).filter(Boolean).join(" · ");
+  const quotaTitle = providerLimits
+    .map(snapshot => `${snapshot.provider}: ${limitText(snapshot) || snapshot.message || "structured limits unavailable"}`)
+    .join("\n");
 
   function beginViewOperation() {
     streamAbortRef.current?.abort();
@@ -140,16 +217,40 @@ function App() {
     return viewEpochRef.current === epoch;
   }
 
+  function adoptRun(run: StoredRun) {
+    setRunUsage(run.usage ?? freshUsage());
+    setRateLimit(run.rateLimit ?? null);
+    setCancelling(run.status === "cancelling");
+    setMode(run.request.mode);
+    setSelected(run.request.participants.map(modelKey));
+    setMaxCalls(run.request.budget?.maxCalls ?? 12);
+    setMaxRounds(run.request.budget?.maxRounds ?? run.request.maxRounds ?? 1);
+  }
+
+  async function refreshLimits(epoch?: number) {
+    try {
+      const limits = await fetch(`${API}/provider-limits`).then(response => readJson<ProviderLimitSnapshot[]>(response));
+      if (epoch === undefined || isCurrent(epoch)) setProviderLimits(limits);
+    } catch {
+      // Quota telemetry is optional; a provider/runtime can omit it without
+      // making the reasoning surface unavailable.
+    }
+  }
+
   async function initialize(epoch: number) {
     try {
-      const [modelData, providerData, conversationData] = await Promise.all([
+      const [modelData, providerData, conversationData, limitData] = await Promise.all([
         fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response)),
         fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response)),
         fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),
+        fetch(`${API}/provider-limits`)
+          .then(response => readJson<ProviderLimitSnapshot[]>(response))
+          .catch(() => [] as ProviderLimitSnapshot[]),
       ]);
       if (!isCurrent(epoch)) return;
       setModels(modelData);
       setProviders(providerData);
+      setProviderLimits(limitData);
       setConversations(conversationData);
       setSelected(initialSelection(modelData));
 
@@ -176,10 +277,13 @@ function App() {
     const epoch = existingEpoch ?? beginViewOperation();
     if (existingEpoch === undefined) {
       setLoading(false);
+      setCancelling(false);
       setError("");
       setResult(null);
       setLiveSteps([]);
       setResumeRunId(null);
+      setRunUsage(freshUsage());
+      setRateLimit(null);
     }
 
     const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
@@ -190,6 +294,7 @@ function App() {
     if (data.lastRunId) {
       const run = await fetch(`${API}/runs/${data.lastRunId}`).then(response => readJson<StoredRun>(response));
       if (!isCurrent(epoch)) return;
+      adoptRun(run);
       setActiveRunId(run.id);
       localStorage.setItem("conclave.activeRunId", run.id);
       if (run.status === "completed" && run.result) {
@@ -197,13 +302,13 @@ function App() {
         setResult(run.result);
         setLiveSteps(run.result.steps);
         setResumeRunId(null);
-      } else if (run.status === "running" || run.status === "queued") {
+      } else if (["running", "queued", "cancelling"].includes(run.status)) {
         await recoverRun(run.id, epoch);
       } else {
         await replayPersistedRun(run.id, epoch);
         if (!isCurrent(epoch)) return;
         setResumeRunId(run.id);
-        setError(run.error ?? "This run was interrupted before it completed.");
+        setError(run.error ?? "This run stopped before it completed.");
       }
     } else {
       setError("");
@@ -211,6 +316,8 @@ function App() {
       setResult(null);
       setLiveSteps([]);
       setResumeRunId(null);
+      setRunUsage(freshUsage());
+      setRateLimit(null);
       localStorage.removeItem("conclave.activeRunId");
     }
   }
@@ -220,6 +327,7 @@ function App() {
     try {
       const run = await fetch(`${API}/runs/${runId}`).then(response => readJson<StoredRun>(response));
       if (!isCurrent(epoch)) return;
+      adoptRun(run);
       setActiveRunId(run.id);
       localStorage.setItem("conclave.activeRunId", run.id);
       localStorage.setItem("conclave.conversationId", run.conversationId);
@@ -232,22 +340,24 @@ function App() {
         setResult(run.result);
         setLiveSteps(run.result.steps);
         setLoading(false);
+        setCancelling(false);
         setResumeRunId(null);
         return;
       }
 
-      if (run.status === "failed" || run.status === "interrupted") {
+      if (["failed", "interrupted", "cancelled"].includes(run.status)) {
         await replayPersistedRun(run.id, epoch);
         if (!isCurrent(epoch)) return;
-        setError(run.error ?? "This run was interrupted before it completed.");
+        setError(run.error ?? "This run stopped before it completed.");
         setResumeRunId(run.id);
         setLoading(false);
+        setCancelling(false);
         return;
       }
 
       setResult(null);
       setLiveSteps([]);
-      setError("");
+      setError(run.status === "cancelling" ? "Stopping the active provider call…" : "");
       setResumeRunId(null);
       setLoading(true);
       const attached = await consumeRun(run.id, epoch);
@@ -271,7 +381,10 @@ function App() {
     setResumeRunId(null);
     setResult(null);
     setLiveSteps([]);
+    setRunUsage(freshUsage());
+    setRateLimit(null);
     setLoading(false);
+    setCancelling(false);
     setError("");
     setPrompt("");
     localStorage.removeItem("conclave.conversationId");
@@ -312,6 +425,23 @@ function App() {
   }
 
   function applyStreamEvent(streamEvent: OrchestrationStreamEvent) {
+    if (streamEvent.type === "run_usage") {
+      setRunUsage(streamEvent.usage);
+      return;
+    }
+
+    if (streamEvent.type === "rate_limit") {
+      setRateLimit(streamEvent.notice);
+      return;
+    }
+
+    if (streamEvent.type === "run_cancelled") {
+      setCancelling(false);
+      setError(streamEvent.message);
+      setResumeRunId(streamEvent.runId);
+      return;
+    }
+
     if (streamEvent.type === "step_started") {
       setLiveSteps(current => current.some(step => step.id === streamEvent.stepId)
         ? current
@@ -342,6 +472,7 @@ function App() {
       setResult(streamEvent.result);
       setLiveSteps(streamEvent.result.steps);
       setResumeRunId(null);
+      setCancelling(false);
       return;
     }
 
@@ -405,9 +536,6 @@ function App() {
           if (buffer.trim()) consumeLine(buffer);
         } catch (cause) {
           if (controller.signal.aborted || !isCurrent(epoch)) return false;
-          // A browser/network stream can disappear while the server-owned run
-          // keeps working. Fall through to persisted status inspection, then
-          // reconnect from the last durable sequence cursor.
         }
 
         if (controller.signal.aborted || !isCurrent(epoch)) return false;
@@ -423,6 +551,9 @@ function App() {
         }
 
         if (!isCurrent(epoch)) return false;
+        setRunUsage(run.usage ?? freshUsage());
+        setRateLimit(run.rateLimit ?? null);
+        setCancelling(run.status === "cancelling");
         if (run.status === "completed") {
           if (run.result) {
             setError("");
@@ -430,11 +561,14 @@ function App() {
             setLiveSteps(run.result.steps);
           }
           setResumeRunId(null);
+          await refreshLimits(epoch);
           return true;
         }
-        if (run.status === "failed" || run.status === "interrupted") {
+        if (["failed", "interrupted", "cancelled"].includes(run.status)) {
           setError(run.error ?? "The run stopped before completion.");
           setResumeRunId(run.id);
+          setCancelling(false);
+          await refreshLimits(epoch);
           return true;
         }
 
@@ -446,15 +580,26 @@ function App() {
     }
   }
 
+  function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (!loading && prompt.trim() && !participantShortfall && !budgetShortfall) {
+      composerRef.current?.requestSubmit();
+    }
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!prompt.trim() || participantShortfall || loading) return;
+    if (!prompt.trim() || participantShortfall || budgetShortfall || loading) return;
     const epoch = beginViewOperation();
     setLoading(true);
+    setCancelling(false);
     setError("");
     setResumeRunId(null);
     setResult(null);
     setLiveSteps([]);
+    setRunUsage(freshUsage());
+    setRateLimit(null);
 
     try {
       const started = await fetch(`${API}/runs`, {
@@ -462,7 +607,12 @@ function App() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           conversationId: conversation?.id,
-          request: { mode, prompt, participants, maxRounds: 1 },
+          request: {
+            mode,
+            prompt,
+            participants,
+            budget: { maxCalls, maxRounds },
+          },
         }),
       }).then(response => readJson<StartRunResponse>(response));
       if (!isCurrent(epoch)) return;
@@ -480,7 +630,36 @@ function App() {
         setError(cause instanceof Error ? cause.message : "Orchestration failed");
       }
     } finally {
-      if (isCurrent(epoch)) setLoading(false);
+      if (isCurrent(epoch)) {
+        setLoading(false);
+        setCancelling(false);
+      }
+    }
+  }
+
+  async function cancelActiveRun() {
+    if (!activeRunId || !loading || cancelling) return;
+    const epoch = viewEpochRef.current;
+    const runId = activeRunId;
+    setCancelling(true);
+    setError("Stopping the active provider call…");
+    try {
+      const run = await fetch(`${API}/runs/${runId}/cancel`, { method: "POST" })
+        .then(response => readJson<StoredRun>(response));
+      if (!isCurrent(epoch)) return;
+      setRunUsage(run.usage ?? freshUsage());
+      if (run.status === "completed") {
+        setCancelling(false);
+        setError("");
+        if (run.result) {
+          setResult(run.result);
+          setLiveSteps(run.result.steps);
+        }
+      }
+    } catch (cause) {
+      if (!isCurrent(epoch)) return;
+      setCancelling(false);
+      setError(cause instanceof Error ? cause.message : "Could not cancel run");
     }
   }
 
@@ -489,9 +668,12 @@ function App() {
     const epoch = beginViewOperation();
     const runId = resumeRunId;
     setLoading(true);
+    setCancelling(false);
     setError("");
     setResult(null);
     setLiveSteps([]);
+    setRunUsage(freshUsage());
+    setRateLimit(null);
     try {
       const resumed = await fetch(`${API}/runs/${runId}/resume`, { method: "POST" })
         .then(response => readJson<StartRunResponse>(response));
@@ -512,6 +694,9 @@ function App() {
   }
 
   const displayedSteps = result?.steps ?? liveSteps;
+  const tokenText = runUsage.tokenReports > 0
+    ? `${runUsage.inputTokens.toLocaleString()} in · ${runUsage.outputTokens.toLocaleString()} out`
+    : "token telemetry unavailable";
 
   return (
     <main className="shell">
@@ -546,6 +731,7 @@ function App() {
             ))}
           </div>
         )}
+        {quotaSummary && <div className="quota" title={quotaTitle}>{quotaSummary}</div>}
         <div className="status" title={runtimeTitle}><span className="dot" /> {runtimeLabel}</div>
       </aside>
 
@@ -561,13 +747,24 @@ function App() {
               {modes.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
             </select>
           </label>
-          <div className="model-picker">
-            <button className="chip mobile-new-chat" onClick={newConversation}>New</button>
-            {models.map(model => (
-              <button key={modelKey(model)} onClick={() => toggleModel(model)} className={selected.includes(modelKey(model)) ? "chip selected" : "chip"}>
-                {model.label}
-              </button>
-            ))}
+          <div className="topbar-actions">
+            <div className="model-picker">
+              <button className="chip mobile-new-chat" onClick={newConversation}>New</button>
+              {models.map(model => (
+                <button key={modelKey(model)} onClick={() => toggleModel(model)} className={selected.includes(modelKey(model)) ? "chip selected" : "chip"}>
+                  {model.label}
+                </button>
+              ))}
+            </div>
+            <button
+              className="theme-toggle"
+              type="button"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+              onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
+            >
+              {theme === "dark" ? "☀" : "☾"}
+            </button>
           </div>
         </header>
 
@@ -577,7 +774,7 @@ function App() {
               {priorMessages.map(message => (
                 <article key={message.id} className={`message ${message.role}`}>
                   <span className="eyebrow">{message.role === "user" ? "YOU" : "CONCLAVE"}</span>
-                  <p>{message.content}</p>
+                  <Markdown content={message.content} />
                 </article>
               ))}
             </section>
@@ -592,13 +789,16 @@ function App() {
           )}
 
           {loading && displayedSteps.length === 0 && (
-            <div className="thinking"><span /> <span /> <span /> Run continues even if this tab disconnects…</div>
+            <div className="thinking"><span /> <span /> <span /> {cancelling ? "Stopping provider work…" : "Run continues even if this tab disconnects…"}</div>
           )}
           {error && (
             <div className="error">
               <span>{error}</span>
-              {resumeRunId && <button type="button" onClick={() => void resumeInterruptedRun()}>Resume run</button>}
+              {resumeRunId && !loading && <button type="button" onClick={() => void resumeInterruptedRun()}>Resume run</button>}
             </div>
+          )}
+          {rateLimit && (
+            <div className="rate-limit">Rate limit · {rateLimit.provider}/{rateLimit.model}: {rateLimit.message}</div>
           )}
 
           {(displayedSteps.length > 0 || result) && (
@@ -606,10 +806,15 @@ function App() {
               {result && (
                 <div className="final-card">
                   <span className="eyebrow">FINAL</span>
-                  <p>{result.final}</p>
+                  <Markdown content={result.final} />
                 </div>
               )}
-              {loading && <div className="stream-status"><span className="dot" /> Live · persisted locally</div>}
+              <div className="run-telemetry">
+                <span>{runUsage.callsStarted}/{maxCalls} calls started</span>
+                <span>{runUsage.callsCompleted} completed</span>
+                <span>{tokenText}</span>
+              </div>
+              {loading && <div className="stream-status"><span className="dot" /> {cancelling ? "Cancelling…" : "Live · persisted locally"}</div>}
               {!loading && resumeRunId && displayedSteps.length > 0 && (
                 <div className="stream-status">Partial output · previous attempt</div>
               )}
@@ -617,7 +822,9 @@ function App() {
                 {displayedSteps.map(step => (
                   <article className="step-card" key={step.id}>
                     <div className="step-meta"><span>{step.model.label}</span><span>{step.kind}</span></div>
-                    <p>{step.content || (loading ? "Waiting for output…" : "")}</p>
+                    {step.content
+                      ? <Markdown content={step.content} />
+                      : <p className="step-placeholder">{loading ? "Waiting for output…" : ""}</p>}
                   </article>
                 ))}
               </div>
@@ -625,15 +832,59 @@ function App() {
           )}
         </div>
 
-        <form className="composer" onSubmit={submit}>
-          <textarea value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversation ? "Continue the conversation…" : "Ask the council…"} rows={3} />
+        <form className="composer" ref={composerRef} onSubmit={submit}>
+          <div className="run-controls">
+            <label>
+              <span>Call budget</span>
+              <input
+                type="number"
+                min={1}
+                max={64}
+                value={maxCalls}
+                disabled={loading}
+                onChange={event => setMaxCalls(Math.max(1, Math.min(64, Number(event.target.value) || 1)))}
+              />
+            </label>
+            {mode === "debate" && (
+              <label>
+                <span>Rounds</span>
+                <select value={maxRounds} disabled={loading} onChange={event => setMaxRounds(Number(event.target.value))}>
+                  <option value={1}>1</option>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                </select>
+              </label>
+            )}
+            <span className={budgetShortfall ? "budget-estimate warning" : "budget-estimate"}>
+              {expectedCalls} planned call{expectedCalls === 1 ? "" : "s"}
+            </span>
+          </div>
+          <textarea
+            ref={promptRef}
+            value={prompt}
+            onChange={event => setPrompt(event.target.value)}
+            onKeyDown={handlePromptKeyDown}
+            placeholder={conversation ? "Continue the conversation…" : "Ask the council…"}
+            rows={1}
+          />
           <div className="composer-footer">
-            <span>{participantShortfall
+            <span className="composer-hint">{participantShortfall
               ? `${requiredParticipants} participants required for ${modes.find(item => item.id === mode)?.label}`
-              : conversation
-                ? "Persistent conversation"
-                : `${participants.length} participant${participants.length === 1 ? "" : "s"}`}</span>
-            <button type="submit" disabled={loading || !prompt.trim() || participantShortfall}>{loading ? "Running…" : "Convene"}</button>
+              : budgetShortfall
+                ? `Increase call budget to at least ${expectedCalls}`
+                : conversation
+                  ? "Persistent conversation · Enter sends · Shift+Enter newline"
+                  : `${participants.length} participant${participants.length === 1 ? "" : "s"} · Enter sends`}</span>
+            <div className="composer-actions">
+              {loading && (
+                <button className="stop-run" type="button" disabled={cancelling} onClick={() => void cancelActiveRun()}>
+                  {cancelling ? "Stopping…" : "Stop"}
+                </button>
+              )}
+              <button type="submit" disabled={loading || !prompt.trim() || participantShortfall || budgetShortfall}>
+                {loading ? "Running…" : "Convene"}
+              </button>
+            </div>
           </div>
         </form>
       </section>
