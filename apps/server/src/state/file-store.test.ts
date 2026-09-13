@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -76,6 +76,38 @@ describe("FileStateStore", () => {
     expect(conversation?.lastRunId).toBe(second.run.id);
   });
 
+  it("reconciles a durable run_completed event after a crash before state commit", async () => {
+    const { dir, store } = await tempStore();
+    const created = await store.createRun({
+      mode: "single",
+      prompt: "Do not recompute me",
+      participants: [participant],
+    });
+    const result = {
+      mode: "single" as const,
+      steps: [{ id: "answer-1", kind: "answer" as const, model: participant, content: "Already finished" }],
+      final: "Already finished",
+    };
+    await store.updateRun(created.run.id, { status: "running" });
+    await store.appendRunEvent({
+      seq: 1,
+      attempt: 1,
+      at: new Date().toISOString(),
+      event: { type: "run_completed", runId: created.run.id, result },
+    });
+
+    const reopened = new FileStateStore(dir);
+    await reopened.init();
+    const run = await reopened.getRun(created.run.id);
+    const conversation = await reopened.getConversation(created.conversation.id);
+    expect(run?.status).toBe("completed");
+    expect(run?.result?.final).toBe("Already finished");
+    expect(conversation?.messages.map(message => `${message.role}:${message.content}`)).toEqual([
+      "user:Do not recompute me",
+      "assistant:Already finished",
+    ]);
+  });
+
   it("marks in-flight runs interrupted after a server restart", async () => {
     const { dir, store } = await tempStore();
     const created = await store.createRun({
@@ -111,5 +143,27 @@ describe("FileStateStore", () => {
     expect(resumed.status).toBe("queued");
     expect(resumed.attempt).toBe(2);
     expect(await store.readRunEvents(created.run.id)).toEqual([]);
+  });
+
+  it("keeps persisted conversation data private to the local account", async () => {
+    if (process.platform === "win32") return;
+    const { dir, store } = await tempStore();
+    const created = await store.createRun({
+      mode: "single",
+      prompt: "Private prompt",
+      participants: [participant],
+    });
+    await store.appendRunEvent({
+      seq: 1,
+      attempt: 1,
+      at: new Date().toISOString(),
+      event: { type: "run_started", runId: created.run.id, mode: "single" },
+    });
+
+    const permissions = async (path: string) => (await stat(path)).mode & 0o777;
+    expect(await permissions(dir)).toBe(0o700);
+    expect(await permissions(join(dir, "runs"))).toBe(0o700);
+    expect(await permissions(join(dir, "state.json"))).toBe(0o600);
+    expect(await permissions(join(dir, "runs", `${created.run.id}.ndjson`))).toBe(0o600);
   });
 });
