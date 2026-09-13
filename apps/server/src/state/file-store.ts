@@ -236,7 +236,6 @@ export class FileStateStore {
         }
       }
       conversation.updatedAt = timestamp;
-      conversation.lastRunId = runId;
       run.status = "completed";
       run.result = result;
       delete run.error;
