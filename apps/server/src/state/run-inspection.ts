@@ -60,6 +60,19 @@ function attemptStatus(records: RunEventRecord[], fallback: RunStatus): RunStatu
   return fallback;
 }
 
+function finishRunningSteps(
+  steps: Map<string, RunStepInspection>,
+  status: "failed" | "cancelled",
+  at: string,
+) {
+  for (const step of steps.values()) {
+    if (step.status !== "running") continue;
+    step.status = status;
+    step.completedAt = at;
+    step.durationMs = durationMs(step.startedAt, at);
+  }
+}
+
 function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventRecord[]): RunAttemptInspection {
   const steps = new Map<string, RunStepInspection>();
   let usage = emptyRunUsage();
@@ -117,16 +130,13 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
         existing.durationMs = durationMs(existing.startedAt, record.at);
         steps.set(event.stepId, existing);
       }
+      // A top-level orchestration error is terminal for the attempt. Any
+      // provider step still open at that point did not complete successfully.
+      finishRunningSteps(steps, "failed", record.at);
     } else if (event.type === "run_cancelled") {
       error = event.message;
       terminalAt = record.at;
-      for (const step of steps.values()) {
-        if (step.status === "running") {
-          step.status = "cancelled";
-          step.completedAt = record.at;
-          step.durationMs = durationMs(step.startedAt, record.at);
-        }
-      }
+      finishRunningSteps(steps, "cancelled", record.at);
     } else if (event.type === "run_completed") {
       terminalAt = record.at;
     }
