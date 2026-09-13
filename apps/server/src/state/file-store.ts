@@ -221,13 +221,19 @@ export class FileStateStore {
         existing.content = result.final;
         existing.createdAt = timestamp;
       } else {
-        conversation.messages.push({
+        const assistantMessage = {
           id: randomUUID(),
-          role: "assistant",
+          role: "assistant" as const,
           content: result.final,
           createdAt: timestamp,
           runId,
-        });
+        };
+        const userIndex = conversation.messages.findIndex(message => message.id === run.userMessageId);
+        if (userIndex >= 0) {
+          conversation.messages.splice(userIndex + 1, 0, assistantMessage);
+        } else {
+          conversation.messages.push(assistantMessage);
+        }
       }
       conversation.updatedAt = timestamp;
       conversation.lastRunId = runId;
