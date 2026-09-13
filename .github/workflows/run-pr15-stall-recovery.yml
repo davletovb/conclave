@@ -1,0 +1,32 @@
+name: Run PR15 stalled-provider recovery
+on:
+  push:
+    branches:
+      - feat/stalled-provider-recovery
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply targeted patch
+        run: python scripts/pr15_stall_recovery.py
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Commit fixes
+        run: |
+          git config user.name "Behruz"
+          git config user.email "behruz.davletov@carleton.ca"
+          git add apps/server/src/orchestrator.ts apps/server/src/orchestrator.test.ts apps/server/src/state/run-manager.test.ts README.md
+          git diff --cached --quiet && exit 0
+          git commit -m "feat: recover stalled provider steps"
+          git push
