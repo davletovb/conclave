@@ -562,21 +562,26 @@ export class Orchestrator {
       parentSignal?.addEventListener("abort", onParentAbort, { once: true });
       armWatchdog();
 
-      void adapter.generate(
-        {
-          model: spec.model.model,
-          messages: [
-            ...(spec.history ?? []),
-            { role: "user", content: spec.prompt },
-          ],
-          signal: controller.signal,
-        },
-        (event) => {
-          if (settled) return;
-          armWatchdog();
-          onEvent(event);
-        },
-      ).then(resolveOnce, rejectOnce);
+      try {
+        const pending = adapter.generate(
+          {
+            model: spec.model.model,
+            messages: [
+              ...(spec.history ?? []),
+              { role: "user", content: spec.prompt },
+            ],
+            signal: controller.signal,
+          },
+          (event) => {
+            if (settled) return;
+            armWatchdog();
+            onEvent(event);
+          },
+        );
+        void Promise.resolve(pending).then(resolveOnce, rejectOnce);
+      } catch (error) {
+        rejectOnce(error);
+      }
     });
   }
 
