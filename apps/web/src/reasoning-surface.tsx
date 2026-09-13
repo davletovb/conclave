@@ -24,6 +24,11 @@ function modeUsesSynthesizer(mode: OrchestrationMode) {
   return ["panel", "debate", "consensus", "judge", "research-council", "planner-executor", "custom"].includes(mode);
 }
 
+function defaultFinalizer(mode: OrchestrationMode, participants: ModelRef[]) {
+  if (participants.length === 0) return undefined;
+  return mode === "planner-executor" ? participants.at(-1) : participants[0];
+}
+
 export function modeRole(mode: OrchestrationMode, index: number) {
   switch (mode) {
     case "single": return "Answerer";
@@ -77,6 +82,7 @@ export function ModelIdentity({ model, compact = false }: { model: ModelRef; com
 
 type RunSetupProps = {
   mode: OrchestrationMode;
+  fresh: boolean;
   modes: ModeMeta[];
   onModeChange: (mode: OrchestrationMode) => void;
   models: ModelRef[];
@@ -99,19 +105,20 @@ function modelKey(model: ModelRef) {
 
 export function RunSetup(props: RunSetupProps) {
   const {
-    mode, modes, onModeChange, models, selectedKeys, participants, onToggleModel,
+    mode, fresh, modes, onModeChange, models, selectedKeys, participants, onToggleModel,
     synthesizerKey, onSynthesizerChange, maxCalls, onMaxCallsChange,
     maxRounds, onMaxRoundsChange, expectedCalls, loading,
   } = props;
   const meta = (id: OrchestrationMode) => modes.find(item => item.id === id)!;
   const selectedSynthesizer = participants.find(model => modelKey(model) === synthesizerKey);
+  const defaultSynthesizer = defaultFinalizer(mode, participants);
 
   return (
     <section className="setup-surface" aria-label="Conversation setup">
       <div className="setup-intro">
-        <span className="eyebrow">NEW CONVERSATION</span>
-        <h2>How should Conclave work this problem?</h2>
-        <p>Choose the reasoning pattern first, then assign models to the roles that matter.</p>
+        <span className="eyebrow">{fresh ? "NEW CONVERSATION" : "RUN CONFIGURATION"}</span>
+        <h2>{fresh ? "How should Conclave work this problem?" : "Configure the next turn"}</h2>
+        <p>{fresh ? "Choose the reasoning pattern first, then assign models to the roles that matter." : "Adjust the workflow or model roles for the next message in this conversation."}</p>
       </div>
 
       <div className="intent-grid">
@@ -172,7 +179,7 @@ export function RunSetup(props: RunSetupProps) {
           <label className="synthesizer-control">
             <span><strong>{synthesizerRole(mode)}</strong><small>This is a separate finalization role, not an extra council member.</small></span>
             <select value={selectedSynthesizer ? synthesizerKey : ""} disabled={loading} onChange={event => onSynthesizerChange(event.target.value)}>
-              <option value="">First selected · default</option>
+              <option value="">{defaultSynthesizer ? `Default · ${defaultSynthesizer.label}` : "Default"}</option>
               {participants.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}</option>)}
             </select>
           </label>
@@ -210,11 +217,13 @@ export function CouncilWork({
   steps,
   loading,
   inspection,
+  completedStepIds,
   onInspect,
 }: {
   steps: OrchestrationStep[];
   loading: boolean;
   inspection: RunInspection | null;
+  completedStepIds: string[];
   onInspect: () => void;
 }) {
   if (steps.length === 0) return null;
@@ -230,7 +239,7 @@ export function CouncilWork({
       <div className="member-lines">
         {steps.map(step => {
           const stepMeta = meta.get(step.id);
-          const status = stepMeta?.status ?? (loading && !step.content ? "working" : loading ? "streaming" : "completed");
+          const status = stepMeta?.status ?? (completedStepIds.includes(step.id) ? "completed" : loading ? (step.content ? "streaming" : "working") : (step.content ? "partial" : "pending"));
           return (
             <details className="member-line" key={step.id}>
               <summary>
@@ -272,7 +281,7 @@ export function RunConfigSummary({
   canInspect: boolean;
 }) {
   const modeName = modes.find(item => item.id === mode)?.label ?? mode;
-  const synth = synthesizer ?? participants[0];
+  const synth = synthesizer ?? defaultFinalizer(mode, participants);
   return (
     <div className="run-config-summary">
       <button type="button" className="config-pill" onClick={onConfigure}>

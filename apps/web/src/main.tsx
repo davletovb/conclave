@@ -278,6 +278,7 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<OrchestrationResult | null>(null);
   const [liveSteps, setLiveSteps] = useState<OrchestrationStep[]>([]);
+  const [completedStepIds, setCompletedStepIds] = useState<string[]>([]);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -468,6 +469,7 @@ function App() {
       setError("");
       setResult(null);
       setLiveSteps([]);
+      setCompletedStepIds([]);
       setResumeRunId(null);
       setRunUsage(freshUsage());
       setRateLimit(null);
@@ -491,6 +493,7 @@ function App() {
         setError("");
         setResult(run.result);
         setLiveSteps(run.result.steps);
+        setCompletedStepIds(run.result.steps.map(step => step.id));
         setResumeRunId(null);
       } else if (["running", "queued", "cancelling"].includes(run.status)) {
         await recoverRun(run.id, epoch);
@@ -505,6 +508,7 @@ function App() {
       setActiveRunId(null);
       setResult(null);
       setLiveSteps([]);
+      setCompletedStepIds([]);
       setResumeRunId(null);
       setRunUsage(freshUsage());
       setRateLimit(null);
@@ -530,6 +534,7 @@ function App() {
         setError("");
         setResult(run.result);
         setLiveSteps(run.result.steps);
+        setCompletedStepIds(run.result.steps.map(step => step.id));
         setLoading(false);
         setCancelling(false);
         setResumeRunId(null);
@@ -548,6 +553,7 @@ function App() {
 
       setResult(null);
       setLiveSteps([]);
+      setCompletedStepIds([]);
       setError(run.status === "cancelling" ? "Stopping the active provider call…" : "");
       setResumeRunId(null);
       setLoading(true);
@@ -573,6 +579,7 @@ function App() {
     setResumeRunId(null);
     setResult(null);
     setLiveSteps([]);
+    setCompletedStepIds([]);
     setRunUsage(freshUsage());
     setRateLimit(null);
     setInspection(null);
@@ -647,6 +654,7 @@ function App() {
     }
 
     if (streamEvent.type === "step_started") {
+      setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
       setLiveSteps(current => current.some(step => step.id === streamEvent.stepId)
         ? current
         : [...current, {
@@ -670,12 +678,14 @@ function App() {
       setLiveSteps(current => current.some(step => step.id === streamEvent.step.id)
         ? current.map(step => step.id === streamEvent.step.id ? streamEvent.step : step)
         : [...current, streamEvent.step]);
+      setCompletedStepIds(current => current.includes(streamEvent.step.id) ? current : [...current, streamEvent.step.id]);
       return;
     }
 
     if (streamEvent.type === "run_completed") {
       setResult(streamEvent.result);
       setLiveSteps(streamEvent.result.steps);
+      setCompletedStepIds(streamEvent.result.steps.map(step => step.id));
       setResumeRunId(null);
       setCancelling(false);
       return;
@@ -689,6 +699,7 @@ function App() {
   async function replayPersistedRun(runId: string, epoch: number) {
     setResult(null);
     setLiveSteps([]);
+    setCompletedStepIds([]);
 
     const response = await fetch(`${API}/runs/${runId}/events?after=0&follow=0`);
     if (!response.ok) await readJson(response);
@@ -764,6 +775,7 @@ function App() {
             setError("");
             setResult(run.result);
             setLiveSteps(run.result.steps);
+            setCompletedStepIds(run.result.steps.map(step => step.id));
           }
           setResumeRunId(null);
           await refreshLimits(epoch);
@@ -803,6 +815,7 @@ function App() {
     setResumeRunId(null);
     setResult(null);
     setLiveSteps([]);
+    setCompletedStepIds([]);
     setRunUsage(freshUsage());
     setRateLimit(null);
     setInspection(null);
@@ -864,6 +877,7 @@ function App() {
         if (run.result) {
           setResult(run.result);
           setLiveSteps(run.result.steps);
+          setCompletedStepIds(run.result.steps.map(step => step.id));
         }
       }
     } catch (cause) {
@@ -882,6 +896,7 @@ function App() {
     setError("");
     setResult(null);
     setLiveSteps([]);
+    setCompletedStepIds([]);
     setRunUsage(freshUsage());
     setRateLimit(null);
     setInspection(null);
@@ -982,6 +997,7 @@ function App() {
           {setupOpen && (
             <RunSetup
               mode={mode}
+              fresh={!conversation}
               modes={modes}
               onModeChange={selectMode}
               models={models}
@@ -1136,6 +1152,7 @@ function App() {
                 steps={displayedSteps}
                 loading={loading}
                 inspection={inspection}
+                completedStepIds={completedStepIds}
                 onInspect={toggleInspector}
               />
             </section>

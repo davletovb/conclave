@@ -341,3 +341,19 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
 @media (prefers-reduced-motion: reduce) { .provider-mark.active::after { animation: none; opacity: .45; } }
 @media (max-width: 980px) { .member-line > summary { grid-template-columns: 16px 28px minmax(110px, 1fr) auto auto; } .member-role, .member-stat { display: none; } }
 @media (max-width: 760px) { .member-line > summary { grid-template-columns: 16px 28px minmax(0, 1fr) auto; } .member-role, .member-stat { display: none; } }
+
+/* keep recent conversations reachable on small screens */
+@media (max-width: 760px) {
+  .sidebar .conversation-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+    overflow-x: auto;
+    padding: 8px 0 0;
+    scrollbar-width: thin;
+  }
+  .sidebar .conversation-list > .eyebrow { display: none; }
+  .sidebar .conversation-link { flex: 0 0 min(72vw, 250px); }
+}
