@@ -73,6 +73,7 @@ describe("FileStateStore", () => {
       "user:Question B",
       "assistant:Answer B",
     ]);
+    expect(conversation?.lastRunId).toBe(second.run.id);
   });
 
   it("marks in-flight runs interrupted after a server restart", async () => {
