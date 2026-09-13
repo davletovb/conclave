@@ -15,6 +15,7 @@ Conclave is a personal multi-model reasoning environment: one interface where GP
 - **Router** — the first selected model routes the task to exactly one selected specialist instead of fanning out to everyone
 - **Research Council** — selected models examine evidence, alternatives, implementation risks, and skepticism before synthesis; it does not pretend external browsing occurred
 - **Planner → Executors** — the first model plans, the remaining selected models execute in parallel, and a reviewer produces the final answer
+- **Custom Workflow** — run a validated dependency graph from a preset or an edited JSON workflow
 
 The architecture is deliberately provider-agnostic so subscription-backed runtimes can be added behind adapters without changing the UI or orchestration engine. Multi-stage modes have explicit bounded stages, and Debate clamps critique rounds to 1–3.
 
@@ -64,6 +65,24 @@ Cancelled attempts retain their already-persisted partial output and can be resu
 
 Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code and Grok Build ACP do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
 
+## Custom workflows and run inspection
+
+Custom Workflow mode makes orchestration a first-class graph instead of a frontend shortcut. A workflow contains stable node IDs, a step kind, a participant/synthesizer selector, an optional dependency list, a prompt template, and one explicit output node. The server validates the complete graph before the first provider call, including participant indexes, dependency references, cycles, supported step kinds, and the run's call budget.
+
+Nodes whose prerequisites are satisfied can run concurrently. A dependent starts as soon as its own prerequisites finish rather than waiting for unrelated branches. If one workflow branch fails, Conclave aborts and settles the remaining in-flight workflow branches before the attempt is finalized.
+
+Prompt templates support:
+
+- `{{prompt}}` — the user's original task
+- `{{dependencies}}` — all declared upstream outputs for that node
+- `{{dep.<nodeId>}}` — one declared upstream output
+
+Interpolation is single-pass: placeholder-like text contained inside user input or model output remains literal and cannot become new workflow syntax.
+
+Conclave ships with three initial presets: **Triangulate**, **Challenge → Revise**, and **Decision Board**. The web UI can load a preset and optionally expose/edit its JSON graph before running it.
+
+The **Run Inspector** reconstructs execution from the durable event logs. It shows current and archived attempts, status, duration, calls/tokens where available, errors/rate limits, each step's model/kind/status/timing, and dependency lineage. This makes resumptions, cancellations, workflow branches, and failed attempts inspectable without depending on transient browser state.
+
 ## Run locally
 
 Requirements: Node.js 22+ and pnpm 10+.
@@ -94,8 +113,10 @@ The persistent runtime API is:
 
 - `GET /conversations` — recent conversations
 - `GET /conversations/:id` — one conversation with messages
+- `GET /workflow-presets` — built-in reusable custom workflow graphs
 - `POST /runs` — start a background orchestration run
 - `GET /runs/:id` — inspect persisted run state, budget, and usage
+- `GET /runs/:id/inspection` — reconstruct attempt/step timing, usage, status, and dependency lineage
 - `GET /runs/:id/events?after=<seq>&follow=1` — replay and follow the run's NDJSON event log
 - `POST /runs/:id/cancel` — stop an active run/provider call
 - `POST /runs/:id/resume` — restart a failed/interrupted/cancelled run as the next attempt
@@ -182,4 +203,5 @@ GitHub Actions runs the same checks on pull requests.
 5. ✅ Persistent conversations and resumable orchestration runs
 6. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
 7. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
-8. Custom workflow graph/presets and richer run inspection
+8. ✅ Custom workflow graph/presets and richer run inspection
+9. Desktop/local-native packaging and an IPC boundary so the web transport can later be replaced without changing orchestration/provider core logic
