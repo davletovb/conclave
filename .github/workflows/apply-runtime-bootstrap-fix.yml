@@ -1,0 +1,93 @@
+name: Apply runtime bootstrap fix
+on:
+  push:
+    branches: [fix/runtime-bootstrap]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path('apps/web/src/main.tsx')
+          s = main.read_text()
+          s = s.replace(
+          '''  const [models, setModels] = useState<ModelRef[]>([]);\n  const [providers, setProviders] = useState<ProviderStatus[]>([]);\n  const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);''',
+          '''  const [models, setModels] = useState<ModelRef[]>([]);\n  const [modelsLoading, setModelsLoading] = useState(true);\n  const [modelsError, setModelsError] = useState(\"\");\n  const [providers, setProviders] = useState<ProviderStatus[]>([]);\n  const [providersLoading, setProvidersLoading] = useState(true);\n  const [providersError, setProvidersError] = useState(\"\");\n  const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);''', 1)
+
+          s = s.replace(
+          '''  const runtimeLabel = connectedProviders.length > 0\n    ? `${connectedProviders.map(runtimeName).join(\" · \")} connected`\n    : \"Subscription runtimes not connected · mocks active\";\n  const runtimeTitle = subscriptionProviders\n    .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? \"connected\" : \"not connected\")}`)\n    .join(\"\\n\");''',
+          '''  const runtimeLabel = providersLoading\n    ? \"Checking subscription runtimes…\"\n    : connectedProviders.length > 0\n      ? `${connectedProviders.map(runtimeName).join(\" · \")} connected`\n      : providers.length === 0\n        ? \"Runtime status unavailable\"\n        : \"Subscription runtimes not connected · mocks active\";\n  const runtimeTitle = providersLoading\n    ? \"Checking local subscription runtimes…\"\n    : providersError || subscriptionProviders\n      .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? \"connected\" : \"not connected\")}`)\n      .join(\"\\n\");''', 1)
+
+          old = '''  async function initialize(epoch: number) {\n    try {\n      const [modelData, providerData, conversationData, limitData, presetData] = await Promise.all([\n        fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response)),\n        fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response)),\n        fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),\n        fetch(`${API}/provider-limits`)\n          .then(response => readJson<ProviderLimitSnapshot[]>(response))\n          .catch(() => [] as ProviderLimitSnapshot[]),\n        fetch(`${API}/workflow-presets`)\n          .then(response => readJson<WorkflowPreset[]>(response))\n          .catch(() => [] as WorkflowPreset[]),\n      ]);\n      if (!isCurrent(epoch)) return;\n      setModels(modelData);\n      setProviders(providerData);\n      setProviderLimits(limitData);\n      setConversations(conversationData);\n      workflowPresetsRef.current = presetData;\n      setWorkflowPresets(presetData);\n      setSelected(initialSelection(modelData));\n      if (presetData[0]) {\n        setSelectedPresetId(presetData[0].id);\n        setWorkflowText(JSON.stringify(presetData[0].graph, null, 2));\n      }\n\n      const rememberedRun = localStorage.getItem(\"conclave.activeRunId\");\n      const rememberedConversation = localStorage.getItem(\"conclave.conversationId\");\n      if (rememberedRun) {\n        await recoverRun(rememberedRun, epoch);\n      } else if (rememberedConversation && conversationData.some(item => item.id === rememberedConversation)) {\n        await loadConversation(rememberedConversation, epoch);\n      }\n    } catch (cause) {\n      if (isCurrent(epoch)) {\n        setError(cause instanceof Error ? cause.message : \"Could not reach the Conclave server.\");\n      }\n    }\n  }'''
+          new = '''  async function loadModels(epoch: number) {\n    if (isCurrent(epoch)) {\n      setModelsLoading(true);\n      setModelsError(\"\");\n    }\n    try {\n      const data = await fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response));\n      if (!isCurrent(epoch)) return;\n      setModels(data);\n      setSelected(current => current.length > 0 ? current : initialSelection(data));\n    } catch (cause) {\n      if (!isCurrent(epoch)) return;\n      setModelsError(cause instanceof Error ? cause.message : \"Could not load models.\");\n    } finally {\n      if (isCurrent(epoch)) setModelsLoading(false);\n    }\n  }\n\n  async function loadProviders(epoch: number) {\n    if (isCurrent(epoch)) {\n      setProvidersLoading(true);\n      setProvidersError(\"\");\n    }\n    try {\n      const data = await fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response));\n      if (!isCurrent(epoch)) return;\n      setProviders(data);\n    } catch (cause) {\n      if (!isCurrent(epoch)) return;\n      setProviders([]);\n      setProvidersError(cause instanceof Error ? cause.message : \"Could not load runtime status.\");\n    } finally {\n      if (isCurrent(epoch)) setProvidersLoading(false);\n    }\n  }\n\n  async function refreshRuntimeCatalog(epoch: number) {\n    // Native runtime discovery can be comparatively slow. Keep it independent\n    // from conversation/preset bootstrap so one status call cannot blank the\n    // whole setup screen.\n    await Promise.all([loadModels(epoch), loadProviders(epoch)]);\n    if (isCurrent(epoch)) await refreshLimits(epoch);\n  }\n\n  async function initialize(epoch: number) {\n    void refreshRuntimeCatalog(epoch);\n    try {\n      const [conversationData, presetData] = await Promise.all([\n        fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),\n        fetch(`${API}/workflow-presets`)\n          .then(response => readJson<WorkflowPreset[]>(response))\n          .catch(() => [] as WorkflowPreset[]),\n      ]);\n      if (!isCurrent(epoch)) return;\n      setConversations(conversationData);\n      workflowPresetsRef.current = presetData;\n      setWorkflowPresets(presetData);\n      if (presetData[0]) {\n        setSelectedPresetId(presetData[0].id);\n        setWorkflowText(JSON.stringify(presetData[0].graph, null, 2));\n      }\n\n      const rememberedRun = localStorage.getItem(\"conclave.activeRunId\");\n      const rememberedConversation = localStorage.getItem(\"conclave.conversationId\");\n      if (rememberedRun) {\n        await recoverRun(rememberedRun, epoch);\n      } else if (rememberedConversation && conversationData.some(item => item.id === rememberedConversation)) {\n        await loadConversation(rememberedConversation, epoch);\n      }\n    } catch (cause) {\n      if (isCurrent(epoch)) {\n        setError(cause instanceof Error ? cause.message : \"Could not load local conversation history.\");\n      }\n    }\n  }'''
+          if old not in s: raise SystemExit('initialize anchor not found')
+          s = s.replace(old, new, 1)
+
+          s = s.replace(
+          '''              models={models}\n              selectedKeys={selected}''',
+          '''              models={models}\n              modelsLoading={modelsLoading}\n              modelsError={modelsError}\n              onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current)}\n              selectedKeys={selected}''', 1)
+          main.write_text(s)
+
+          surface = Path('apps/web/src/reasoning-surface.tsx')
+          s = surface.read_text()
+          start = s.index('const intentGroups:')
+          end = s.index('const advancedModes:')
+          s = s[:start] + '''const primaryModes: OrchestrationMode[] = [\n  \"single\",\n  \"panel\",\n  \"compare\",\n  \"research-council\",\n  \"critic-revise\",\n  \"red-team\",\n  \"debate\",\n  \"judge\",\n  \"consensus\",\n  \"planner-executor\",\n];\n\n''' + s[end:]
+
+          s = s.replace(
+          '''  models: ModelRef[];\n  selectedKeys: string[];''',
+          '''  models: ModelRef[];\n  modelsLoading: boolean;\n  modelsError: string;\n  onRetryModels: () => void;\n  selectedKeys: string[];''', 1)
+          s = s.replace(
+          '''    mode, fresh, modes, onModeChange, models, selectedKeys, participants, onToggleModel,\n    synthesizerKey, onSynthesizerChange, maxCalls, onMaxCallsChange,''',
+          '''    mode, fresh, modes, onModeChange, models, modelsLoading, modelsError, onRetryModels,\n    selectedKeys, participants, onToggleModel, synthesizerKey, onSynthesizerChange, maxCalls, onMaxCallsChange,''', 1)
+
+          old = '''      <div className=\"intent-grid\">\n        {intentGroups.map(group => (\n          <div className=\"intent-group\" key={group.label}>\n            <div className=\"intent-copy\"><strong>{group.label}</strong><span>{group.description}</span></div>\n            <div className=\"intent-options\">\n              {group.modes.map(id => (\n                <button type=\"button\" key={id} className={mode === id ? \"intent-mode selected\" : \"intent-mode\"} disabled={loading} onClick={() => onModeChange(id)}>\n                  <strong>{meta(id).label}</strong><span>{meta(id).description}</span>\n                </button>\n              ))}\n            </div>\n          </div>\n        ))}\n        <details className=\"advanced-workflows\">\n          <summary>More workflows</summary>\n          <div className=\"intent-options advanced\">\n            {advancedModes.map(id => (\n              <button type=\"button\" key={id} className={mode === id ? \"intent-mode selected\" : \"intent-mode\"} disabled={loading} onClick={() => onModeChange(id)}>\n                <strong>{meta(id).label}</strong><span>{meta(id).description}</span>\n              </button>\n            ))}\n          </div>\n        </details>\n      </div>'''
+          new = '''      <div className=\"workflow-list\">\n        {primaryModes.map(id => (\n          <button type=\"button\" key={id} className={mode === id ? \"workflow-option selected\" : \"workflow-option\"} disabled={loading} onClick={() => onModeChange(id)}>\n            <strong>{meta(id).label}</strong>\n            <span>{meta(id).description}</span>\n          </button>\n        ))}\n        <details className=\"advanced-workflows\">\n          <summary>More workflows</summary>\n          <div className=\"workflow-list advanced\">\n            {advancedModes.map(id => (\n              <button type=\"button\" key={id} className={mode === id ? \"workflow-option selected\" : \"workflow-option\"} disabled={loading} onClick={() => onModeChange(id)}>\n                <strong>{meta(id).label}</strong>\n                <span>{meta(id).description}</span>\n              </button>\n            ))}\n          </div>\n        </details>\n      </div>'''
+          if old not in s: raise SystemExit('workflow layout anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        <div className=\"setup-model-grid\">\n          {models.map(model => {'''
+          new = '''        {models.length === 0 && (\n          <div className=\"setup-model-state\">\n            <span>{modelsLoading ? \"Checking your subscription models…\" : modelsError || \"No models are available from the local server.\"}</span>\n            {!modelsLoading && <button type=\"button\" className=\"text-button\" onClick={onRetryModels}>Retry</button>}\n          </div>\n        )}\n        <div className=\"setup-model-grid\">\n          {models.map(model => {'''
+          if old not in s: raise SystemExit('model grid anchor not found')
+          s = s.replace(old, new, 1)
+          surface.write_text(s)
+
+          css = Path('apps/web/src/styles.css')
+          s = css.read_text()
+          old = '''.intent-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }\n.intent-group { border: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 72%, transparent); border-radius: 16px; padding: 15px; display: grid; gap: 12px; }\n.intent-copy { display: grid; gap: 3px; }\n.intent-copy strong { font-size: 13px; }\n.intent-copy span { color: var(--muted); font-size: 11px; line-height: 1.45; }\n.intent-options { display: grid; gap: 7px; }\n.intent-mode { width: 100%; border: 1px solid var(--border); background: var(--surface-soft); border-radius: 11px; padding: 10px 11px; text-align: left; cursor: pointer; }\n.intent-mode:hover { background: var(--surface-hover); }\n.intent-mode.selected { border-color: var(--border-strong); background: var(--surface-active); box-shadow: inset 3px 0 0 var(--link); }\n.intent-mode strong, .intent-mode span { display: block; }\n.intent-mode strong { font-size: 12px; }\n.intent-mode span { margin-top: 2px; color: var(--muted); font-size: 10px; }\n.advanced-workflows { grid-column: 1 / -1; border: 1px dashed var(--border); border-radius: 13px; padding: 10px 12px; }\n.advanced-workflows > summary, .advanced-run-settings > summary { cursor: pointer; color: var(--muted); font-size: 11px; }\n.intent-options.advanced { margin-top: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }'''
+          new = '''.workflow-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; }\n.workflow-option { width: 100%; min-height: 58px; border: 0; border-bottom: 1px solid var(--border-soft); background: transparent; padding: 11px 4px; text-align: left; cursor: pointer; color: var(--text); }\n.workflow-option:hover { background: color-mix(in srgb, var(--surface-hover) 55%, transparent); }\n.workflow-option.selected { box-shadow: inset 3px 0 0 var(--link); padding-left: 12px; background: color-mix(in srgb, var(--surface-active) 55%, transparent); }\n.workflow-option strong, .workflow-option span { display: block; }\n.workflow-option strong { font-size: 13px; }\n.workflow-option span { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.4; }\n.advanced-workflows { grid-column: 1 / -1; margin-top: 8px; border-bottom: 1px solid var(--border-soft); padding: 9px 4px 10px; }\n.advanced-workflows > summary, .advanced-run-settings > summary { cursor: pointer; color: var(--muted); font-size: 11px; }\n.workflow-list.advanced { margin-top: 8px; }'''
+          if old not in s: raise SystemExit('workflow css anchor not found')
+          s = s.replace(old, new, 1)
+          s = s.replace(
+          '.setup-model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }\n',
+          '.setup-model-state { min-height: 48px; margin-bottom: 8px; border: 1px dashed var(--border); border-radius: 12px; padding: 11px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }\n.setup-model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }\n', 1)
+          s = s.replace(
+          '  .intent-grid { grid-template-columns: 1fr; }\n  .advanced-workflows { grid-column: auto; }\n  .intent-options.advanced { grid-template-columns: 1fr; }',
+          '  .workflow-list { grid-template-columns: 1fr; }\n  .advanced-workflows { grid-column: auto; }\n  .workflow-list.advanced { grid-template-columns: 1fr; }')
+          css.write_text(s)
+          PY
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Commit verified fix
+        run: |
+          git rm .github/workflows/apply-runtime-bootstrap-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx apps/web/src/reasoning-surface.tsx apps/web/src/styles.css
+          git commit -m "fix: stabilize setup bootstrap and simplify workflows"
+          git push
