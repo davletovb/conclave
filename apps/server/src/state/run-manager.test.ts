@@ -91,6 +91,54 @@ async function waitForCalls(manager: RunManager, runId: string, minimum = 1) {
 }
 
 describe("RunManager", () => {
+  it("never lets a conversation be deleted out from under a live run", async () => {
+    const provider = new CancellableMockProvider();
+    const { manager, store } = await makeManager(provider);
+    const started = await manager.start({
+      request: {
+        mode: "single",
+        prompt: "Hang on the first provider call",
+        participants: [participant],
+      },
+    });
+
+    await expect(manager.deleteConversation(started.conversationId)).rejects.toThrow(/already has an active run/i);
+    expect(await manager.getConversation(started.conversationId)).not.toBeNull();
+    expect(await manager.getRun(started.runId)).not.toBeNull();
+
+    await manager.cancel(started.runId);
+    await waitForTerminal(manager, started.runId);
+
+    await manager.deleteConversation(started.conversationId);
+    expect(await manager.getConversation(started.conversationId)).toBeNull();
+    expect(await manager.getRun(started.runId)).toBeNull();
+    expect(await store.readRunEvents(started.runId)).toEqual([]);
+  });
+
+  it("refuses to start a run against a conversation that is being deleted", async () => {
+    const { manager } = await makeManager();
+    const first = await manager.start({
+      request: { mode: "single", prompt: "First turn", participants: [participant] },
+    });
+    await waitForTerminal(manager, first.runId);
+
+    // The delete holds the conversation for its whole duration, so a run cannot
+    // slip in between the guard and the store write and end up executing
+    // against wiped state. The guard has to be what rejects the start: letting
+    // it through and failing later in the store would already have created and
+    // launched the run.
+    const deleting = manager.deleteConversation(first.conversationId);
+    await expect(manager.start({
+      conversationId: first.conversationId,
+      request: { mode: "single", prompt: "Racing turn", participants: [participant] },
+    })).rejects.toThrow(/being deleted/i);
+    await deleting;
+
+    expect(await manager.getConversation(first.conversationId)).toBeNull();
+    expect(await manager.listConversations()).toEqual([]);
+  });
+
+
   it("continues a run independently and persists its final conversation message", async () => {
     const { manager } = await makeManager();
     const started = await manager.start({

@@ -7,7 +7,7 @@ import type {
   StoredRun,
 } from "@conclave/core";
 import { Orchestrator } from "../orchestrator.js";
-import { FileStateStore } from "./file-store.js";
+import { FileStateStore, type ListOptions } from "./file-store.js";
 import { inspectRun } from "./run-inspection.js";
 
 type RunListener = (record: RunEventRecord) => void;
@@ -29,7 +29,8 @@ export class RunManager {
   private readonly nextSequence = new Map<string, number>();
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeControllers = new Map<string, AbortController>();
-  private readonly activeConversations = new Set<string>();
+  /** Which conversations are claimed, and by what, so the guard can say so. */
+  private readonly activeConversations = new Map<string, "run" | "delete">();
 
   constructor(
     private readonly orchestrator: Orchestrator,
@@ -49,7 +50,7 @@ export class RunManager {
 
     try {
       const created = await this.store.createRun(request, reservedConversationId);
-      this.activeConversations.add(created.run.conversationId);
+      this.activeConversations.set(created.run.conversationId, "run");
       this.nextSequence.set(created.run.id, 0);
       this.launch(created.run, created.history);
       return this.response(created.run);
@@ -136,8 +137,31 @@ export class RunManager {
     return this.store.getConversation(conversationId);
   }
 
-  async listConversations() {
-    return this.store.listConversations();
+  async listConversations(options: ListOptions = {}) {
+    return this.store.listConversations(options);
+  }
+
+  async renameConversation(conversationId: string, title: string) {
+    return this.store.renameConversation(conversationId, title);
+  }
+
+  async deleteConversation(conversationId: string) {
+    // A run owns provider processes and an append-only event log. Removing its
+    // conversation underneath it would leave both orphaned, so the delete takes
+    // the same reservation a run does: checking and releasing around the store
+    // call means start() and delete() can never interleave, which would
+    // otherwise launch a run against state that is being wiped.
+    this.reserveConversation(conversationId, "delete");
+    try {
+      await this.store.deleteConversation(conversationId);
+    } finally {
+      this.activeConversations.delete(conversationId);
+    }
+    return { id: conversationId, deleted: true as const };
+  }
+
+  async exportConversation(conversationId: string) {
+    return this.store.exportConversation(conversationId);
   }
 
   async events(runId: string, after = 0) {
@@ -154,11 +178,20 @@ export class RunManager {
     };
   }
 
-  private reserveConversation(conversationId: string) {
-    if (this.activeConversations.has(conversationId)) {
+  /**
+   * Claims a conversation for one exclusive operation. The check and the claim
+   * are synchronous on purpose: nothing may await between them, or two callers
+   * can both believe the conversation is free.
+   */
+  private reserveConversation(conversationId: string, holder: "run" | "delete" = "run") {
+    const existing = this.activeConversations.get(conversationId);
+    if (existing === "run") {
       throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
     }
-    this.activeConversations.add(conversationId);
+    if (existing === "delete") {
+      throw new Error("This conversation is being deleted.");
+    }
+    this.activeConversations.set(conversationId, holder);
   }
 
   private launch(run: StoredRun, history: OrchestrationRequest["history"]) {

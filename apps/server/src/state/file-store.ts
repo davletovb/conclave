@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   truncate,
   writeFile,
 } from "node:fs/promises";
@@ -14,9 +15,12 @@ import { join } from "node:path";
 import type {
   ChatMessage,
   Conversation,
+  ConversationExport,
+  ConversationExportRun,
   ConversationSummary,
   OrchestrationRequest,
   OrchestrationResult,
+  OrchestrationStep,
   RateLimitNotice,
   RunEventRecord,
   RunStatus,
@@ -24,6 +28,7 @@ import type {
   StoredRun,
 } from "@conclave/core";
 import { emptyRunUsage } from "@conclave/core";
+import { conversationSnippet, matchesConversation, searchTerms } from "./conversation-search.js";
 
 type PersistedState = {
   version: 1;
@@ -39,6 +44,11 @@ type RunPatch = {
   usage?: RunUsage;
   rateLimit?: RateLimitNotice | undefined;
   cancelRequestedAt?: string | undefined;
+};
+
+export type ListOptions = {
+  query?: string;
+  limit?: number;
 };
 
 export type CreatedRun = {
@@ -155,10 +165,12 @@ export class FileStateStore {
     });
   }
 
-  async listConversations(): Promise<ConversationSummary[]> {
+  async listConversations(options: ListOptions = {}): Promise<ConversationSummary[]> {
     await this.ready();
-    return Object.values(this.state.conversations)
+    const terms = searchTerms(options.query ?? "");
+    const ordered = Object.values(this.state.conversations)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .filter(conversation => matchesConversation(conversation, terms))
       .map(conversation => ({
         id: conversation.id,
         title: conversation.title,
@@ -166,7 +178,94 @@ export class FileStateStore {
         updatedAt: conversation.updatedAt,
         lastRunId: conversation.lastRunId,
         messageCount: conversation.messages.length,
+        snippet: conversationSnippet(conversation, terms),
       }));
+
+    const limit = options.limit;
+    return limit !== undefined && limit > 0 ? ordered.slice(0, limit) : ordered;
+  }
+
+  async renameConversation(id: string, title: string): Promise<Conversation> {
+    await this.ready();
+    return this.enqueue(async () => {
+      const conversation = this.state.conversations[id];
+      if (!conversation) throw new Error(`Conversation ${id} was not found`);
+      const next = title.replace(/\s+/g, " ").trim();
+      if (!next) throw new Error("A conversation title cannot be empty");
+      conversation.title = next.length > 120 ? `${next.slice(0, 119)}…` : next;
+      await this.persistState();
+      return clone(conversation);
+    });
+  }
+
+  async deleteConversation(id: string): Promise<void> {
+    await this.ready();
+    await this.enqueue(async () => {
+      const conversation = this.state.conversations[id];
+      if (!conversation) throw new Error(`Conversation ${id} was not found`);
+      const runIds = Object.values(this.state.runs)
+        .filter(run => run.conversationId === id)
+        .map(run => run.id);
+      for (const runId of runIds) delete this.state.runs[runId];
+      delete this.state.conversations[id];
+      await this.persistState();
+
+      // Event logs, including archived earlier attempts, are part of the
+      // conversation's on-disk footprint and must go with it.
+      const entries = await readdir(this.runsDir, { withFileTypes: true }).catch(() => []);
+      await Promise.all(entries
+        .filter(entry => entry.isFile() && runIds.some(runId => entry.name.startsWith(`${runId}.`)))
+        .map(entry => rm(join(this.runsDir, entry.name), { force: true })));
+    });
+  }
+
+  async exportConversation(id: string): Promise<ConversationExport | null> {
+    await this.ready();
+    const conversation = this.state.conversations[id];
+    if (!conversation) return null;
+
+    const stored = Object.values(this.state.runs)
+      .filter(run => run.conversationId === id)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    const runs: ConversationExportRun[] = [];
+    for (const run of stored) {
+      runs.push({
+        id: run.id,
+        attempt: run.attempt,
+        status: run.status,
+        mode: run.request.mode,
+        participants: run.request.participants,
+        synthesizer: run.request.synthesizer,
+        workflow: run.request.workflow,
+        usage: run.usage ?? emptyRunUsage(),
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+        // A failed or cancelled run has no result, but the work its models did
+        // finish is in the event log. An export keeps the evidence, so recover
+        // it rather than exporting metadata alone.
+        steps: run.result?.steps ?? await this.completedStepsFromEvents(run.id, run.attempt),
+        error: run.error,
+      });
+    }
+
+    return clone({
+      version: 1 as const,
+      exportedAt: now(),
+      conversation,
+      runs,
+    });
+  }
+
+  private async completedStepsFromEvents(runId: string, attempt: number) {
+    const records = await this.readRunEventFile(runId);
+    const steps = new Map<string, OrchestrationStep>();
+    for (const record of records) {
+      if (record.attempt !== attempt) continue;
+      if (record.event.type === "step_completed") steps.set(record.event.step.id, record.event.step);
+      else if (record.event.type === "step_failed") steps.delete(record.event.failure.stepId);
+    }
+    return [...steps.values()];
   }
 
   async getConversation(id: string) {
@@ -223,6 +322,7 @@ export class FileStateStore {
         userMessageId,
         status: "queued",
         attempt: 1,
+        attemptStartedAt: timestamp,
         request: cleanRequest(request),
         usage: emptyRunUsage(),
         createdAt: timestamp,
@@ -301,10 +401,12 @@ export class FileStateStore {
 
       const previousAttempt = run.attempt;
       await this.archiveRunEvents(run.id, previousAttempt);
+      const resumedAt = now();
       run.status = "queued";
       run.attempt += 1;
       run.usage = emptyRunUsage();
-      run.updatedAt = now();
+      run.attemptStartedAt = resumedAt;
+      run.updatedAt = resumedAt;
       delete run.error;
       delete run.result;
       delete run.rateLimit;

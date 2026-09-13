@@ -14,6 +14,7 @@ import { MockProvider } from "./providers/mock.js";
 import { OpenAICodexProvider } from "./providers/openai-codex.js";
 import { XaiGrokProvider } from "./providers/xai-grok.js";
 import { Orchestrator } from "./orchestrator.js";
+import { exportFilename, exportToMarkdown } from "./state/conversation-export.js";
 import { FileStateStore } from "./state/file-store.js";
 import { RunManager } from "./state/run-manager.js";
 import { workflowPresets } from "./workflow-presets.js";
@@ -28,7 +29,13 @@ const allowedOrigins = (process.env.CONCLAVE_WEB_ORIGIN
   .filter(Boolean);
 
 const app = Fastify({ logger: true });
-await app.register(cors, { origin: allowedOrigins });
+await app.register(cors, {
+  origin: allowedOrigins,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  // Conversation exports carry their filename in content-disposition, which a
+  // browser hides from fetch() unless the server exposes it explicitly.
+  exposedHeaders: ["content-disposition"],
+});
 
 function applyStreamCors(raw: import("node:http").ServerResponse, origin?: string) {
   if (!origin || !allowedOrigins.includes(origin)) return;
@@ -133,12 +140,59 @@ app.get("/models", async () => {
 
 app.get("/workflow-presets", async () => workflowPresets);
 
-app.get("/conversations", async () => runManager.listConversations());
+app.get<{ Querystring: { q?: string; limit?: string } }>("/conversations", async request => {
+  const limit = Number(request.query.limit);
+  return runManager.listConversations({
+    query: request.query.q ?? "",
+    limit: Number.isInteger(limit) && limit > 0 ? limit : undefined,
+  });
+});
 
 app.get<{ Params: { id: string } }>("/conversations/:id", async (request, reply) => {
   const conversation = await runManager.getConversation(request.params.id);
   if (!conversation) return reply.code(404).send({ error: "Conversation not found" });
   return conversation;
+});
+
+app.patch<{ Params: { id: string }; Body: { title?: string } }>("/conversations/:id", async (request, reply) => {
+  if (typeof request.body?.title !== "string") {
+    return reply.code(400).send({ error: "A string title is required" });
+  }
+  try {
+    return await runManager.renameConversation(request.params.id, request.body.title);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not rename conversation";
+    return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+  }
+});
+
+app.delete<{ Params: { id: string } }>("/conversations/:id", async (request, reply) => {
+  try {
+    return await runManager.deleteConversation(request.params.id);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not delete conversation";
+    return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
+  }
+});
+
+app.get<{
+  Params: { id: string };
+  Querystring: { format?: string };
+}>("/conversations/:id/export", async (request, reply) => {
+  const data = await runManager.exportConversation(request.params.id);
+  if (!data) return reply.code(404).send({ error: "Conversation not found" });
+
+  const format = request.query.format === "markdown" ? "markdown" : "json";
+  reply.header(
+    "content-disposition",
+    `attachment; filename="${exportFilename(data.conversation.title, format)}"`,
+  );
+  if (format === "markdown") {
+    reply.type("text/markdown; charset=utf-8");
+    return exportToMarkdown(data);
+  }
+  reply.type("application/json; charset=utf-8");
+  return data;
 });
 
 app.post<{ Body: StartRunRequest }>("/runs", async (request, reply) => {

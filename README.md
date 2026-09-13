@@ -24,6 +24,8 @@ The architecture is deliberately provider-agnostic so subscription-backed runtim
 ```text
 apps/
   web/       React + Vite interface
+    src/lib/ pure logic: keyboard model, workflow graph editing, formatting
+    src/ui/  the interface: rail, setup, council work, workflow editor, palette
   server/    Fastify orchestration/runtime service
 packages/
   core/      shared provider + orchestration contracts
@@ -81,9 +83,58 @@ Prompt templates support:
 
 Interpolation is single-pass: placeholder-like text contained inside user input or model output remains literal and cannot become new workflow syntax.
 
-Conclave ships with three initial presets: **Triangulate**, **Challenge → Revise**, and **Decision Board**. The web UI can load a preset, select the synthesizer, and optionally expose/edit its JSON graph before running it.
+Conclave ships with three initial presets: **Triangulate**, **Challenge → Revise**, and **Decision Board**. The web UI can load a preset as a starting point and then edit the graph directly — add and remove nodes, rename them, change step kinds, assign participants or the synthesizer, toggle dependencies, and insert placeholders into prompt templates — with the raw JSON still available underneath. The editor validates every change against the same rules as the server and refuses a dependency that would close a cycle, so an invalid graph is caught before it costs a subscription call.
 
 The **Run Inspector** reconstructs execution from the durable event logs. It shows current and archived attempts, status, duration, calls/tokens where available, errors/rate limits, each step's model/kind/status/timing, and dependency lineage. It refreshes while an active run is executing and ignores stale responses after the user changes conversations.
+
+## The interface
+
+The web app is built around a single idea: the answer is what you read, and the
+machinery is what you operate. Those two registers are visually distinct —
+editorial serif for the final answer, compact sans and tabular figures for
+telemetry — and colour carries exactly one piece of information, which provider
+is speaking, always paired with a glyph and a name so it never carries it alone.
+
+**Conversation management.** The rail lists every conversation grouped by
+recency, with rename, delete (behind an inline confirmation), and Markdown/JSON
+export per conversation. Search runs on the server across message bodies, not
+only titles, and each result shows the excerpt that matched.
+
+**The command palette** (`Ctrl`/`Cmd`+`K`) is one entry point for searching
+conversations, switching orchestration pattern, and running any action that has
+a keyboard binding, so nothing is discoverable only by memorising a shortcut.
+
+**Council work** is a timeline of collapsible steps. Each collapsed step shows a
+live preview of its latest line; each expanded one clamps very long output
+behind a "show full output" control so a single verbose model cannot bury the
+rest of the council. `E` expands everything, `Shift`+`E` collapses it.
+
+**Long runs.** While a run is live, a strip under the header shows the pattern,
+which models are working, calls started/completed against the budget, token
+telemetry where the runtime reports it, elapsed time, and Stop. The transcript
+sticks to the newest output until you scroll away, and then offers "Jump to
+latest" instead of fighting you for the scroll position.
+
+**Workflow authoring.** Custom Workflow mode has a structured node editor: node
+ID, step kind, which participant or the synthesizer runs it, its dependencies as
+toggles, and its prompt template with one-click placeholder insertion. Renaming
+a node rewrites its dependants and their `{{dep.<nodeId>}}` references.
+Dependencies that would close a cycle are refused with an explanation rather
+than failing validation later. The graph is validated on every edit, an
+execution-order map shows which nodes run in parallel, and the raw JSON remains
+editable underneath.
+
+**Keyboard.** Modified chords stay live while typing (`Mod`+`K` palette,
+`Mod`+`Enter` convene, `Mod`+`.` stop); bare keys act only outside text fields
+(`/` prompt, `C` configure, `D` run details, `E`/`Shift`+`E` expand/collapse,
+`N` new conversation, `S` rail, `T` theme, `?` help, `Esc` closes the top layer).
+Press `?` for the full list.
+
+**Accessibility.** A skip link, visible focus rings on every control, dialogs
+and drawers with focus trapping and focus restoration, live-region announcements
+for run progress, labelled controls throughout, and `prefers-reduced-motion`
+honoured. Light and dark themes are both first-class, and the layout works down
+to 390px.
 
 ## Run locally
 
@@ -113,8 +164,11 @@ Set `CONCLAVE_DATA_DIR` to use a different local directory. On macOS/Linux, Conc
 
 The persistent runtime API is:
 
-- `GET /conversations` — recent conversations
+- `GET /conversations?q=<query>` — recent conversations, optionally full-text filtered across titles and message bodies (quoted `"phrases"` are matched verbatim); each hit carries the excerpt that matched
 - `GET /conversations/:id` — one conversation with messages
+- `PATCH /conversations/:id` — rename a conversation
+- `DELETE /conversations/:id` — delete a conversation with its runs and event logs; refused while that conversation has an active run
+- `GET /conversations/:id/export?format=markdown|json` — export one conversation, including the council work behind each answer
 - `GET /workflow-presets` — built-in reusable custom workflow graphs
 - `POST /runs` — start a background orchestration run
 - `GET /runs/:id` — inspect persisted run state, budget, and usage
@@ -207,6 +261,6 @@ GitHub Actions runs the same checks on pull requests.
 7. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
 8. ✅ Custom workflow graph/presets and richer run inspection
 9. ✅ Web-first robustness: partial-provider failure handling, step-level retry, stalled-provider recovery, reconnect/reload stress coverage, and stronger lifecycle integration tests
-10. Web UI/UX: conversation management/search/export, collapsible model outputs, better long-run rendering, richer workflow authoring, keyboard shortcuts, and accessibility
+10. ✅ Web UI/UX: conversation management/search/export, collapsible model outputs, better long-run rendering, richer workflow authoring, keyboard shortcuts, and accessibility
 
 Desktop/local-native packaging and an IPC transport remain intentionally deferred. The orchestration/provider core should stay transport-independent so native packaging can be added later without driving current product design.
