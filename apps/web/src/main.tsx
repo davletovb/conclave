@@ -188,8 +188,8 @@ function App() {
       } else if (run.status === "running" || run.status === "queued") {
         await recoverRun(run.id, epoch);
       } else {
-        setResult(run.result ?? null);
-        setLiveSteps(run.result?.steps ?? []);
+        await replayPersistedRun(run.id, epoch);
+        if (!isCurrent(epoch)) return;
         setResumeRunId(run.id);
         setError(run.error ?? "This run was interrupted before it completed.");
       }
@@ -225,8 +225,8 @@ function App() {
       }
 
       if (run.status === "failed" || run.status === "interrupted") {
-        setResult(run.result ?? null);
-        setLiveSteps(run.result?.steps ?? []);
+        await replayPersistedRun(run.id, epoch);
+        if (!isCurrent(epoch)) return;
         setError(run.error ?? "This run was interrupted before it completed.");
         setResumeRunId(run.id);
         setLoading(false);
@@ -322,6 +322,24 @@ function App() {
     if (streamEvent.type === "error") {
       setError(streamEvent.message);
     }
+  }
+
+  async function replayPersistedRun(runId: string, epoch: number) {
+    setResult(null);
+    setLiveSteps([]);
+
+    const response = await fetch(`${API}/runs/${runId}/events?after=0&follow=0`);
+    if (!response.ok) await readJson(response);
+    const body = await response.text();
+    if (!isCurrent(epoch)) return false;
+
+    for (const line of body.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || !isCurrent(epoch)) continue;
+      const record = JSON.parse(trimmed) as RunEventRecord;
+      applyStreamEvent(record.event);
+    }
+    return isCurrent(epoch);
   }
 
   async function consumeRun(runId: string, epoch: number) {
@@ -566,6 +584,9 @@ function App() {
                 </div>
               )}
               {loading && <div className="stream-status"><span className="dot" /> Live · persisted locally</div>}
+              {!loading && resumeRunId && displayedSteps.length > 0 && (
+                <div className="stream-status">Partial output · previous attempt</div>
+              )}
               <div className="step-grid">
                 {displayedSteps.map(step => (
                   <article className="step-card" key={step.id}>
