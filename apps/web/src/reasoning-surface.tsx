@@ -9,13 +9,17 @@ import { Markdown } from "./markdown";
 
 type ModeMeta = { id: OrchestrationMode; label: string; description: string };
 
-const intentGroups: Array<{ label: string; description: string; modes: OrchestrationMode[] }> = [
-  { label: "Answer", description: "Get a direct answer or a synthesized panel view.", modes: ["single", "panel"] },
-  { label: "Compare", description: "Keep independent answers separate for inspection.", modes: ["compare"] },
-  { label: "Investigate", description: "Assign distinct research lenses, then synthesize.", modes: ["research-council"] },
-  { label: "Challenge", description: "Critique assumptions and stress-test conclusions.", modes: ["critic-revise", "red-team", "debate"] },
-  { label: "Decide", description: "Adjudicate candidates or audit a consensus.", modes: ["judge", "consensus"] },
-  { label: "Plan & execute", description: "Plan work, execute in parallel, then review.", modes: ["planner-executor"] },
+const primaryModes: OrchestrationMode[] = [
+  "single",
+  "panel",
+  "compare",
+  "research-council",
+  "critic-revise",
+  "red-team",
+  "debate",
+  "judge",
+  "consensus",
+  "planner-executor",
 ];
 
 const advancedModes: OrchestrationMode[] = ["router", "custom"];
@@ -86,6 +90,9 @@ type RunSetupProps = {
   modes: ModeMeta[];
   onModeChange: (mode: OrchestrationMode) => void;
   models: ModelRef[];
+  modelsLoading: boolean;
+  modelsError: string;
+  onRetryModels: () => void;
   selectedKeys: string[];
   participants: ModelRef[];
   onToggleModel: (model: ModelRef) => void;
@@ -105,8 +112,8 @@ function modelKey(model: ModelRef) {
 
 export function RunSetup(props: RunSetupProps) {
   const {
-    mode, fresh, modes, onModeChange, models, selectedKeys, participants, onToggleModel,
-    synthesizerKey, onSynthesizerChange, maxCalls, onMaxCallsChange,
+    mode, fresh, modes, onModeChange, models, modelsLoading, modelsError, onRetryModels,
+    selectedKeys, participants, onToggleModel, synthesizerKey, onSynthesizerChange, maxCalls, onMaxCallsChange,
     maxRounds, onMaxRoundsChange, expectedCalls, loading,
   } = props;
   const meta = (id: OrchestrationMode) => modes.find(item => item.id === id)!;
@@ -121,25 +128,20 @@ export function RunSetup(props: RunSetupProps) {
         <p>{fresh ? "Choose the reasoning pattern first, then assign models to the roles that matter." : "Adjust the workflow or model roles for the next message in this conversation."}</p>
       </div>
 
-      <div className="intent-grid">
-        {intentGroups.map(group => (
-          <div className="intent-group" key={group.label}>
-            <div className="intent-copy"><strong>{group.label}</strong><span>{group.description}</span></div>
-            <div className="intent-options">
-              {group.modes.map(id => (
-                <button type="button" key={id} className={mode === id ? "intent-mode selected" : "intent-mode"} disabled={loading} onClick={() => onModeChange(id)}>
-                  <strong>{meta(id).label}</strong><span>{meta(id).description}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+      <div className="workflow-list">
+        {primaryModes.map(id => (
+          <button type="button" key={id} className={mode === id ? "workflow-option selected" : "workflow-option"} disabled={loading} onClick={() => onModeChange(id)}>
+            <strong>{meta(id).label}</strong>
+            <span>{meta(id).description}</span>
+          </button>
         ))}
         <details className="advanced-workflows">
           <summary>More workflows</summary>
-          <div className="intent-options advanced">
+          <div className="workflow-list advanced">
             {advancedModes.map(id => (
-              <button type="button" key={id} className={mode === id ? "intent-mode selected" : "intent-mode"} disabled={loading} onClick={() => onModeChange(id)}>
-                <strong>{meta(id).label}</strong><span>{meta(id).description}</span>
+              <button type="button" key={id} className={mode === id ? "workflow-option selected" : "workflow-option"} disabled={loading} onClick={() => onModeChange(id)}>
+                <strong>{meta(id).label}</strong>
+                <span>{meta(id).description}</span>
               </button>
             ))}
           </div>
@@ -151,6 +153,12 @@ export function RunSetup(props: RunSetupProps) {
           <div><span className="eyebrow">MODELS</span><h3>Assign the participants</h3></div>
           <span className="setup-call-estimate">{expectedCalls} planned call{expectedCalls === 1 ? "" : "s"}</span>
         </div>
+        {models.length === 0 && (
+          <div className="setup-model-state">
+            <span>{modelsLoading ? "Checking your subscription models…" : modelsError || "No models are available from the local server."}</span>
+            {!modelsLoading && <button type="button" className="text-button" onClick={onRetryModels}>Retry</button>}
+          </div>
+        )}
         <div className="setup-model-grid">
           {models.map(model => {
             const selected = selectedKeys.includes(modelKey(model));
