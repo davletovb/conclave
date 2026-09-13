@@ -20,6 +20,7 @@ export class RunManager {
   private readonly eventQueues = new Map<string, Promise<void>>();
   private readonly nextSequence = new Map<string, number>();
   private readonly active = new Map<string, Promise<void>>();
+  private readonly activeConversations = new Set<string>();
 
   constructor(
     private readonly orchestrator: Orchestrator,
@@ -32,18 +33,36 @@ export class RunManager {
 
   async start(input: StartRunRequest): Promise<StartRunResponse> {
     this.validate(input.request);
-    const created = await this.store.createRun(input.request, input.conversationId);
-    this.nextSequence.set(created.run.id, 0);
-    this.launch(created.run, created.history);
-    return this.response(created.run);
+    const reservedConversationId = input.conversationId;
+    if (reservedConversationId) this.reserveConversation(reservedConversationId);
+
+    try {
+      const created = await this.store.createRun(input.request, reservedConversationId);
+      this.activeConversations.add(created.run.conversationId);
+      this.nextSequence.set(created.run.id, 0);
+      this.launch(created.run, created.history);
+      return this.response(created.run);
+    } catch (error) {
+      if (reservedConversationId) this.activeConversations.delete(reservedConversationId);
+      throw error;
+    }
   }
 
   async resume(runId: string): Promise<StartRunResponse> {
-    const run = await this.store.prepareResume(runId);
-    const history = await this.store.historyForRun(runId);
-    this.nextSequence.set(run.id, 0);
-    this.launch(run, history);
-    return this.response(run);
+    const existing = await this.store.getRun(runId);
+    if (!existing) throw new Error(`Run ${runId} was not found`);
+    this.reserveConversation(existing.conversationId);
+
+    try {
+      const run = await this.store.prepareResume(runId);
+      const history = await this.store.historyForRun(runId);
+      this.nextSequence.set(run.id, 0);
+      this.launch(run, history);
+      return this.response(run);
+    } catch (error) {
+      this.activeConversations.delete(existing.conversationId);
+      throw error;
+    }
   }
 
   async getRun(runId: string) {
@@ -72,11 +91,21 @@ export class RunManager {
     };
   }
 
+  private reserveConversation(conversationId: string) {
+    if (this.activeConversations.has(conversationId)) {
+      throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
+    }
+    this.activeConversations.add(conversationId);
+  }
+
   private launch(run: StoredRun, history: OrchestrationRequest["history"]) {
     if (this.active.has(run.id)) return;
     const task = this.execute(run, history ?? [])
       .catch(() => undefined)
-      .finally(() => this.active.delete(run.id));
+      .finally(() => {
+        this.active.delete(run.id);
+        this.activeConversations.delete(run.conversationId);
+      });
     this.active.set(run.id, task);
   }
 
