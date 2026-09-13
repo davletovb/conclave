@@ -22,6 +22,7 @@ jobs:
         run: |
           if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
           python scripts/pr14_round2_fix.py
+          python scripts/pr14_round2_testfix.py
       - name: Format changed files
         run: |
           if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
