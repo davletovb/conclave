@@ -238,6 +238,10 @@ export class OpenAICodexProvider implements ProviderAdapter {
       resolveDone = resolve;
       rejectDone = reject;
     });
+    // Cancellation can fire while turn/start is still pending. Mark this
+    // promise handled immediately so that early rejection cannot become an
+    // unhandled process-level rejection before Promise.race observes it.
+    void done.catch(() => undefined);
 
     const interrupt = () => {
       rejectDone(cancelledError());
