@@ -1,0 +1,44 @@
+name: Normalize reasoning UI styles
+on:
+  push:
+    branches: [feat/reasoning-first-ui]
+permissions:
+  contents: write
+jobs:
+  normalize:
+    if: ${{ github.event.head_commit.message == 'chore normalize reasoning UI styles' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Normalize CSS escapes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('apps/web/src/styles.css')
+          s = p.read_text()
+          marker = r'\n\n/* reasoning-first workspace */'
+          if marker not in s:
+              raise SystemExit('escaped reasoning CSS marker not found')
+          head, tail = s.split(marker, 1)
+          tail = '/* reasoning-first workspace */' + tail
+          tail = tail.replace(r'\n', '\n')
+          p.write_text(head.rstrip() + '\n\n' + tail.lstrip())
+          PY
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Commit normalized styles
+        run: |
+          rm .github/workflows/fix-reasoning-css.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/styles.css .github/workflows/fix-reasoning-css.yml
+          git commit -m "fix: normalize reasoning workspace styles"
+          git push origin HEAD:feat/reasoning-first-ui
