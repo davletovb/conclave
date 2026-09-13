@@ -131,7 +131,7 @@ describe("Orchestrator", () => {
     expect(result.steps[1]?.model.model).toBe("mock-claude");
   });
 
-  it("gives research-council members distinct analysis passes before synthesis", async () => {
+  it("runs every research-council angle before synthesis", async () => {
     const countingProvider = new CountingMockProvider();
     const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
@@ -140,8 +140,8 @@ describe("Orchestrator", () => {
       participants,
     });
 
-    expect(countingProvider.calls).toBe(4);
-    expect(result.steps.filter(step => step.kind === "research")).toHaveLength(3);
+    expect(countingProvider.calls).toBe(5);
+    expect(result.steps.filter(step => step.kind === "research")).toHaveLength(4);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
