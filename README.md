@@ -22,13 +22,19 @@ packages/
   core/      shared provider + orchestration contracts
 ```
 
-The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code/Agent SDK, and Grok ACP.
+The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code, and Grok Build ACP.
 
 ## Current status
 
-OpenAI is connected through the official local `codex app-server` runtime. Anthropic is connected through the official Claude Code non-interactive runtime. When those runtimes are authenticated with the matching consumer subscriptions, Conclave exposes subscription-backed models from both providers. Grok remains a mock until its adapter lands.
+All three initial providers now have subscription-backed local adapters:
 
-Both real adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions and refuses Claude Console/API-key or cloud-provider authentication rather than silently choosing those metered developer routes.
+- OpenAI through `codex app-server` and ChatGPT sign-in
+- Anthropic through Claude Code and `claude.ai` sign-in
+- xAI through Grok Build ACP and cached Grok/X OAuth sign-in
+
+If a runtime is missing or not authenticated, Conclave keeps that provider's mock model available so the rest of the app remains usable.
+
+The adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions, refuses Claude Console/API-key or cloud-provider authentication, and removes xAI API-key/custom-endpoint environment routes before launching Grok ACP.
 
 Claude paid plans can separately enable Anthropic **usage credits**. If usage credits are enabled on the Claude account, Anthropic may use them after included subscription limits are exhausted. That is an account-level Claude setting; Conclave cannot override it.
 
@@ -77,7 +83,30 @@ The Claude adapter checks `claude auth status` before every model listing or gen
 
 Conclave currently exposes the stable Claude Code model aliases `sonnet`, `opus`, and `haiku`. Claude Code resolves those aliases to the models available to the signed-in account.
 
-You can inspect local provider state at:
+## Connect your Grok subscription
+
+Install the official Grok Build CLI:
+
+```bash
+curl -fsSL https://x.ai/cli/install.sh | bash
+```
+
+Verify it and sign in:
+
+```bash
+grok version
+grok login
+```
+
+Complete the browser OAuth flow using the Grok/X account associated with your subscription. For a headless or remote machine, `grok login --device-auth` uses device-code authentication.
+
+Conclave talks to Grok through the official Agent Client Protocol transport (`grok agent stdio`). It only accepts the ACP `cached_token` authentication method and deliberately does not use `xai.api_key`. The child process also has `XAI_API_KEY`, legacy API-key variables, and custom model-endpoint environment variables removed.
+
+The current built-in Grok Build catalog exposes **Grok 4.6** as the default and **Grok 4.5** as an additional model. Conclave mirrors those subscription-backed choices.
+
+Restart `pnpm dev` after signing in.
+
+You can inspect all local provider states at:
 
 ```bash
 curl http://localhost:8787/providers
@@ -97,7 +126,7 @@ GitHub Actions runs the same checks on pull requests.
 
 1. ✅ OpenAI adapter via subscription-authenticated Codex runtime
 2. ✅ Anthropic adapter via subscription-authenticated Claude Code runtime
-3. xAI adapter via Grok ACP/headless runtime
+3. ✅ xAI adapter via Grok Build ACP runtime
 4. Streaming event protocol for partial output and tool calls
 5. Persistent conversations and resumable orchestration runs
 6. Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
