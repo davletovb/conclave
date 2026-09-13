@@ -43,8 +43,9 @@ class UsageMockProvider extends MockProvider {
 }
 
 class RateLimitedProvider extends MockProvider {
-  override async generate() {
-    throw new Error("Rate limit exceeded; try again later");
+  override async generate(request: ProviderRequest) {
+    if (request.model) throw new Error("Rate limit exceeded; try again later");
+    return super.generate(request);
   }
 }
 
