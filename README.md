@@ -22,13 +22,13 @@ packages/
   core/      shared provider + orchestration contracts
 ```
 
-The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Agent SDK/CLI, and Grok ACP.
+The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code/Agent SDK, and Grok ACP.
 
 ## Current status
 
-OpenAI is now connected through the official local `codex app-server` runtime. If Codex is signed in with a ChatGPT account, Conclave discovers the models available to that account and sends OpenAI turns through the ChatGPT subscription allowance. Claude and Grok remain mocks until their adapters land.
+OpenAI is connected through the official local `codex app-server` runtime. Anthropic is connected through the official Claude Code non-interactive runtime. When those runtimes are authenticated with the matching consumer subscriptions, Conclave exposes subscription-backed models from both providers. Grok remains a mock until its adapter lands.
 
-Conclave intentionally refuses Codex sessions authenticated with an OpenAI API key so it cannot silently switch from subscription usage to metered API billing.
+Both real adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions and refuses Claude Console/API-key or cloud-provider authentication rather than silently switching to metered API billing.
 
 ## Run locally
 
@@ -46,27 +46,36 @@ Override the server URL with `VITE_CONCLAVE_API` when needed.
 
 ## Connect your ChatGPT subscription
 
-Conclave expects the official Codex CLI on the same machine. On macOS you can install it with one of the official options:
-
-```bash
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-# or
-npm install -g @openai/codex
-# or
-brew install --cask codex
-```
-
-Then run:
+Conclave expects the official Codex CLI on the same machine. After installing Codex, run:
 
 ```bash
 codex
 ```
 
-Choose **Sign in with ChatGPT** and complete the browser login. Restart `pnpm dev` afterward. The Conclave sidebar should change from `OpenAI not connected · mocks active` to your ChatGPT plan, and `/models` will expose the models Codex reports for that account.
+Choose **Sign in with ChatGPT** and complete the browser login. Restart `pnpm dev` afterward. If Codex is authenticated with an API key, Conclave leaves OpenAI disconnected by design.
 
-If Codex is authenticated with an API key, Conclave will leave OpenAI disconnected by design. Sign out of that Codex session and sign back in with ChatGPT if you want subscription-backed usage.
+## Connect your Claude subscription
 
-You can inspect the local provider state at:
+Conclave expects the official Claude Code CLI on the same machine. Check it with:
+
+```bash
+claude --version
+```
+
+Then authenticate through your Claude account:
+
+```bash
+claude auth login
+claude auth status
+```
+
+Use the normal **claude.ai** subscription login. Do not use `claude auth login --console`, which selects Console/API usage billing. Restart `pnpm dev` after signing in.
+
+The Claude adapter checks `claude auth status` before every model listing or generation request and only accepts `claude.ai` first-party authentication. It removes API/platform credential environment variables from child processes and runs Claude in safe, tool-free, non-persistent print mode.
+
+Conclave currently exposes the stable Claude Code model aliases `sonnet`, `opus`, and `haiku`. Claude Code resolves those aliases to the models available to the signed-in account.
+
+You can inspect local provider state at:
 
 ```bash
 curl http://localhost:8787/providers
@@ -85,7 +94,7 @@ GitHub Actions runs the same checks on pull requests.
 ## Near-term roadmap
 
 1. ✅ OpenAI adapter via subscription-authenticated Codex runtime
-2. Anthropic adapter via Claude Agent SDK/runtime
+2. ✅ Anthropic adapter via subscription-authenticated Claude Code runtime
 3. xAI adapter via Grok ACP/headless runtime
 4. Streaming event protocol for partial output and tool calls
 5. Persistent conversations and resumable orchestration runs
