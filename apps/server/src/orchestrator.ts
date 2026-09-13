@@ -288,7 +288,7 @@ export class Orchestrator {
           prompt: `Create a concrete plan for solving the question or task. Break it into ordered work items, name assumptions and dependencies, and define what a good final answer must contain. Do not pretend to perform external actions.\n\nTask:\n${request.prompt}`,
           history: request.history,
         }, runId, emit);
-        const availableExecutors = request.participants.slice(1, 4);
+        const availableExecutors = request.participants.slice(1);
         const executors = availableExecutors.length > 0 ? availableExecutors : [planner];
         const executions = await Promise.all(executors.map((model, index) => this.executeStep({
           id: makeStepId("execution", index),
@@ -328,6 +328,10 @@ export class Orchestrator {
         return complete({ mode: request.mode, steps: [...research, synthesis], final: synthesis.content });
       }
 
+      if (request.mode === "judge" || request.mode === "consensus") {
+        this.requireParticipants(request, 2);
+      }
+
       const independent = await this.independentAnswers(request, runId, emit);
 
       if (request.mode === "compare") {
@@ -353,7 +357,6 @@ export class Orchestrator {
       }
 
       if (request.mode === "judge") {
-        this.requireParticipants(request, 2);
         const judgment = await this.executeStep({
           id: makeStepId("judgment", 0),
           kind: "judgment",
@@ -365,7 +368,6 @@ export class Orchestrator {
       }
 
       if (request.mode === "consensus") {
-        this.requireParticipants(request, 2);
         const synthesis = await this.executeStep({
           id: makeStepId("synthesis", 0),
           kind: "synthesis",
