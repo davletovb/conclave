@@ -17,6 +17,7 @@ import type {
   StartRunResponse,
   StoredRun,
 } from "@conclave/core";
+import { Markdown } from "./markdown";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -33,6 +34,14 @@ const modes: { id: OrchestrationMode; label: string; description: string }[] = [
   { id: "research-council", label: "Research Council", description: "Evidence, alternatives, risks, synthesis" },
   { id: "planner-executor", label: "Planner → Executors", description: "Plan, execute in parallel, review" },
 ];
+
+type Theme = "dark" | "light";
+
+function initialTheme(): Theme {
+  const saved = localStorage.getItem("conclave.theme");
+  if (saved === "dark" || saved === "light") return saved;
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
 
 function minimumParticipants(mode: OrchestrationMode) {
   return mode === "consensus" || mode === "judge" || mode === "router" || mode === "research-council" ? 2 : 1;
@@ -125,6 +134,7 @@ function App() {
   const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [mode, setMode] = useState<OrchestrationMode>("panel");
+  const [theme, setTheme] = useState<Theme>(initialTheme);
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<OrchestrationResult | null>(null);
   const [liveSteps, setLiveSteps] = useState<OrchestrationStep[]>([]);
@@ -141,6 +151,8 @@ function App() {
   const [error, setError] = useState("");
   const viewEpochRef = useRef(0);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const composerRef = useRef<HTMLFormElement | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     const epoch = beginViewOperation();
@@ -150,6 +162,20 @@ function App() {
       viewEpochRef.current += 1;
     };
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("conclave.theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const textarea = promptRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    const nextHeight = Math.max(36, Math.min(textarea.scrollHeight, 180));
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 180 ? "auto" : "hidden";
+  }, [prompt]);
 
   const participants = useMemo(
     () => models.filter(model => selected.includes(modelKey(model))),
@@ -554,6 +580,14 @@ function App() {
     }
   }
 
+  function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (!loading && prompt.trim() && !participantShortfall && !budgetShortfall) {
+      composerRef.current?.requestSubmit();
+    }
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!prompt.trim() || participantShortfall || budgetShortfall || loading) return;
@@ -713,13 +747,24 @@ function App() {
               {modes.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
             </select>
           </label>
-          <div className="model-picker">
-            <button className="chip mobile-new-chat" onClick={newConversation}>New</button>
-            {models.map(model => (
-              <button key={modelKey(model)} onClick={() => toggleModel(model)} className={selected.includes(modelKey(model)) ? "chip selected" : "chip"}>
-                {model.label}
-              </button>
-            ))}
+          <div className="topbar-actions">
+            <div className="model-picker">
+              <button className="chip mobile-new-chat" onClick={newConversation}>New</button>
+              {models.map(model => (
+                <button key={modelKey(model)} onClick={() => toggleModel(model)} className={selected.includes(modelKey(model)) ? "chip selected" : "chip"}>
+                  {model.label}
+                </button>
+              ))}
+            </div>
+            <button
+              className="theme-toggle"
+              type="button"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+              onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
+            >
+              {theme === "dark" ? "☀" : "☾"}
+            </button>
           </div>
         </header>
 
@@ -729,7 +774,7 @@ function App() {
               {priorMessages.map(message => (
                 <article key={message.id} className={`message ${message.role}`}>
                   <span className="eyebrow">{message.role === "user" ? "YOU" : "CONCLAVE"}</span>
-                  <p>{message.content}</p>
+                  <Markdown content={message.content} />
                 </article>
               ))}
             </section>
@@ -761,7 +806,7 @@ function App() {
               {result && (
                 <div className="final-card">
                   <span className="eyebrow">FINAL</span>
-                  <p>{result.final}</p>
+                  <Markdown content={result.final} />
                 </div>
               )}
               <div className="run-telemetry">
@@ -777,7 +822,9 @@ function App() {
                 {displayedSteps.map(step => (
                   <article className="step-card" key={step.id}>
                     <div className="step-meta"><span>{step.model.label}</span><span>{step.kind}</span></div>
-                    <p>{step.content || (loading ? "Waiting for output…" : "")}</p>
+                    {step.content
+                      ? <Markdown content={step.content} />
+                      : <p className="step-placeholder">{loading ? "Waiting for output…" : ""}</p>}
                   </article>
                 ))}
               </div>
@@ -785,7 +832,7 @@ function App() {
           )}
         </div>
 
-        <form className="composer" onSubmit={submit}>
+        <form className="composer" ref={composerRef} onSubmit={submit}>
           <div className="run-controls">
             <label>
               <span>Call budget</span>
@@ -812,15 +859,22 @@ function App() {
               {expectedCalls} planned call{expectedCalls === 1 ? "" : "s"}
             </span>
           </div>
-          <textarea value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversation ? "Continue the conversation…" : "Ask the council…"} rows={3} />
+          <textarea
+            ref={promptRef}
+            value={prompt}
+            onChange={event => setPrompt(event.target.value)}
+            onKeyDown={handlePromptKeyDown}
+            placeholder={conversation ? "Continue the conversation…" : "Ask the council…"}
+            rows={1}
+          />
           <div className="composer-footer">
-            <span>{participantShortfall
+            <span className="composer-hint">{participantShortfall
               ? `${requiredParticipants} participants required for ${modes.find(item => item.id === mode)?.label}`
               : budgetShortfall
                 ? `Increase call budget to at least ${expectedCalls}`
                 : conversation
-                  ? "Persistent conversation"
-                  : `${participants.length} participant${participants.length === 1 ? "" : "s"}`}</span>
+                  ? "Persistent conversation · Enter sends · Shift+Enter newline"
+                  : `${participants.length} participant${participants.length === 1 ? "" : "s"} · Enter sends`}</span>
             <div className="composer-actions">
               {loading && (
                 <button className="stop-run" type="button" disabled={cancelling} onClick={() => void cancelActiveRun()}>
