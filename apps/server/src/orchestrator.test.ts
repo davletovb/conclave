@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { ModelRef, ProviderRequest } from "@conclave/core";
+import type {
+  ModelRef,
+  OrchestrationStreamEvent,
+  ProviderEventSink,
+  ProviderRequest,
+} from "@conclave/core";
 import { MockProvider } from "./providers/mock.js";
 import { Orchestrator } from "./orchestrator.js";
 
@@ -17,6 +22,15 @@ class CountingMockProvider extends MockProvider {
   override async generate(request: ProviderRequest) {
     this.calls += 1;
     return super.generate(request);
+  }
+}
+
+class StreamingMockProvider extends MockProvider {
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    emit?.({ type: "text_delta", delta: "streamed " });
+    emit?.({ type: "text_delta", delta: "answer" });
+    const response = await super.generate(request);
+    return { ...response, content: "streamed answer" };
   }
 }
 
@@ -53,5 +67,45 @@ describe("Orchestrator", () => {
 
     expect(countingProvider.calls).toBe(3);
     expect(result.steps.map(step => step.kind)).toEqual(["answer", "critique", "revision"]);
+  });
+
+  it("emits a complete normalized lifecycle for non-streaming providers", async () => {
+    const events: OrchestrationStreamEvent[] = [];
+    await orchestrator.run({
+      mode: "single",
+      prompt: "Answer once",
+      participants: [participants[0]],
+    }, {
+      runId: "run-test",
+      emit: event => events.push(event),
+    });
+
+    expect(events.map(event => event.type)).toEqual([
+      "run_started",
+      "step_started",
+      "text_delta",
+      "step_completed",
+      "run_completed",
+    ]);
+    expect(events.every(event => event.runId === "run-test")).toBe(true);
+  });
+
+  it("forwards provider deltas without appending a duplicate fallback delta", async () => {
+    const streamingProvider = new StreamingMockProvider();
+    const streamingOrchestrator = new Orchestrator(new Map([[streamingProvider.id, streamingProvider]]));
+    const events: OrchestrationStreamEvent[] = [];
+
+    const result = await streamingOrchestrator.run({
+      mode: "single",
+      prompt: "Stream this",
+      participants: [participants[0]],
+    }, {
+      runId: "stream-test",
+      emit: event => events.push(event),
+    });
+
+    const deltas = events.filter((event): event is Extract<OrchestrationStreamEvent, { type: "text_delta" }> => event.type === "text_delta");
+    expect(deltas.map(event => event.delta)).toEqual(["streamed ", "answer"]);
+    expect(result.final).toBe("streamed answer");
   });
 });
