@@ -89,4 +89,37 @@ describe("RunManager", () => {
       "assistant",
     ]);
   });
+
+  it("rejects overlapping runs in the same conversation", async () => {
+    const { manager } = await makeManager();
+    const first = await manager.start({
+      request: {
+        mode: "single",
+        prompt: "First active question",
+        participants: [participant],
+      },
+    });
+
+    await expect(manager.start({
+      conversationId: first.conversationId,
+      request: {
+        mode: "single",
+        prompt: "Overlapping question",
+        participants: [participant],
+      },
+    })).rejects.toThrow("already has an active run");
+
+    await waitForTerminal(manager, first.runId);
+
+    const next = await manager.start({
+      conversationId: first.conversationId,
+      request: {
+        mode: "single",
+        prompt: "Question after completion",
+        participants: [participant],
+      },
+    });
+    const completed = await waitForTerminal(manager, next.runId);
+    expect(completed.status).toBe("completed");
+  });
 });
