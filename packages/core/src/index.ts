@@ -236,6 +236,32 @@ export interface ConversationSummary {
   updatedAt: string;
   lastRunId?: string;
   messageCount: number;
+  /** Matching excerpt. Only present when the listing was filtered by a search query. */
+  snippet?: string;
+}
+
+export type ConversationExportFormat = "markdown" | "json";
+
+export interface ConversationExportRun {
+  id: string;
+  attempt: number;
+  status: RunStatus;
+  mode: OrchestrationMode;
+  participants: ModelRef[];
+  synthesizer?: ModelRef;
+  workflow?: WorkflowGraph;
+  usage: RunUsage;
+  createdAt: string;
+  updatedAt: string;
+  steps: OrchestrationStep[];
+  error?: string;
+}
+
+export interface ConversationExport {
+  version: 1;
+  exportedAt: string;
+  conversation: Conversation;
+  runs: ConversationExportRun[];
 }
 
 export type RunStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "interrupted" | "cancelled";

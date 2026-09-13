@@ -7,7 +7,7 @@ import type {
   StoredRun,
 } from "@conclave/core";
 import { Orchestrator } from "../orchestrator.js";
-import { FileStateStore } from "./file-store.js";
+import { FileStateStore, type ListOptions } from "./file-store.js";
 import { inspectRun } from "./run-inspection.js";
 
 type RunListener = (record: RunEventRecord) => void;
@@ -136,8 +136,27 @@ export class RunManager {
     return this.store.getConversation(conversationId);
   }
 
-  async listConversations() {
-    return this.store.listConversations();
+  async listConversations(options: ListOptions = {}) {
+    return this.store.listConversations(options);
+  }
+
+  async renameConversation(conversationId: string, title: string) {
+    return this.store.renameConversation(conversationId, title);
+  }
+
+  async deleteConversation(conversationId: string) {
+    // A run owns provider processes and an append-only event log. Removing its
+    // conversation underneath it would leave both orphaned, so the caller has
+    // to stop the run first.
+    if (this.activeConversations.has(conversationId)) {
+      throw new Error("Stop this conversation's active run before deleting it.");
+    }
+    await this.store.deleteConversation(conversationId);
+    return { id: conversationId, deleted: true as const };
+  }
+
+  async exportConversation(conversationId: string) {
+    return this.store.exportConversation(conversationId);
   }
 
   async events(runId: string, after = 0) {

@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   Conversation,
+  ConversationExportFormat,
   ConversationSummary,
   ModelRef,
   OrchestrationMode,
@@ -13,46 +14,51 @@ import type {
   ProviderStatus,
   RateLimitNotice,
   RunEventRecord,
-  StepFailure,
   RunInspection,
   RunUsage,
-  StartRunResponse,
+  StepFailure,
   StoredRun,
   WorkflowGraph,
   WorkflowPreset,
 } from "@conclave/core";
-import { Markdown } from "./markdown";
-import { CouncilWork, RunConfigSummary, RunSetup, defaultFinalizer, modeUsesSynthesizer } from "./reasoning-surface";
+import { api, readJson, saveBlob, sleep } from "./lib/api";
+import { isEditableTarget, matchShortcut } from "./lib/shortcuts";
+import { formatDuration } from "./lib/text";
+import { parseWorkflow, requiredParticipants, serializeWorkflow } from "./lib/workflow-model";
+import { CouncilWork } from "./ui/council";
+import { RunInspector } from "./ui/inspector";
+import { Markdown } from "./ui/markdown";
+import { CommandPalette, type Command } from "./ui/palette";
+import {
+  Icon,
+  Keys,
+  type ModeMeta,
+  ProviderMark,
+  defaultFinalizer,
+  modeUsesSynthesizer,
+  modelKey,
+  synthesizerRole,
+} from "./ui/primitives";
+import { Rail } from "./ui/rail";
+import { RunSetup } from "./ui/setup";
+import { ShortcutsDialog } from "./ui/shortcuts-dialog";
+import { WorkflowEditor } from "./ui/workflow-editor";
 import "./styles.css";
 
-const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
-const modes: { id: OrchestrationMode; label: string; description: string }[] = [
+const modes: ModeMeta[] = [
   { id: "single", label: "Single", description: "One model, one answer" },
-  { id: "compare", label: "Compare", description: "Independent answers side by side" },
+  { id: "compare", label: "Compare", description: "Independent answers, side by side" },
   { id: "panel", label: "Panel", description: "Independent answers, then synthesis" },
-  { id: "debate", label: "Debate", description: "Challenge positions, then judge" },
-  { id: "critic-revise", label: "Critic → Revise", description: "Draft, critique, improve" },
+  { id: "debate", label: "Debate", description: "Positions, bounded critique, judgment" },
+  { id: "critic-revise", label: "Critic → Revise", description: "Draft, critique, revise" },
   { id: "consensus", label: "Consensus", description: "Find agreement, then audit it" },
-  { id: "judge", label: "Judge", description: "Generate candidates, adjudicate once" },
+  { id: "judge", label: "Judge", description: "Candidates, then one adjudication" },
   { id: "red-team", label: "Red Team", description: "Attack a draft, then harden it" },
-  { id: "router", label: "Router", description: "Choose one specialist for the task" },
+  { id: "router", label: "Router", description: "Send the task to one specialist" },
   { id: "research-council", label: "Research Council", description: "Evidence, alternatives, risks, synthesis" },
   { id: "planner-executor", label: "Planner → Executors", description: "Plan, execute in parallel, review" },
-  { id: "custom", label: "Custom Workflow", description: "Run a reusable or edited workflow graph" },
+  { id: "custom", label: "Custom Workflow", description: "Run a validated dependency graph" },
 ];
-
-const workflowKinds = new Set([
-  "answer",
-  "critique",
-  "revision",
-  "synthesis",
-  "judgment",
-  "route",
-  "research",
-  "plan",
-  "execution",
-  "review",
-]);
 
 type Theme = "dark" | "light";
 
@@ -64,14 +70,6 @@ function initialTheme(): Theme {
 
 function minimumParticipants(mode: OrchestrationMode) {
   return mode === "consensus" || mode === "judge" || mode === "router" || mode === "research-council" ? 2 : 1;
-}
-
-function requiredWorkflowParticipants(workflow?: WorkflowGraph) {
-  if (!workflow) return 1;
-  const indices = workflow.nodes
-    .filter(node => node?.model?.type === "participant")
-    .map(node => node.model.type === "participant" ? node.model.index : -1);
-  return Math.max(1, ...indices.map(index => index + 1));
 }
 
 function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds: number, workflow?: WorkflowGraph) {
@@ -89,10 +87,6 @@ function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds:
     case "planner-executor": return 1 + Math.max(participantCount - 1, 1) + 1;
     case "custom": return workflow?.nodes.length ?? 0;
   }
-}
-
-function modelKey(model: ModelRef) {
-  return `${model.provider}:${model.model}`;
 }
 
 function initialSelection(models: ModelRef[]) {
@@ -113,158 +107,12 @@ function initialSelection(models: ModelRef[]) {
     .map(modelKey);
 }
 
-function runtimeName(status: ProviderStatus) {
-  const plan = status.planType ? ` ${status.planType}` : "";
-  if (status.id === "openai") return `ChatGPT${plan}`;
-  if (status.id === "anthropic") return `Claude${plan}`;
-  if (status.id === "xai") return `Grok${plan}`;
-  return status.label;
-}
-
 function freshUsage(): RunUsage {
   return { callsStarted: 0, callsCompleted: 0, inputTokens: 0, outputTokens: 0, tokenReports: 0 };
 }
 
-function durationLabel(minutes?: number) {
-  if (!minutes) return "window";
-  if (minutes % 10080 === 0) return `${minutes / 10080}w`;
-  if (minutes % 1440 === 0) return `${minutes / 1440}d`;
-  if (minutes % 60 === 0) return `${minutes / 60}h`;
-  return `${minutes}m`;
-}
-
-function elapsedLabel(ms?: number) {
-  if (ms === undefined) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
-}
-
-function limitText(snapshot: ProviderLimitSnapshot) {
-  if (!snapshot.available) return "";
-  const windows = [snapshot.primary, snapshot.secondary]
-    .filter((window): window is NonNullable<typeof window> => Boolean(window))
-    .map(window => `${durationLabel(window.windowDurationMins)} ${window.usedPercent}% used`);
-  return windows.join(" · ");
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = typeof (data as { error?: unknown }).error === "string"
-      ? (data as { error: string }).error
-      : `Request failed (${response.status})`;
-    throw new Error(message);
-  }
-  return data as T;
-}
-
-function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function parseWorkflow(raw: string): { graph?: WorkflowGraph; error: string } {
-  if (!raw.trim()) return { graph: undefined, error: "Choose a preset or enter a workflow graph." };
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { graph: undefined, error: "Workflow JSON must be an object." };
-    }
-    const graph = parsed as WorkflowGraph;
-    if (typeof graph.name !== "string" || !graph.name.trim() || !Array.isArray(graph.nodes) || typeof graph.outputNodeId !== "string" || !graph.outputNodeId.trim()) {
-      return { graph: undefined, error: "Workflow JSON must include a string name, nodes array, and outputNodeId." };
-    }
-    if (graph.nodes.length === 0) return { graph: undefined, error: "Workflow must contain at least one node." };
-    if (graph.nodes.length > 64) return { graph: undefined, error: "Workflow cannot contain more than 64 nodes." };
-
-    const byId = new Map<string, WorkflowGraph["nodes"][number]>();
-    for (const candidate of graph.nodes) {
-      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
-        return { graph: undefined, error: "Every workflow node must be an object." };
-      }
-      if (typeof candidate.id !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(candidate.id)) {
-        return { graph: undefined, error: `Invalid workflow node ID '${String(candidate.id)}'.` };
-      }
-      if (byId.has(candidate.id)) return { graph: undefined, error: `Workflow node '${candidate.id}' is duplicated.` };
-      if (typeof candidate.kind !== "string" || !workflowKinds.has(candidate.kind)) {
-        return { graph: undefined, error: `Workflow node '${candidate.id}' has unsupported kind '${String(candidate.kind)}'.` };
-      }
-      if (typeof candidate.promptTemplate !== "string" || !candidate.promptTemplate.trim()) {
-        return { graph: undefined, error: `Workflow node '${candidate.id}' requires a string promptTemplate.` };
-      }
-      if (!candidate.model || typeof candidate.model !== "object" || Array.isArray(candidate.model)) {
-        return { graph: undefined, error: `Workflow node '${candidate.id}' needs a model selector.` };
-      }
-      if (candidate.model.type === "participant") {
-        if (!Number.isInteger(candidate.model.index) || candidate.model.index < 0) {
-          return { graph: undefined, error: `Workflow node '${candidate.id}' has an invalid participant index.` };
-        }
-      } else if (candidate.model.type !== "synthesizer") {
-        return { graph: undefined, error: `Workflow node '${candidate.id}' has an unsupported model selector.` };
-      }
-      if (candidate.dependsOn !== undefined && !Array.isArray(candidate.dependsOn)) {
-        return { graph: undefined, error: `Workflow node '${candidate.id}' dependsOn must be an array.` };
-      }
-      if ((candidate.dependsOn ?? []).some(dependency => typeof dependency !== "string")) {
-        return { graph: undefined, error: `Workflow node '${candidate.id}' dependencies must be node IDs.` };
-      }
-      byId.set(candidate.id, candidate);
-    }
-
-    if (!byId.has(graph.outputNodeId)) {
-      return { graph: undefined, error: `Workflow output node '${graph.outputNodeId}' does not exist.` };
-    }
-
-    for (const node of graph.nodes) {
-      const dependencies = node.dependsOn ?? [];
-      if (new Set(dependencies).size !== dependencies.length) {
-        return { graph: undefined, error: `Workflow node '${node.id}' contains duplicate dependencies.` };
-      }
-      for (const dependency of dependencies) {
-        if (dependency === node.id) return { graph: undefined, error: `Workflow node '${node.id}' cannot depend on itself.` };
-        if (!byId.has(dependency)) return { graph: undefined, error: `Workflow node '${node.id}' depends on missing node '${dependency}'.` };
-      }
-      const explicitRefs = [...node.promptTemplate.matchAll(/\{\{dep\.([A-Za-z][A-Za-z0-9_-]{0,63})\}\}/g)].map(match => match[1]);
-      const hidden = explicitRefs.find(reference => !dependencies.includes(reference));
-      if (hidden) return { graph: undefined, error: `Workflow node '${node.id}' references '${hidden}' without declaring it in dependsOn.` };
-    }
-
-    const state = new Map<string, "visiting" | "done">();
-    const visit = (nodeId: string): boolean => {
-      const current = state.get(nodeId);
-      if (current === "visiting") return false;
-      if (current === "done") return true;
-      state.set(nodeId, "visiting");
-      const node = byId.get(nodeId)!;
-      for (const dependency of node.dependsOn ?? []) {
-        if (!visit(dependency)) return false;
-      }
-      state.set(nodeId, "done");
-      return true;
-    };
-    if (!graph.nodes.every(node => visit(node.id))) {
-      return { graph: undefined, error: "Workflow graph contains a dependency cycle." };
-    }
-
-    const outputCone = new Set<string>();
-    const includeAncestors = (nodeId: string) => {
-      if (outputCone.has(nodeId)) return;
-      outputCone.add(nodeId);
-      for (const dependency of byId.get(nodeId)?.dependsOn ?? []) includeAncestors(dependency);
-    };
-    includeAncestors(graph.outputNodeId);
-    const unused = graph.nodes.filter(node => !outputCone.has(node.id)).map(node => node.id);
-    if (unused.length > 0) {
-      return { graph: undefined, error: `Workflow node${unused.length === 1 ? "" : "s"} not connected to output: ${unused.join(", ")}.` };
-    }
-
-    return { graph, error: "" };
-  } catch (cause) {
-    return { graph: undefined, error: cause instanceof Error ? `Invalid workflow JSON: ${cause.message}` : "Invalid workflow JSON." };
-  }
-}
-
 function App() {
+  /* ---------------------------------------------------------------- state */
   const [models, setModels] = useState<ModelRef[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState("");
@@ -289,6 +137,8 @@ function App() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [resumeRunId, setResumeRunId] = useState<string | null>(null);
   const [runUsage, setRunUsage] = useState<RunUsage>(freshUsage);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const [rateLimit, setRateLimit] = useState<RateLimitNotice | null>(null);
   const [inspection, setInspection] = useState<RunInspection | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -298,12 +148,62 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
+
+  /* UI-only state */
+  const [railOpen, setRailOpen] = useState(() => window.innerWidth > 900);
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
+  const [stuckToBottom, setStuckToBottom] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [announcement, setAnnouncement] = useState("");
+
   const viewEpochRef = useRef(0);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const workflowPresetsRef = useRef<WorkflowPreset[]>([]);
   const composerRef = useRef<HTMLFormElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const streamRef = useRef<HTMLDivElement | null>(null);
 
+  /* ------------------------------------------------------------ derived */
+  const participants = useMemo(
+    () => selected
+      .map(key => models.find(model => modelKey(model) === key))
+      .filter((model): model is ModelRef => Boolean(model)),
+    [models, selected],
+  );
+  const selectedSynthesizer = synthesizerKey
+    ? models.find(model => modelKey(model) === synthesizerKey)
+    : undefined;
+  const effectiveSynthesizer = modeUsesSynthesizer(mode)
+    ? selectedSynthesizer ?? defaultFinalizer(mode, participants, models)
+    : undefined;
+  const workflowState = useMemo(() => parseWorkflow(workflowText), [workflowText]);
+  const activeWorkflow = mode === "custom" ? workflowState.graph : undefined;
+  const workflowInvalid = mode === "custom" && !activeWorkflow;
+  const neededParticipants = mode === "custom"
+    ? requiredParticipants(activeWorkflow)
+    : minimumParticipants(mode);
+  const participantShortfall = participants.length < neededParticipants;
+  const expectedCalls = plannedCalls(mode, participants.length, maxRounds, activeWorkflow);
+  const budgetShortfall = !participantShortfall && !workflowInvalid && expectedCalls > maxCalls;
+  const canSubmit = Boolean(prompt.trim()) && !loading && !participantShortfall && !budgetShortfall && !workflowInvalid;
+
+  const priorMessages = useMemo(
+    () => conversation?.messages.filter(
+      message => !(message.runId === activeRunId && message.role === "assistant"),
+    ) ?? [],
+    [conversation, activeRunId],
+  );
+  const displayedSteps = result?.steps ?? liveSteps;
+  const layered = paletteOpen || shortcutsOpen || inspectorOpen;
+  const modeLabel = modes.find(item => item.id === mode)?.label ?? mode;
+
+  /* ------------------------------------------------------------ effects */
   useEffect(() => {
     const epoch = beginViewOperation();
     void initialize(epoch);
@@ -322,10 +222,33 @@ function App() {
     const textarea = promptRef.current;
     if (!textarea) return;
     textarea.style.height = "0px";
-    const nextHeight = Math.max(36, Math.min(textarea.scrollHeight, 180));
-    textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY = textarea.scrollHeight > 180 ? "auto" : "hidden";
+    textarea.style.height = `${Math.max(40, Math.min(textarea.scrollHeight, 220))}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 220 ? "auto" : "hidden";
   }, [prompt]);
+
+  // Conversation search runs on the server so message bodies are searchable,
+  // not only titles.
+  useEffect(() => {
+    const epoch = viewEpochRef.current;
+    const handle = window.setTimeout(async () => {
+      searchAbortRef.current?.abort();
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+      if (query) setSearching(true);
+      try {
+        const data = await api.conversations(query, controller.signal);
+        if (isCurrent(epoch)) setConversations(data);
+      } catch {
+        // A superseded or failed search must never blank the rail.
+      } finally {
+        if (searchAbortRef.current === controller) {
+          searchAbortRef.current = null;
+          setSearching(false);
+        }
+      }
+    }, query ? 180 : 0);
+    return () => window.clearTimeout(handle);
+  }, [query]);
 
   useEffect(() => {
     if (!inspectorOpen || !activeRunId) return;
@@ -333,60 +256,98 @@ function App() {
     const runId = activeRunId;
     void refreshInspector(runId, epoch, true);
     if (!loading) return;
-    const timer = window.setInterval(() => {
-      void refreshInspector(runId, epoch, false);
-    }, 1000);
+    const timer = window.setInterval(() => void refreshInspector(runId, epoch, false), 1000);
     return () => window.clearInterval(timer);
   }, [inspectorOpen, activeRunId, loading]);
 
-  const participants = useMemo(
-    () => selected
-      .map(key => models.find(model => modelKey(model) === key))
-      .filter((model): model is ModelRef => Boolean(model)),
-    [models, selected],
-  );
-  const selectedSynthesizer = synthesizerKey
-    ? models.find(model => modelKey(model) === synthesizerKey)
-    : undefined;
-  const effectiveSynthesizer = modeUsesSynthesizer(mode)
-    ? selectedSynthesizer ?? defaultFinalizer(mode, participants, models)
-    : undefined;
-  const workflowState = useMemo(() => parseWorkflow(workflowText), [workflowText]);
-  const activeWorkflow = mode === "custom" ? workflowState.graph : undefined;
-  const workflowInvalid = mode === "custom" && !activeWorkflow;
-  const requiredParticipants = mode === "custom"
-    ? requiredWorkflowParticipants(activeWorkflow)
-    : minimumParticipants(mode);
-  const participantShortfall = participants.length < requiredParticipants;
-  const expectedCalls = plannedCalls(mode, participants.length, maxRounds, activeWorkflow);
-  const budgetShortfall = !participantShortfall && !workflowInvalid && expectedCalls > maxCalls;
+  // A live elapsed clock makes a long run legible without opening the drawer.
+  useEffect(() => {
+    if (!loading || runStartedAt === null) return;
+    setElapsed(Date.now() - runStartedAt);
+    const timer = window.setInterval(() => setElapsed(Date.now() - runStartedAt), 1000);
+    return () => window.clearInterval(timer);
+  }, [loading, runStartedAt]);
 
-  const priorMessages = useMemo(
-    () => conversation?.messages.filter(
-      message => !(message.runId === activeRunId && message.role === "assistant"),
-    ) ?? [],
-    [conversation, activeRunId],
-  );
+  // Long runs keep the newest output in view unless the reader scrolls away.
+  useEffect(() => {
+    if (!stuckToBottom || !loading) return;
+    const surface = streamRef.current;
+    if (!surface) return;
+    surface.scrollTop = surface.scrollHeight;
+  }, [liveSteps, result, stuckToBottom, loading]);
 
-  const subscriptionProviders = providers.filter(provider => provider.id !== "mock");
-  const connectedProviders = subscriptionProviders.filter(provider => provider.connected);
-  const runtimeLabel = providersLoading
-    ? "Checking subscription runtimes…"
-    : connectedProviders.length > 0
-      ? `${connectedProviders.map(runtimeName).join(" · ")} connected`
-      : providers.length === 0
-        ? "Runtime status unavailable"
-        : "Subscription runtimes not connected · mocks active";
-  const runtimeTitle = providersLoading
-    ? "Checking local subscription runtimes…"
-    : providersError || subscriptionProviders
-      .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
-      .join("\n");
-  const quotaSummary = providerLimits.map(limitText).filter(Boolean).join(" · ");
-  const quotaTitle = providerLimits
-    .map(snapshot => `${snapshot.provider}: ${limitText(snapshot) || snapshot.message || "structured limits unavailable"}`)
-    .join("\n");
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1800);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
 
+  /* Global keyboard model. */
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const action = matchShortcut(event, {
+        typing: isEditableTarget(event.target),
+        layered,
+      });
+      if (!action) return;
+
+      switch (action) {
+        case "palette":
+          event.preventDefault();
+          setPaletteOpen(true);
+          break;
+        case "submit":
+          event.preventDefault();
+          if (canSubmit) composerRef.current?.requestSubmit();
+          break;
+        case "stop":
+          event.preventDefault();
+          if (loading && !cancelling) void cancelActiveRun();
+          break;
+        case "focus-composer":
+          event.preventDefault();
+          promptRef.current?.focus();
+          break;
+        case "new-conversation":
+          event.preventDefault();
+          newConversation();
+          break;
+        case "configure":
+          setSetupOpen(open => !open);
+          break;
+        case "details":
+          toggleInspector();
+          break;
+        case "expand-all":
+          expandAllSteps();
+          break;
+        case "collapse-all":
+          setOpenSteps({});
+          break;
+        case "toggle-rail":
+          setRailOpen(open => !open);
+          break;
+        case "toggle-theme":
+          setTheme(current => (current === "dark" ? "light" : "dark"));
+          break;
+        case "help":
+          event.preventDefault();
+          setShortcutsOpen(true);
+          break;
+        case "dismiss":
+          if (paletteOpen) setPaletteOpen(false);
+          else if (shortcutsOpen) setShortcutsOpen(false);
+          else if (inspectorOpen) setInspectorOpen(false);
+          else if (railOpen && window.innerWidth <= 900) setRailOpen(false);
+          break;
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  /* ------------------------------------------------------------ helpers */
   function beginViewOperation() {
     streamAbortRef.current?.abort();
     streamAbortRef.current = null;
@@ -398,10 +359,19 @@ function App() {
     return viewEpochRef.current === epoch;
   }
 
+  function expandAllSteps() {
+    setOpenSteps(Object.fromEntries(displayedSteps.map(step => [step.id, true])));
+  }
+
   function setPreset(presetId: string) {
     setSelectedPresetId(presetId);
     const preset = workflowPresetsRef.current.find(item => item.id === presetId);
-    if (preset) setWorkflowText(JSON.stringify(preset.graph, null, 2));
+    if (preset) setWorkflowText(serializeWorkflow(preset.graph));
+  }
+
+  function applyWorkflowGraph(graph: WorkflowGraph) {
+    setWorkflowText(serializeWorkflow(graph));
+    setSelectedPresetId("");
   }
 
   function adoptRun(run: StoredRun) {
@@ -413,8 +383,9 @@ function App() {
     setSynthesizerKey(run.request.synthesizer ? modelKey(run.request.synthesizer) : "");
     setMaxCalls(run.request.budget?.maxCalls ?? 12);
     setMaxRounds(run.request.budget?.maxRounds ?? run.request.maxRounds ?? 1);
+    setRunStartedAt(Date.parse(run.createdAt) || Date.now());
     if (run.request.mode === "custom" && run.request.workflow) {
-      setWorkflowText(JSON.stringify(run.request.workflow, null, 2));
+      setWorkflowText(serializeWorkflow(run.request.workflow));
       const preset = workflowPresetsRef.current.find(item => item.graph.id && item.graph.id === run.request.workflow?.id);
       setSelectedPresetId(preset?.id ?? "");
     }
@@ -422,11 +393,11 @@ function App() {
 
   async function refreshLimits(epoch?: number) {
     try {
-      const limits = await fetch(`${API}/provider-limits`).then(response => readJson<ProviderLimitSnapshot[]>(response));
+      const limits = await api.limits();
       if (epoch === undefined || isCurrent(epoch)) setProviderLimits(limits);
     } catch {
-      // Quota telemetry is optional; a provider/runtime can omit it without
-      // making the reasoning surface unavailable.
+      // Quota telemetry is optional; a runtime can omit it without making the
+      // reasoning surface unavailable.
     }
   }
 
@@ -436,10 +407,10 @@ function App() {
       setModelsError("");
     }
     try {
-      const data = await fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response));
+      const data = await api.models();
       if (!isCurrent(epoch)) return;
       setModels(data);
-      setSelected(current => current.length > 0 ? current : initialSelection(data));
+      setSelected(current => (current.length > 0 ? current : initialSelection(data)));
     } catch (cause) {
       if (!isCurrent(epoch)) return;
       setModelsError(cause instanceof Error ? cause.message : "Could not load models.");
@@ -454,9 +425,8 @@ function App() {
       setProvidersError("");
     }
     try {
-      const data = await fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response));
-      if (!isCurrent(epoch)) return;
-      setProviders(data);
+      const data = await api.providers();
+      if (isCurrent(epoch)) setProviders(data);
     } catch (cause) {
       if (!isCurrent(epoch)) return;
       setProviders([]);
@@ -467,9 +437,8 @@ function App() {
   }
 
   async function refreshRuntimeCatalog(epoch: number) {
-    // Native runtime discovery can be comparatively slow. Keep it independent
-    // from conversation/preset bootstrap so one status call cannot blank the
-    // whole setup screen.
+    // Native runtime discovery can be slow. Keep it independent from
+    // conversation/preset bootstrap so one status call cannot blank the setup.
     await Promise.all([loadModels(epoch), loadProviders(epoch)]);
     if (isCurrent(epoch)) await refreshLimits(epoch);
   }
@@ -478,10 +447,8 @@ function App() {
     void refreshRuntimeCatalog(epoch);
     try {
       const [conversationData, presetData] = await Promise.all([
-        fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),
-        fetch(`${API}/workflow-presets`)
-          .then(response => readJson<WorkflowPreset[]>(response))
-          .catch(() => [] as WorkflowPreset[]),
+        api.conversations(),
+        api.presets().catch(() => [] as WorkflowPreset[]),
       ]);
       if (!isCurrent(epoch)) return;
       setConversations(conversationData);
@@ -489,7 +456,7 @@ function App() {
       setWorkflowPresets(presetData);
       if (presetData[0]) {
         setSelectedPresetId(presetData[0].id);
-        setWorkflowText(JSON.stringify(presetData[0].graph, null, 2));
+        setWorkflowText(serializeWorkflow(presetData[0].graph));
       }
 
       const rememberedRun = localStorage.getItem("conclave.activeRunId");
@@ -507,7 +474,7 @@ function App() {
   }
 
   async function refreshConversations(epoch?: number) {
-    const data = await fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response));
+    const data = await api.conversations(query);
     if (epoch === undefined || isCurrent(epoch)) setConversations(data);
   }
 
@@ -525,16 +492,18 @@ function App() {
       setRateLimit(null);
       setInspection(null);
       setInspectorOpen(false);
+      setOpenSteps({});
     }
+    if (window.innerWidth <= 900) setRailOpen(false);
 
-    const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
+    const data = await api.conversation(id);
     if (!isCurrent(epoch)) return;
     setConversation(data);
     setSetupOpen(false);
     localStorage.setItem("conclave.conversationId", id);
 
     if (data.lastRunId) {
-      const run = await fetch(`${API}/runs/${data.lastRunId}`).then(response => readJson<StoredRun>(response));
+      const run = await api.run(data.lastRunId);
       if (!isCurrent(epoch)) return;
       adoptRun(run);
       setActiveRunId(run.id);
@@ -569,13 +538,13 @@ function App() {
   async function recoverRun(runId: string, existingEpoch?: number) {
     const epoch = existingEpoch ?? beginViewOperation();
     try {
-      const run = await fetch(`${API}/runs/${runId}`).then(response => readJson<StoredRun>(response));
+      const run = await api.run(runId);
       if (!isCurrent(epoch)) return;
       adoptRun(run);
       setActiveRunId(run.id);
       localStorage.setItem("conclave.activeRunId", run.id);
       localStorage.setItem("conclave.conversationId", run.conversationId);
-      const thread = await fetch(`${API}/conversations/${run.conversationId}`).then(response => readJson<Conversation>(response));
+      const thread = await api.conversation(run.conversationId);
       if (!isCurrent(epoch)) return;
       setConversation(thread);
       setSetupOpen(false);
@@ -607,6 +576,7 @@ function App() {
       setError(run.status === "cancelling" ? "Stopping the active provider call…" : "");
       setResumeRunId(null);
       setLoading(true);
+      setStuckToBottom(true);
       const attached = await consumeRun(run.id, epoch);
       if (attached && isCurrent(epoch)) await refreshConversation(run.conversationId, epoch);
     } finally {
@@ -615,7 +585,7 @@ function App() {
   }
 
   async function refreshConversation(id: string, epoch?: number) {
-    const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
+    const data = await api.conversation(id);
     if (epoch !== undefined && !isCurrent(epoch)) return;
     setConversation(data);
     await refreshConversations(epoch);
@@ -630,7 +600,9 @@ function App() {
     setResult(null);
     setLiveSteps([]);
     setCompletedStepIds([]);
+    setOpenSteps({});
     setRunUsage(freshUsage());
+    setRunStartedAt(null);
     setRateLimit(null);
     setInspection(null);
     setInspectorOpen(false);
@@ -641,10 +613,13 @@ function App() {
     setPrompt("");
     localStorage.removeItem("conclave.conversationId");
     localStorage.removeItem("conclave.activeRunId");
+    if (window.innerWidth <= 900) setRailOpen(false);
+    requestAnimationFrame(() => promptRef.current?.focus());
   }
 
   function selectMode(nextMode: OrchestrationMode) {
     setMode(nextMode);
+    setSetupOpen(true);
     if (nextMode === "single") {
       setSynthesizerKey("");
       setSelected(current => {
@@ -655,7 +630,7 @@ function App() {
     }
 
     const minimum = nextMode === "custom"
-      ? requiredWorkflowParticipants(parseWorkflow(workflowText).graph)
+      ? requiredParticipants(parseWorkflow(workflowText).graph)
       : minimumParticipants(nextMode);
     if (minimum > 1) {
       setSelected(current => {
@@ -685,6 +660,7 @@ function App() {
     });
   }
 
+  /* ------------------------------------------------------- run streaming */
   function applyStreamEvent(streamEvent: OrchestrationStreamEvent) {
     if (streamEvent.type === "run_usage") {
       setRunUsage(streamEvent.usage);
@@ -705,7 +681,7 @@ function App() {
 
     if (streamEvent.type === "step_started") {
       setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
-      setLiveSteps(current => current.some(step => step.id === streamEvent.stepId)
+      setLiveSteps(current => (current.some(step => step.id === streamEvent.stepId)
         ? current
         : [...current, {
             id: streamEvent.stepId,
@@ -713,15 +689,14 @@ function App() {
             model: streamEvent.model,
             content: "",
             dependsOn: streamEvent.dependsOn,
-          }]);
+          }]));
+      setAnnouncement(`${streamEvent.model.label} started ${streamEvent.kind}`);
       return;
     }
 
     if (streamEvent.type === "step_retrying") {
       setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
-      setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
-        ? { ...step, content: "" }
-        : step));
+      setLiveSteps(current => current.map(step => (step.id === streamEvent.stepId ? { ...step, content: "" } : step)));
       return;
     }
 
@@ -732,17 +707,17 @@ function App() {
     }
 
     if (streamEvent.type === "text_delta") {
-      setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
+      setLiveSteps(current => current.map(step => (step.id === streamEvent.stepId
         ? { ...step, content: step.content + streamEvent.delta }
-        : step));
+        : step)));
       return;
     }
 
     if (streamEvent.type === "step_completed") {
-      setLiveSteps(current => current.some(step => step.id === streamEvent.step.id)
-        ? current.map(step => step.id === streamEvent.step.id ? streamEvent.step : step)
-        : [...current, streamEvent.step]);
-      setCompletedStepIds(current => current.includes(streamEvent.step.id) ? current : [...current, streamEvent.step.id]);
+      setLiveSteps(current => (current.some(step => step.id === streamEvent.step.id)
+        ? current.map(step => (step.id === streamEvent.step.id ? streamEvent.step : step))
+        : [...current, streamEvent.step]));
+      setCompletedStepIds(current => (current.includes(streamEvent.step.id) ? current : [...current, streamEvent.step.id]));
       return;
     }
 
@@ -752,6 +727,7 @@ function App() {
       setCompletedStepIds(streamEvent.result.steps.map(step => step.id));
       setResumeRunId(null);
       setCancelling(false);
+      setAnnouncement("The run finished. The final answer is ready.");
       return;
     }
 
@@ -765,7 +741,7 @@ function App() {
     setLiveSteps([]);
     setCompletedStepIds([]);
 
-    const response = await fetch(`${API}/runs/${runId}/events?after=0&follow=0`);
+    const response = await api.eventStream(runId, 0, false);
     if (!response.ok) await readJson(response);
     const body = await response.text();
     if (!isCurrent(epoch)) return false;
@@ -788,9 +764,7 @@ function App() {
     try {
       while (isCurrent(epoch) && !controller.signal.aborted) {
         try {
-          const response = await fetch(`${API}/runs/${runId}/events?after=${cursor}&follow=1`, {
-            signal: controller.signal,
-          });
+          const response = await api.eventStream(runId, cursor, true, controller.signal);
           if (!response.ok) await readJson(response);
           if (!response.body) throw new Error("This browser did not expose the response stream.");
 
@@ -814,7 +788,7 @@ function App() {
             if (done) break;
           }
           if (buffer.trim()) consumeLine(buffer);
-        } catch (cause) {
+        } catch {
           if (controller.signal.aborted || !isCurrent(epoch)) return false;
         }
 
@@ -822,9 +796,8 @@ function App() {
 
         let run!: StoredRun;
         try {
-          run = await fetch(`${API}/runs/${runId}`, { signal: controller.signal })
-            .then(next => readJson<StoredRun>(next));
-        } catch (cause) {
+          run = await api.run(runId, controller.signal);
+        } catch {
           if (controller.signal.aborted || !isCurrent(epoch)) return false;
           await sleep(600);
           continue;
@@ -862,16 +835,14 @@ function App() {
   }
 
   function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    if (event.key !== "Enter" || event.shiftKey || event.metaKey || event.ctrlKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    if (!loading && prompt.trim() && !participantShortfall && !budgetShortfall && !workflowInvalid) {
-      composerRef.current?.requestSubmit();
-    }
+    if (canSubmit) composerRef.current?.requestSubmit();
   }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!prompt.trim() || participantShortfall || budgetShortfall || workflowInvalid || loading) return;
+    if (!canSubmit) return;
     const epoch = beginViewOperation();
     setLoading(true);
     setCancelling(false);
@@ -880,27 +851,27 @@ function App() {
     setResult(null);
     setLiveSteps([]);
     setCompletedStepIds([]);
+    setOpenSteps({});
     setRunUsage(freshUsage());
+    setRunStartedAt(Date.now());
+    setElapsed(0);
     setRateLimit(null);
     setInspection(null);
-    setInspectorOpen(false);
+    setStuckToBottom(true);
+    setAnnouncement(`Run started in ${modeLabel} with ${participants.length} models.`);
 
     try {
-      const started = await fetch(`${API}/runs`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          conversationId: conversation?.id,
-          request: {
-            mode,
-            prompt,
-            participants,
-            synthesizer: effectiveSynthesizer,
-            workflow: mode === "custom" ? activeWorkflow : undefined,
-            budget: { maxCalls, maxRounds },
-          },
-        }),
-      }).then(response => readJson<StartRunResponse>(response));
+      const started = await api.startRun({
+        conversationId: conversation?.id,
+        request: {
+          mode,
+          prompt,
+          participants,
+          synthesizer: effectiveSynthesizer,
+          workflow: mode === "custom" ? activeWorkflow : undefined,
+          budget: { maxCalls, maxRounds },
+        },
+      });
       if (!isCurrent(epoch)) return;
 
       setSetupOpen(false);
@@ -913,9 +884,7 @@ function App() {
       const attached = await consumeRun(started.runId, epoch);
       if (attached && isCurrent(epoch)) await refreshConversation(started.conversationId, epoch);
     } catch (cause) {
-      if (isCurrent(epoch)) {
-        setError(cause instanceof Error ? cause.message : "Orchestration failed");
-      }
+      if (isCurrent(epoch)) setError(cause instanceof Error ? cause.message : "Orchestration failed");
     } finally {
       if (isCurrent(epoch)) {
         setLoading(false);
@@ -931,8 +900,7 @@ function App() {
     setCancelling(true);
     setError("Stopping the active provider call…");
     try {
-      const run = await fetch(`${API}/runs/${runId}/cancel`, { method: "POST" })
-        .then(response => readJson<StoredRun>(response));
+      const run = await api.cancelRun(runId);
       if (!isCurrent(epoch)) return;
       setRunUsage(run.usage ?? freshUsage());
       if (run.status === "completed") {
@@ -962,12 +930,12 @@ function App() {
     setLiveSteps([]);
     setCompletedStepIds([]);
     setRunUsage(freshUsage());
+    setRunStartedAt(Date.now());
     setRateLimit(null);
     setInspection(null);
-    setInspectorOpen(false);
+    setStuckToBottom(true);
     try {
-      const resumed = await fetch(`${API}/runs/${runId}/resume`, { method: "POST" })
-        .then(response => readJson<StartRunResponse>(response));
+      const resumed = await api.resumeRun(runId);
       if (!isCurrent(epoch)) return;
       setActiveRunId(resumed.runId);
       setResumeRunId(null);
@@ -976,9 +944,7 @@ function App() {
       const attached = await consumeRun(resumed.runId, epoch);
       if (attached && isCurrent(epoch)) await refreshConversation(resumed.conversationId, epoch);
     } catch (cause) {
-      if (isCurrent(epoch)) {
-        setError(cause instanceof Error ? cause.message : "Could not resume run");
-      }
+      if (isCurrent(epoch)) setError(cause instanceof Error ? cause.message : "Could not resume run");
     } finally {
       if (isCurrent(epoch)) setLoading(false);
     }
@@ -987,9 +953,8 @@ function App() {
   async function refreshInspector(runId: string, epoch: number, showLoading: boolean) {
     if (showLoading && isCurrent(epoch)) setInspectorLoading(true);
     try {
-      const data = await fetch(`${API}/runs/${runId}/inspection`).then(response => readJson<RunInspection>(response));
-      if (!isCurrent(epoch)) return;
-      setInspection(data);
+      const data = await api.inspection(runId);
+      if (isCurrent(epoch)) setInspection(data);
     } catch (cause) {
       if (showLoading && isCurrent(epoch)) {
         setError(cause instanceof Error ? cause.message : "Could not load run inspection");
@@ -1009,274 +974,452 @@ function App() {
     setInspectorOpen(true);
   }
 
-  const displayedSteps = result?.steps ?? liveSteps;
-  const tokenText = runUsage.tokenReports > 0
-    ? `${runUsage.inputTokens.toLocaleString()} in · ${runUsage.outputTokens.toLocaleString()} out`
-    : "token telemetry unavailable";
-  const selectedPreset = workflowPresets.find(item => item.id === selectedPresetId);
+  /* ------------------------------------------- conversation management */
+  async function renameConversation(id: string, title: string) {
+    try {
+      const updated = await api.renameConversation(id, title);
+      setConversations(current => current.map(item => (item.id === id ? { ...item, title: updated.title } : item)));
+      setConversation(current => (current?.id === id ? { ...current, title: updated.title } : current));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not rename conversation");
+    }
+  }
+
+  async function deleteConversation(id: string) {
+    try {
+      await api.deleteConversation(id);
+      setConversations(current => current.filter(item => item.id !== id));
+      if (conversation?.id === id) newConversation();
+      setAnnouncement("Conversation deleted.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not delete conversation");
+    }
+  }
+
+  async function exportConversation(id: string, format: ConversationExportFormat) {
+    try {
+      const { blob, filename } = await api.exportConversation(id, format);
+      saveBlob(blob, filename);
+      setAnnouncement(`Exported as ${filename}.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not export conversation");
+    }
+  }
+
+  async function copyFinalAnswer() {
+    if (!result) return;
+    try {
+      await navigator.clipboard.writeText(result.final);
+      setCopied(true);
+    } catch {
+      setError("This browser blocked clipboard access.");
+    }
+  }
+
+  /* --------------------------------------------------------- commands */
+  const commands = useMemo<Command[]>(() => {
+    const list: Command[] = [
+      { id: "new", label: "New conversation", group: "Actions", icon: "plus", keys: ["N"], run: newConversation },
+      {
+        id: "configure",
+        label: setupOpen ? "Hide run configuration" : "Configure this run",
+        group: "Actions",
+        icon: "sliders",
+        keys: ["C"],
+        run: () => setSetupOpen(open => !open),
+      },
+      { id: "focus", label: "Jump to the prompt", group: "Actions", icon: "send", keys: ["/"], run: () => promptRef.current?.focus() },
+      { id: "theme", label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`, group: "View", icon: theme === "dark" ? "sun" : "moon", keys: ["T"], run: () => setTheme(current => (current === "dark" ? "light" : "dark")) },
+      { id: "rail", label: railOpen ? "Hide conversation rail" : "Show conversation rail", group: "View", icon: "panel", keys: ["S"], run: () => setRailOpen(open => !open) },
+      { id: "shortcuts", label: "Keyboard shortcuts", group: "View", icon: "keyboard", keys: ["?"], run: () => setShortcutsOpen(true) },
+    ];
+
+    if (displayedSteps.length > 0) {
+      list.push(
+        { id: "expand", label: "Expand every council step", group: "View", icon: "layers", keys: ["E"], run: expandAllSteps },
+        { id: "collapse", label: "Collapse every council step", group: "View", icon: "layers", keys: ["Shift", "E"], run: () => setOpenSteps({}) },
+      );
+    }
+    if (activeRunId) {
+      list.push({ id: "details", label: "Run details", group: "Actions", icon: "layers", keys: ["D"], run: toggleInspector });
+    }
+    if (loading) {
+      list.push({ id: "stop", label: "Stop the active run", group: "Actions", icon: "stop", keys: ["Mod", "."], run: () => void cancelActiveRun() });
+    }
+    if (resumeRunId && !loading) {
+      list.push({ id: "resume", label: "Resume the interrupted run", group: "Actions", icon: "restart", run: () => void resumeInterruptedRun() });
+    }
+    if (result) {
+      list.push({ id: "copy", label: "Copy the final answer", group: "Actions", icon: "copy", run: () => void copyFinalAnswer() });
+    }
+    if (conversation) {
+      list.push(
+        { id: "export-md", label: "Export this conversation as Markdown", hint: conversation.title, group: "Actions", icon: "download", run: () => void exportConversation(conversation.id, "markdown") },
+        { id: "export-json", label: "Export this conversation as JSON", hint: conversation.title, group: "Actions", icon: "download", run: () => void exportConversation(conversation.id, "json") },
+      );
+    }
+    return list;
+  }, [setupOpen, theme, railOpen, displayedSteps.length, activeRunId, loading, resumeRunId, result, conversation]);
+
+  const searchConversations = useCallback(
+    (text: string, signal: AbortSignal) => api.conversations(text, signal),
+    [],
+  );
+
+  const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+    setStuckToBottom(distance < 80);
+  }, []);
+
+  /* ------------------------------------------------------------ render */
+  const composerHint = workflowInvalid
+    ? workflowState.error
+    : participantShortfall
+      ? `${modeLabel} needs ${neededParticipants} participants`
+      : budgetShortfall
+        ? `Raise the call budget to at least ${expectedCalls}`
+        : loading
+          ? "The run continues even if this tab disconnects"
+          : `${modeLabel} · ${participants.length} model${participants.length === 1 ? "" : "s"} · ${expectedCalls} planned call${expectedCalls === 1 ? "" : "s"}`;
+  const blocked = workflowInvalid || participantShortfall || budgetShortfall;
 
   return (
-    <main className="shell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand-mark">C</div>
-          <h1>Conclave</h1>
-          <p className="muted">Many models. One reasoning space.</p>
-        </div>
-        <button className="new-chat" onClick={newConversation}>+ New conversation</button>
-        {conversations.length > 0 && (
-          <div className="conversation-list">
-            <span className="eyebrow">RECENT</span>
-            {conversations.slice(0, 8).map(item => (
+    <div className="shell" data-rail={railOpen ? "open" : "closed"}>
+      <a className="skip-link" href="#prompt">Skip to the prompt</a>
+
+      {railOpen && <div className="scrim" onClick={() => setRailOpen(false)} aria-hidden="true" />}
+      <Rail
+        conversations={conversations}
+        activeId={conversation?.id}
+        activeRunning={loading}
+        query={query}
+        searching={searching}
+        onQueryChange={setQuery}
+        onOpen={id => void loadConversation(id)}
+        onNew={newConversation}
+        onRename={renameConversation}
+        onDelete={deleteConversation}
+        onExport={(id, format) => void exportConversation(id, format)}
+        searchRef={searchRef}
+        providers={providers}
+        providersLoading={providersLoading}
+        providersError={providersError}
+        limits={providerLimits}
+        busy={loading}
+        theme={theme}
+        onToggleTheme={() => setTheme(current => (current === "dark" ? "light" : "dark"))}
+        onShowShortcuts={() => setShortcutsOpen(true)}
+        onCollapse={() => setRailOpen(false)}
+        onOpenPalette={() => setPaletteOpen(true)}
+      />
+
+      <div className="workspace">
+        <header className="topbar">
+          {!railOpen && (
+            <button type="button" className="btn btn-ghost btn-icon" onClick={() => setRailOpen(true)} aria-label="Show conversation rail">
+              <Icon name="panel" />
+            </button>
+          )}
+          <div className="topbar-title">
+            <strong>{conversation?.title ?? "New conversation"}</strong>
+            <span>{modeLabel}{conversation ? ` · ${conversation.messages.length} messages` : " · not started"}</span>
+          </div>
+          <div className="topbar-actions">
+            <button type="button" className="btn btn-ghost btn-icon" onClick={() => setPaletteOpen(true)} aria-label="Open command palette" title="Command palette">
+              <Icon name="search" />
+            </button>
+            {conversation && (
               <button
-                key={item.id}
-                className={conversation?.id === item.id ? "conversation-link active" : "conversation-link"}
-                onClick={() => void loadConversation(item.id)}
-                title={item.title}
+                type="button"
+                className="btn btn-ghost btn-icon"
+                onClick={() => void exportConversation(conversation.id, "markdown")}
+                aria-label="Export this conversation as Markdown"
+                title="Export as Markdown"
               >
-                <span>{item.title}</span>
-                <small>{item.messageCount} messages</small>
+                <Icon name="download" />
               </button>
-            ))}
+            )}
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon"
+              onClick={toggleInspector}
+              aria-label="Run details"
+              aria-expanded={inspectorOpen}
+              disabled={!activeRunId}
+              title="Run details"
+            >
+              <Icon name="layers" />
+            </button>
+          </div>
+        </header>
+
+        {(loading || cancelling) && (
+          <div className="runstrip" aria-label="Active run">
+            <div className="runstrip-lead">
+              <span className="beacon" data-state="busy" />
+              <strong>{cancelling ? "Stopping…" : modeLabel}</strong>
+            </div>
+            <div className="runstrip-models">
+              {participants.map(model => (
+                <ProviderMark
+                  key={modelKey(model)}
+                  provider={model.provider}
+                  busy={liveSteps.some(step => modelKey(step.model) === modelKey(model) && !completedStepIds.includes(step.id))}
+                  size="sm"
+                />
+              ))}
+            </div>
+            <div className="runstrip-stats num">
+              <span>{runUsage.callsStarted}/{maxCalls} calls</span>
+              <span>{runUsage.callsCompleted} done</span>
+              {runUsage.tokenReports > 0 && <span>{runUsage.inputTokens.toLocaleString()}↓ {runUsage.outputTokens.toLocaleString()}↑</span>}
+              <span>{formatDuration(elapsed)}</span>
+              <button type="button" className="btn btn-danger" disabled={cancelling} onClick={() => void cancelActiveRun()}>
+                <Icon name="stop" size={11} /> {cancelling ? "Stopping" : "Stop"}
+              </button>
+            </div>
+            <span className="runstrip-bar">
+              <i style={{ width: `${Math.min(100, (runUsage.callsCompleted / Math.max(1, expectedCalls)) * 100)}%` }} />
+            </span>
           </div>
         )}
-        {quotaSummary && <div className="quota" title={quotaTitle}>{quotaSummary}</div>}
-        <div className="sidebar-footer">
-          <button
-            className="theme-toggle"
-            type="button"
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-            title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-            onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
-          >
-            {theme === "dark" ? "☀" : "☾"}
-          </button>
-          <div className="status" title={runtimeTitle}><span className="dot" /> {runtimeLabel}</div>
-        </div>
-      </aside>
 
-      <section className="workspace">
+        <div className="stream" ref={streamRef} onScroll={onScroll}>
+          <div className="column">
+            <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
 
-        <div className="content">
-          {setupOpen && (
-            <RunSetup
-              mode={mode}
-              fresh={!conversation}
-              modes={modes}
-              onModeChange={selectMode}
-              models={models}
-              modelsLoading={modelsLoading}
-              modelsError={modelsError}
-              onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current)}
-              selectedKeys={selected}
-              participants={participants}
-              onToggleModel={toggleModel}
-              synthesizerKey={synthesizerKey}
-              onSynthesizerChange={setSynthesizerKey}
-              maxCalls={maxCalls}
-              onMaxCallsChange={setMaxCalls}
-              maxRounds={maxRounds}
-              onMaxRoundsChange={setMaxRounds}
-              expectedCalls={expectedCalls}
-              loading={loading}
-            />
-          )}
-          {setupOpen && mode === "custom" && (
-            <section className="workflow-panel">
-              <div className="workflow-panel-head">
-                <div>
-                  <span className="eyebrow">WORKFLOW GRAPH</span>
-                  <h3>{activeWorkflow?.name ?? "Custom workflow"}</h3>
-                  <p>{activeWorkflow?.description ?? selectedPreset?.description ?? "Build a bounded dependency graph for this run."}</p>
-                </div>
-                <label className="workflow-preset-picker">
-                  <span>Preset</span>
-                  <select value={selectedPresetId} disabled={loading} onChange={event => setPreset(event.target.value)}>
-                    <option value="">Edited / custom</option>
-                    {workflowPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
-                  </select>
-                </label>
+            {setupOpen && (
+              <RunSetup
+                mode={mode}
+                modes={modes}
+                fresh={!conversation}
+                onModeChange={selectMode}
+                models={models}
+                modelsLoading={modelsLoading}
+                modelsError={modelsError}
+                onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current)}
+                selectedKeys={selected}
+                participants={participants}
+                onToggleModel={toggleModel}
+                synthesizerKey={synthesizerKey}
+                onSynthesizerChange={setSynthesizerKey}
+                effectiveSynthesizer={effectiveSynthesizer}
+                maxCalls={maxCalls}
+                onMaxCallsChange={setMaxCalls}
+                maxRounds={maxRounds}
+                onMaxRoundsChange={setMaxRounds}
+                expectedCalls={expectedCalls}
+                requiredParticipants={neededParticipants}
+                loading={loading}
+                workflowSlot={mode === "custom" ? (
+                  <WorkflowEditor
+                    graph={workflowState.graph}
+                    text={workflowText}
+                    error={workflowState.error}
+                    presets={workflowPresets}
+                    selectedPresetId={selectedPresetId}
+                    participants={participants}
+                    synthesizer={effectiveSynthesizer}
+                    disabled={loading}
+                    onPresetChange={setPreset}
+                    onGraphChange={applyWorkflowGraph}
+                    onTextChange={text => {
+                      setWorkflowText(text);
+                      setSelectedPresetId("");
+                    }}
+                  />
+                ) : undefined}
+              />
+            )}
+
+            {!setupOpen && !conversation && displayedSteps.length === 0 && !loading && (
+              <section className="opening">
+                <span className="eyebrow">Convene the council</span>
+                <h2>Ask once. Let different minds work the problem.</h2>
+                <p>
+                  Compare answers, route to a specialist, red-team a draft, build consensus, or run a plan through
+                  executors and review. Every step is persisted locally and stays inspectable.
+                </p>
+              </section>
+            )}
+
+            {priorMessages.length > 0 && (
+              <section className="turns" aria-label="Conversation history">
+                {priorMessages.map(message => (
+                  <article className={`turn ${message.role === "user" ? "turn-you" : "turn-them"}`} key={message.id}>
+                    {message.role === "assistant" && <span className="eyebrow turn-label">Conclave</span>}
+                    <div className="bubble">
+                      <Markdown content={message.content} />
+                    </div>
+                  </article>
+                ))}
+              </section>
+            )}
+
+            {loading && displayedSteps.length === 0 && (
+              <div className="working">
+                <span className="pips"><i /><i /><i /></span>
+                {cancelling ? "Stopping provider work…" : "Waiting for the first provider response…"}
               </div>
-              <div className="workflow-summary">
-                <span>{activeWorkflow?.nodes.length ?? 0} nodes</span>
-                <span>{requiredParticipants} participant slot{requiredParticipants === 1 ? "" : "s"}</span>
-                <span>output · {activeWorkflow?.outputNodeId ?? "—"}</span>
+            )}
+
+            {error && (
+              <div className="banner" data-tone="danger" role="alert">
+                <Icon name="alert" size={14} className="banner-icon" />
+                <p>{error}</p>
+                {resumeRunId && !loading && (
+                  <button type="button" className="btn" onClick={() => void resumeInterruptedRun()}>
+                    <Icon name="restart" size={13} /> Resume run
+                  </button>
+                )}
               </div>
-              <details className="workflow-editor">
-                <summary>Advanced · edit workflow JSON</summary>
-                <textarea
-                  value={workflowText}
-                  disabled={loading}
-                  spellCheck={false}
-                  onChange={event => {
-                    setWorkflowText(event.target.value);
-                    setSelectedPresetId("");
-                  }}
-                />
-                {workflowState.error && <div className="workflow-error">{workflowState.error}</div>}
-                <p>Templates support <code>{"{{prompt}}"}</code>, <code>{"{{dependencies}}"}</code>, and declared <code>{"{{dep.nodeId}}"}</code> references.</p>
-              </details>
-            </section>
-          )}
+            )}
 
-          {priorMessages.length > 0 && (
-            <section className="conversation-history" aria-label="Conversation history">
-              {priorMessages.map(message => (
-                <article key={message.id} className={`message ${message.role}`}>
-                  <span className="eyebrow">{message.role === "user" ? "YOU" : "CONCLAVE"}</span>
-                  <Markdown content={message.content} />
-                </article>
-              ))}
-            </section>
-          )}
-
-          {!result && !loading && displayedSteps.length === 0 && priorMessages.length === 0 && mode !== "custom" && !setupOpen && (
-            <section className="hero">
-              <span className="eyebrow">CONVENE THE COUNCIL</span>
-              <h3>Ask once. Let different minds work the problem.</h3>
-              <p>Compare, debate, route to a specialist, red-team a draft, build consensus, or run a plan through executors and review.</p>
-            </section>
-          )}
-
-          {loading && displayedSteps.length === 0 && (
-            <div className="thinking"><span /> <span /> <span /> {cancelling ? "Stopping provider work…" : "Run continues even if this tab disconnects…"}</div>
-          )}
-          {error && (
-            <div className="error">
-              <span>{error}</span>
-              {resumeRunId && !loading && <button type="button" onClick={() => void resumeInterruptedRun()}>Resume run</button>}
-            </div>
-          )}
-          {rateLimit && (
-            <div className="rate-limit">Rate limit · {rateLimit.provider}/{rateLimit.model}: {rateLimit.message}</div>
-          )}
-
-          {inspectorOpen && (
-            <section className="run-inspector" aria-label="Run inspector">
-              <div className="run-inspector-head">
-                <div>
-                  <span className="eyebrow">RUN INSPECTOR</span>
-                  <h3>{inspection?.run.request.mode ?? mode}</h3>
-                </div>
-                <div className="inspector-head-actions">
-                  {inspection && <span className={`run-state state-${inspection.run.status}`}>{inspection.run.status}</span>}
-                  <button type="button" className="drawer-close" aria-label="Close run details" onClick={() => setInspectorOpen(false)}>×</button>
-                </div>
+            {rateLimit && (
+              <div className="banner" data-tone="warn">
+                <Icon name="alert" size={14} className="banner-icon" />
+                <p>Rate limit · {rateLimit.provider}/{rateLimit.model}: {rateLimit.message}</p>
               </div>
-              {inspectorLoading && <p className="muted">Loading persisted attempts…</p>}
-              {inspection?.attempts.map(attempt => (
-                <details className="attempt-card" key={attempt.attempt} open={attempt.attempt === inspection.run.attempt}>
-                  <summary>
-                    <strong>Attempt {attempt.attempt}</strong>
-                    <span>{attempt.status}</span>
-                    <span>{elapsedLabel(attempt.durationMs)}</span>
-                    <span>{attempt.usage.callsStarted} calls</span>
-                    {attempt.usage.tokenReports > 0 && <span>{attempt.usage.inputTokens} in / {attempt.usage.outputTokens} out</span>}
-                  </summary>
-                  {attempt.error && <div className="attempt-error">{attempt.error}</div>}
-                  {attempt.rateLimit && <div className="attempt-rate-limit">{attempt.rateLimit.provider}/{attempt.rateLimit.model} · {attempt.rateLimit.message}</div>}
-                  <div className="inspection-steps">
-                    {attempt.steps.map(step => (
-                      <div className="inspection-step" key={step.id}>
-                        <div>
-                          <strong>{step.id}</strong>
-                          <span>{step.kind ?? "step"} · {step.model?.label ?? "model pending"}</span>
-                        </div>
-                        <div className="inspection-step-meta">
-                          <span>{step.status}</span>
-                          {step.attempts && step.attempts > 1 && <span>{step.attempts} attempts</span>}
-                          <span>{elapsedLabel(step.durationMs)}</span>
-                          {(step.inputTokens !== undefined || step.outputTokens !== undefined) && (
-                            <span>{step.inputTokens ?? 0} in / {step.outputTokens ?? 0} out</span>
-                          )}
-                        </div>
-                        {step.error && <small className="inspection-step-error">{step.error}</small>}
-                        {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              ))}
-            </section>
-          )}
+            )}
 
-          {(displayedSteps.length > 0 || result) && (
-            <section className="results">
-              {result && (
-                <div className="final-card">
-                  <span className="eyebrow">FINAL</span>
+            {result && (
+              <section className="answer" aria-label="Final answer">
+                <div className="answer-head">
+                  <span className="eyebrow">Final answer</span>
+                  <span className="spacer" />
+                  {copied && <span className="copy-state">Copied</span>}
+                  <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
+                    <Icon name="copy" size={13} /> Copy
+                  </button>
+                </div>
+                <div className="answer-body">
                   <Markdown content={result.final} />
                 </div>
-              )}
-              {result?.degraded && result.failures && result.failures.length > 0 && (
-      <div className="degraded-result">
-        <strong>Completed with partial provider failures</strong>
-        <span>{result.failures.map((failure: StepFailure) => `${failure.model.label}: ${failure.message}`).join(" · ")}</span>
-      </div>
-    )}
-    <div className="run-telemetry">
-                <span>{runUsage.callsStarted}/{maxCalls} calls started</span>
-                <span>{runUsage.callsCompleted} completed</span>
-                <span>{tokenText}</span>
+              </section>
+            )}
+
+            {result?.degraded && result.failures && result.failures.length > 0 && (
+              <div className="banner" data-tone="warn">
+                <Icon name="alert" size={14} className="banner-icon" />
+                <p>
+                  <strong>Completed with partial provider failures.</strong>{" "}
+                  {result.failures.map((failure: StepFailure) => `${failure.model.label}: ${failure.message}`).join(" · ")}
+                </p>
               </div>
-              {loading && <div className="stream-status"><span className="dot" /> {cancelling ? "Cancelling…" : "Live · persisted locally"}</div>}
-              {!loading && resumeRunId && displayedSteps.length > 0 && (
-                <div className="stream-status">Partial output · previous attempt</div>
-              )}
-              <CouncilWork
-                steps={displayedSteps}
-                loading={loading}
-                inspection={inspection}
-                completedStepIds={completedStepIds}
-                onInspect={toggleInspector}
-              />
-            </section>
-          )}
+            )}
+
+            {!loading && resumeRunId && displayedSteps.length > 0 && (
+              <p className="eyebrow">Partial output · previous attempt</p>
+            )}
+
+            <CouncilWork
+              steps={displayedSteps}
+              loading={loading}
+              inspection={inspection}
+              completedStepIds={completedStepIds}
+              openSteps={openSteps}
+              onToggleStep={stepId => setOpenSteps(current => ({ ...current, [stepId]: !current[stepId] }))}
+              onExpandAll={expandAllSteps}
+              onCollapseAll={() => setOpenSteps({})}
+              onInspect={toggleInspector}
+            />
+          </div>
         </div>
 
-        <form className="composer" ref={composerRef} onSubmit={submit}>
-          <RunConfigSummary
-            mode={mode}
-            modes={modes}
-            participants={participants}
-            models={models}
-            synthesizer={effectiveSynthesizer}
-            onConfigure={() => setSetupOpen(current => !current)}
-            onInspect={toggleInspector}
-            canInspect={Boolean(activeRunId)}
-          />
-          <textarea
-            ref={promptRef}
-            value={prompt}
-            onChange={event => setPrompt(event.target.value)}
-            onKeyDown={handlePromptKeyDown}
-            placeholder={conversation ? "Continue the conversation…" : mode === "custom" ? "Give this workflow a task…" : "Ask the council…"}
-            rows={1}
-          />
-          <div className="composer-footer">
-            <span className="composer-hint">{workflowInvalid
-              ? workflowState.error
-              : participantShortfall
-                ? `${requiredParticipants} participants required for ${modes.find(item => item.id === mode)?.label}`
-                : budgetShortfall
-                  ? `Increase call budget to at least ${expectedCalls}`
-                  : conversation
-                    ? "Persistent conversation · Enter sends · Shift+Enter newline"
-                    : `${participants.length} participant${participants.length === 1 ? "" : "s"} · Enter sends`}</span>
-            <div className="composer-actions">
-              {loading && (
-                <button className="stop-run" type="button" disabled={cancelling} onClick={() => void cancelActiveRun()}>
-                  {cancelling ? "Stopping…" : "Stop"}
-                </button>
-              )}
-              <button type="submit" disabled={loading || !prompt.trim() || participantShortfall || budgetShortfall || workflowInvalid}>
+        {loading && !stuckToBottom && (
+          <button
+            type="button"
+            className="btn jump-latest"
+            onClick={() => {
+              setStuckToBottom(true);
+              const surface = streamRef.current;
+              if (surface) surface.scrollTop = surface.scrollHeight;
+            }}
+          >
+            <Icon name="down" size={13} /> Jump to latest
+          </button>
+        )}
+
+        <div className="composer-wrap">
+          <form className="composer" ref={composerRef} onSubmit={submit}>
+            <div className="composer-config">
+              <button
+                type="button"
+                className="config-btn"
+                aria-expanded={setupOpen}
+                onClick={() => setSetupOpen(open => !open)}
+              >
+                <Icon name="sliders" size={13} />
+                <strong>{modeLabel}</strong>
+                <span>
+                  {participants.length} model{participants.length === 1 ? "" : "s"}
+                  {modeUsesSynthesizer(mode) && effectiveSynthesizer
+                    ? ` · ${effectiveSynthesizer.label} ${synthesizerRole(mode).toLowerCase()}`
+                    : ""}
+                </span>
+                <Icon name="caret" size={12} className="chevron" />
+              </button>
+              <span className="spacer" />
+              <span className="runstrip-models" aria-hidden="true">
+                {participants.map(model => (
+                  <ProviderMark key={modelKey(model)} provider={model.provider} size="sm" />
+                ))}
+              </span>
+            </div>
+
+            <label className="sr-only" htmlFor="prompt">Prompt for the council</label>
+            <textarea
+              id="prompt"
+              ref={promptRef}
+              value={prompt}
+              rows={1}
+              placeholder={conversation
+                ? "Continue the conversation…"
+                : mode === "custom"
+                  ? "Give this workflow a task…"
+                  : "Ask the council…"}
+              aria-describedby="composer-hint"
+              onChange={event => setPrompt(event.target.value)}
+              onKeyDown={handlePromptKeyDown}
+            />
+
+            <div className="composer-foot">
+              <span className="composer-hint" id="composer-hint" data-tone={blocked ? "blocked" : undefined}>
+                {composerHint}
+              </span>
+              <span className="spacer" />
+              {!loading && <Keys keys={["Enter"]} />}
+              <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
                 {loading ? "Running…" : "Convene"}
               </button>
             </div>
-          </div>
-        </form>
-      </section>
-    </main>
+          </form>
+        </div>
+      </div>
+
+      {paletteOpen && (
+        <CommandPalette
+          conversations={conversations}
+          modes={modes}
+          mode={mode}
+          commands={commands}
+          onSearch={searchConversations}
+          onOpenConversation={id => void loadConversation(id)}
+          onSelectMode={selectMode}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+      {inspectorOpen && (
+        <RunInspector
+          inspection={inspection}
+          loading={inspectorLoading}
+          mode={mode}
+          onClose={() => setInspectorOpen(false)}
+        />
+      )}
+    </div>
   );
 }
 
