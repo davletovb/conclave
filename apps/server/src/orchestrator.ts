@@ -237,7 +237,7 @@ export class Orchestrator {
       case "judge": return count + 1;
       case "red-team": return 1 + Math.max(count - 1, 1) + 1;
       case "router": return 2;
-      case "research-council": return Math.max(researchAngles.length, count) + 1;
+      case "research-council": return count + 1;
       case "planner-executor": return 1 + Math.max(count - 1, 1) + 1;
       case "custom": return this.validateWorkflow(request).nodes.length;
     }
@@ -654,10 +654,16 @@ export class Orchestrator {
       }
 
       if (request.mode === "research-council") {
-        const passCount = Math.max(researchAngles.length, request.participants.length);
-        const research = await Promise.all(Array.from({ length: passCount }, (_, index) => {
-          const model = request.participants[index % request.participants.length];
-          const angle = researchAngles[index % researchAngles.length];
+        const researchBriefs = request.participants.map((_, memberIndex) => {
+          const assignedAngles = researchAngles.filter((_, angleIndex) => (
+            angleIndex % request.participants.length === memberIndex
+          ));
+          return assignedAngles.length > 0
+            ? assignedAngles.join(" ")
+            : "Independent analyst: approach the question from a distinct perspective not already covered by the other council members.";
+        });
+        const research = await Promise.all(request.participants.map((model, index) => {
+          const angle = researchBriefs[index];
           return this.executeStep({
             id: makeStepId("research", index),
             kind: "research",

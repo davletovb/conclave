@@ -186,17 +186,20 @@ describe("Orchestrator", () => {
     expect(result.steps[1]?.model.model).toBe("mock-claude");
   });
 
-  it("runs every research-council angle before synthesis", async () => {
+  it("uses exactly one research-council member per selected model before synthesis", async () => {
     const countingProvider = new CountingMockProvider();
     const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
     const result = await countingOrchestrator.run({
       mode: "research-council",
       prompt: "Assess the evidence",
       participants,
+      budget: { maxCalls: 4, maxRounds: 1 },
     });
 
-    expect(countingProvider.calls).toBe(5);
-    expect(result.steps.filter(step => step.kind === "research")).toHaveLength(4);
+    const research = result.steps.filter(step => step.kind === "research");
+    expect(countingProvider.calls).toBe(4);
+    expect(research).toHaveLength(3);
+    expect(research.map(step => step.model.model)).toEqual(participants.map(model => model.model));
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
