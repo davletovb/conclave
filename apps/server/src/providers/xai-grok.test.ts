@@ -6,6 +6,7 @@ class FakeGrokClient implements GrokAcpClientLike {
   listeners = new Set<(notification: GrokAcpNotification) => void>();
   requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   authMethods = [{ id: "cached_token" }];
+  promptChunkDelayMs = 0;
   closed = false;
 
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -21,26 +22,34 @@ class FakeGrokClient implements GrokAcpClientLike {
       return { sessionId: "session-1" } as T;
     }
     if (method === "session/prompt") {
-      this.emit({
-        method: "session/update",
-        params: {
-          sessionId: "session-1",
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "Real Grok " },
+      const emitChunks = () => {
+        this.emit({
+          method: "session/update",
+          params: {
+            sessionId: "session-1",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Real Grok " },
+            },
           },
-        },
-      });
-      this.emit({
-        method: "session/update",
-        params: {
-          sessionId: "session-1",
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "subscription answer" },
+        });
+        this.emit({
+          method: "session/update",
+          params: {
+            sessionId: "session-1",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "subscription answer" },
+            },
           },
-        },
-      });
+        });
+      };
+
+      if (this.promptChunkDelayMs > 0) {
+        setTimeout(emitChunks, this.promptChunkDelayMs);
+      } else {
+        emitChunks();
+      }
       return { stopReason: "end_turn" } as T;
     }
     throw new Error(`Unexpected Grok ACP request: ${method}`);
@@ -113,6 +122,20 @@ describe("XaiGrokProvider", () => {
 
     const prompt = client.requests.find(request => request.method === "session/prompt");
     expect(prompt?.params).toMatchObject({ sessionId: "session-1" });
+    expect(client.closed).toBe(true);
+  });
+
+  it("waits for a first ACP text chunk that arrives after session/prompt resolves", async () => {
+    const client = new FakeGrokClient();
+    client.promptChunkDelayMs = 75;
+    const provider = new XaiGrokProvider(() => client);
+
+    const response = await provider.generate({
+      model: "grok-4.6",
+      messages: [{ role: "user", content: "Answer after the prompt RPC completes." }],
+    });
+
+    expect(response.content).toBe("Real Grok subscription answer");
     expect(client.closed).toBe(true);
   });
 });
