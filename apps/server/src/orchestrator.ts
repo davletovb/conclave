@@ -1392,6 +1392,13 @@ ${synthesis.content}`,
         let debateTranscript = answersTranscript;
         let previousIds = independentIds;
         let activeDebaters = independent.map((step) => step.model);
+        const skippedInitialDebaters = request.participants.length - activeDebaters.length;
+        if (skippedInitialDebaters > 0) {
+          context.plannedCallsRemaining = Math.max(
+            0,
+            context.plannedCallsRemaining - skippedInitialDebaters * maxRounds,
+          );
+        }
 
         for (
           let round = 0;
@@ -1399,6 +1406,7 @@ ${synthesis.content}`,
           round += 1
         ) {
           this.throwIfCancelled(context);
+          const roundDebaterCount = activeDebaters.length;
           const settled = await this.settleSteps(
             activeDebaters.map((model, index) => ({
               id: makeStepId(`critique-r${round + 1}`, index),
@@ -1418,10 +1426,19 @@ ${debateTranscript}`,
             false,
           );
           failures.push(...settled.failures);
+          const nextDebaters = settled.steps.map((step) => step.model);
+          const droppedDebaters = roundDebaterCount - nextDebaters.length;
+          const remainingRounds = maxRounds - round - 1;
+          if (droppedDebaters > 0 && remainingRounds > 0) {
+            context.plannedCallsRemaining = Math.max(
+              0,
+              context.plannedCallsRemaining - droppedDebaters * remainingRounds,
+            );
+          }
+          activeDebaters = nextDebaters;
           if (settled.steps.length === 0) break;
 
           debateSteps.push(...settled.steps);
-          activeDebaters = settled.steps.map((step) => step.model);
           previousIds = settled.steps.map((step) => step.id);
           debateTranscript +=
             "\n\n" +

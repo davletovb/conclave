@@ -75,6 +75,7 @@ function finishRunningSteps(
 
 function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventRecord[]): RunAttemptInspection {
   const steps = new Map<string, RunStepInspection>();
+  const retryUsageBase = new Map<string, { inputTokens: number; outputTokens: number }>();
   let usage = emptyRunUsage();
   let rateLimit = undefined as RunAttemptInspection["rateLimit"];
   let error = undefined as string | undefined;
@@ -100,6 +101,10 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
       const existing = steps.get(event.stepId) ?? { id: event.stepId, dependsOn: [], status: "running" as const };
       existing.attempts = event.attempt;
       existing.error = event.message;
+      retryUsageBase.set(event.stepId, {
+        inputTokens: existing.inputTokens ?? 0,
+        outputTokens: existing.outputTokens ?? 0,
+      });
       steps.set(event.stepId, existing);
     } else if (event.type === "step_failed") {
       sawStepFailure = true;
@@ -118,8 +123,9 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
         dependsOn: [],
         status: "running" as const,
       };
-      if (event.inputTokens !== undefined) step.inputTokens = event.inputTokens;
-      if (event.outputTokens !== undefined) step.outputTokens = event.outputTokens;
+      const base = retryUsageBase.get(event.stepId) ?? { inputTokens: 0, outputTokens: 0 };
+      if (event.inputTokens !== undefined) step.inputTokens = base.inputTokens + event.inputTokens;
+      if (event.outputTokens !== undefined) step.outputTokens = base.outputTokens + event.outputTokens;
       steps.set(event.stepId, step);
     } else if (event.type === "step_completed") {
       const existing = steps.get(event.step.id) ?? {

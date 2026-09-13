@@ -79,6 +79,24 @@ class AllAnswersFailProvider extends MockProvider {
   }
 }
 
+class DebateReclaimProvider extends MockProvider {
+  roundOneGrokAttempts = 0;
+
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    const latest = request.messages.at(-1)?.content ?? "";
+    if (request.model === "mock-claude" && latest === "Reclaim debate slots") {
+      throw new Error("provider authentication unavailable");
+    }
+    if (request.model === "mock-grok" && latest.startsWith("You are in debate round 1.")) {
+      this.roundOneGrokAttempts += 1;
+      if (this.roundOneGrokAttempts === 1) {
+        throw new Error("temporary connection unavailable");
+      }
+    }
+    return super.generate(request);
+  }
+}
+
 class AbortAwareProvider extends MockProvider {
   override async generate(request: ProviderRequest) {
     return new Promise<never>((_resolve, reject) => {
@@ -325,6 +343,21 @@ describe("Orchestrator", () => {
 
     expect(result.degraded).toBe(true);
     expect(partial.calls.filter(model => model === "mock-claude")).toHaveLength(1);
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(4);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("reclaims skipped debate slots so surviving debaters can still retry", async () => {
+    const provider = new DebateReclaimProvider();
+    const instance = new Orchestrator(new Map([[provider.id, provider]]));
+    const result = await instance.run({
+      mode: "debate",
+      prompt: "Reclaim debate slots",
+      participants,
+      budget: { maxCalls: 10, maxRounds: 2 },
+    });
+
+    expect(provider.roundOneGrokAttempts).toBe(2);
     expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(4);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });

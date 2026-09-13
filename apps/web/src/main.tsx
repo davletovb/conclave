@@ -725,6 +725,12 @@ function App() {
       return;
     }
 
+    if (streamEvent.type === "step_failed") {
+      setCompletedStepIds(current => current.filter(id => id !== streamEvent.failure.stepId));
+      setLiveSteps(current => current.filter(step => step.id !== streamEvent.failure.stepId));
+      return;
+    }
+
     if (streamEvent.type === "text_delta") {
       setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
         ? { ...step, content: step.content + streamEvent.delta }
