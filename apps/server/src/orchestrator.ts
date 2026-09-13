@@ -8,6 +8,7 @@ import type {
   OrchestrationStep,
   OrchestrationStepKind,
   ProviderAdapter,
+  ProviderResponse,
   ProviderStreamEvent,
   RunBudget,
   RunUsage,
@@ -22,6 +23,12 @@ type RunOptions = {
   emit?: OrchestrationEventSink;
   signal?: AbortSignal;
 };
+
+type OrchestratorOptions = {
+  stepStallTimeoutMs?: number;
+};
+
+const DEFAULT_STEP_STALL_TIMEOUT_MS = 180_000;
 
 type StepSpec = {
   id: string;
@@ -98,7 +105,15 @@ function cancelledError() {
   return error;
 }
 
+class StepStallError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Provider step stalled for ${timeoutMs}ms without progress`);
+    this.name = "StepStallError";
+  }
+}
+
 function isRetryableStepError(error: unknown) {
+  if (error instanceof StepStallError) return true;
   if (isRateLimitError(error)) return false;
   const message = errorMessage(error);
   if (
@@ -127,7 +142,19 @@ class DeferredStepRetryError extends StepExecutionError {
 }
 
 export class Orchestrator {
-  constructor(private readonly providers: Map<string, ProviderAdapter>) {}
+  private readonly stepStallTimeoutMs: number;
+
+  constructor(
+    private readonly providers: Map<string, ProviderAdapter>,
+    options: OrchestratorOptions = {},
+  ) {
+    const configured = options.stepStallTimeoutMs
+      ?? Number(process.env.CONCLAVE_STEP_STALL_TIMEOUT_MS ?? DEFAULT_STEP_STALL_TIMEOUT_MS);
+    if (!Number.isInteger(configured) || configured < 10) {
+      throw new Error("stepStallTimeoutMs must be an integer of at least 10ms");
+    }
+    this.stepStallTimeoutMs = configured;
+  }
 
   private adapterFor(model: ModelRef) {
     const adapter = this.providers.get(model.provider);
@@ -475,6 +502,84 @@ export class Orchestrator {
     }
   }
 
+  private async generateWithStallWatchdog(
+    spec: StepSpec,
+    context: RunContext,
+    onEvent: (event: ProviderStreamEvent) => void,
+  ): Promise<ProviderResponse> {
+    const adapter = this.adapterFor(spec.model);
+    const controller = new AbortController();
+    const parentSignal = context.signal;
+
+    return new Promise<ProviderResponse>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      const clearWatchdog = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        timer = undefined;
+      };
+      const cleanup = () => {
+        clearWatchdog();
+        parentSignal?.removeEventListener("abort", onParentAbort);
+      };
+      const resolveOnce = (response: ProviderResponse) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(response);
+      };
+      const rejectOnce = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const armWatchdog = () => {
+        clearWatchdog();
+        timer = setTimeout(() => {
+          if (settled) return;
+          const error = new StepStallError(this.stepStallTimeoutMs);
+          settled = true;
+          cleanup();
+          reject(error);
+          controller.abort(error);
+        }, this.stepStallTimeoutMs);
+      };
+      const onParentAbort = () => {
+        if (settled) return;
+        const error = cancelledError();
+        settled = true;
+        cleanup();
+        reject(error);
+        controller.abort(error);
+      };
+
+      if (parentSignal?.aborted) {
+        onParentAbort();
+        return;
+      }
+      parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+      armWatchdog();
+
+      void adapter.generate(
+        {
+          model: spec.model.model,
+          messages: [
+            ...(spec.history ?? []),
+            { role: "user", content: spec.prompt },
+          ],
+          signal: controller.signal,
+        },
+        (event) => {
+          if (settled) return;
+          armWatchdog();
+          onEvent(event);
+        },
+      ).then(resolveOnce, rejectOnce);
+    });
+  }
+
   private async executeStep(
     spec: StepSpec,
     context: RunContext,
@@ -534,15 +639,9 @@ export class Orchestrator {
 
       let emittedText = false;
       try {
-        const response = await this.adapterFor(spec.model).generate(
-          {
-            model: spec.model.model,
-            messages: [
-              ...(spec.history ?? []),
-              { role: "user", content: spec.prompt },
-            ],
-            signal: context.signal,
-          },
+        const response = await this.generateWithStallWatchdog(
+          spec,
+          context,
           (event) => {
             if (event.type === "text_delta" && event.delta) emittedText = true;
             this.mapProviderEvent(context, spec.id, event);

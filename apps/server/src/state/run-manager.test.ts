@@ -30,14 +30,42 @@ class CancellableMockProvider extends MockProvider {
   }
 }
 
+class ReplayStallProvider extends MockProvider {
+  calls = 0;
+  aborted = 0;
+
+  override async generate(request: ProviderRequest, emit?: (event: { type: "text_delta"; delta: string }) => void) {
+    this.calls += 1;
+    if (this.calls > 1) return super.generate(request);
+
+    emit?.({ type: "text_delta", delta: "stale-partial" });
+    return new Promise<never>((_resolve, reject) => {
+      const abort = () => {
+        this.aborted += 1;
+        const error = new Error("replay stall aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (request.signal?.aborted) return abort();
+      request.signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+}
+
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 
-async function makeManager(provider: MockProvider = new MockProvider()) {
+async function makeManager(
+  provider: MockProvider = new MockProvider(),
+  stepStallTimeoutMs?: number,
+) {
   const dir = await mkdtemp(join(tmpdir(), "conclave-manager-"));
   tempDirs.push(dir);
-  const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
+  const orchestrator = new Orchestrator(
+    new Map([[provider.id, provider]]),
+    { stepStallTimeoutMs },
+  );
   const store = new FileStateStore(dir);
   const manager = new RunManager(orchestrator, store);
   await manager.init();
@@ -188,6 +216,42 @@ describe("RunManager", () => {
       }
     }
     throw new Error("cancelled run never released its conversation reservation");
+  });
+
+  it("replays stalled-step recovery from a cursor without gaps or duplicates", async () => {
+    const provider = new ReplayStallProvider();
+    const { manager } = await makeManager(provider, 80);
+    const started = await manager.start({
+      request: {
+        mode: "single",
+        prompt: "Recover and replay",
+        participants: [participant],
+        budget: { maxCalls: 2, maxRounds: 1 },
+      },
+    });
+
+    let firstDeltaSeq = 0;
+    for (let attempt = 0; attempt < 100 && firstDeltaSeq === 0; attempt += 1) {
+      const records = await manager.events(started.runId);
+      firstDeltaSeq = records.find(record => record.event.type === "text_delta")?.seq ?? 0;
+      if (!firstDeltaSeq) await new Promise(resolve => setTimeout(resolve, 2));
+    }
+    expect(firstDeltaSeq).toBeGreaterThan(0);
+
+    const completed = await waitForTerminal(manager, started.runId);
+    expect(completed.status).toBe("completed");
+    expect(provider.calls).toBe(2);
+    expect(provider.aborted).toBe(1);
+
+    const replay = await manager.events(started.runId, firstDeltaSeq);
+    const replayAgain = await manager.events(started.runId, firstDeltaSeq);
+    expect(replay.map(record => record.seq)).toEqual(replayAgain.map(record => record.seq));
+    expect(replay[0]?.seq).toBe(firstDeltaSeq + 1);
+    expect(replay.some(record => record.event.type === "step_retrying")).toBe(true);
+    expect(replay.at(-1)?.event.type).toBe("run_completed");
+
+    const full = await manager.events(started.runId);
+    expect(full.map(record => record.seq)).toEqual(full.map((_, index) => index + 1));
   });
 
   it("rejects invalid server-side budget values before creating a run", async () => {

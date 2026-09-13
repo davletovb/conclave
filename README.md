@@ -65,6 +65,8 @@ Cancelled attempts retain their already-persisted partial output and can be resu
 
 Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code and Grok Build ACP do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
 
+Each provider step also has an inactivity watchdog. By default, a call that produces no provider progress event for **180 seconds** is treated as stalled, its local runtime call is aborted, and the step is eligible for the same single bounded retry used for transient transport failures when call-budget headroom remains. Any provider event resets the watchdog, so long-running calls can continue as long as they are still making observable progress. Set `CONCLAVE_STEP_STALL_TIMEOUT_MS` to a positive integer of at least 10 milliseconds to tune the inactivity window for local testing or unusually slow runtimes.
+
 ## Custom workflows and run inspection
 
 Custom Workflow mode makes orchestration a first-class graph instead of a frontend shortcut. A workflow contains stable node IDs, a step kind, a participant/synthesizer selector, an optional dependency list, a prompt template, and one explicit output node. The server validates the complete graph before the run is persisted, including participant indexes, dependency references, cycles, supported step kinds, output reachability, and the run's call budget.
@@ -204,7 +206,7 @@ GitHub Actions runs the same checks on pull requests.
 6. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
 7. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
 8. ✅ Custom workflow graph/presets and richer run inspection
-9. Web-first robustness: partial-provider failure handling, step-level retry, stalled-provider recovery, reconnect/reload stress coverage, and stronger lifecycle integration tests
+9. ✅ Web-first robustness: partial-provider failure handling, step-level retry, stalled-provider recovery, reconnect/reload stress coverage, and stronger lifecycle integration tests
 10. Web UI/UX: conversation management/search/export, collapsible model outputs, better long-run rendering, richer workflow authoring, keyboard shortcuts, and accessibility
 
 Desktop/local-native packaging and an IPC transport remain intentionally deferred. The orchestration/provider core should stay transport-independent so native packaging can be added later without driving current product design.
