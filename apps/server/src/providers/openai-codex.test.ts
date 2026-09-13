@@ -6,6 +6,7 @@ class FakeCodexClient implements CodexClientLike {
   listeners = new Set<(notification: CodexNotification) => void>();
   requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   account: Record<string, unknown> = { type: "chatgpt", email: "test@example.com", planType: "plus" };
+  emitItemCompleted = true;
 
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     this.requests.push({ method, params });
@@ -26,19 +27,26 @@ class FakeCodexClient implements CodexClientLike {
     }
     if (method === "turn/start") {
       queueMicrotask(() => {
-        this.emit({
-          method: "item/completed",
-          params: {
-            threadId: "thr-1",
-            turnId: "turn-1",
-            item: { type: "agentMessage", text: "Real subscription answer" },
-          },
-        });
+        if (this.emitItemCompleted) {
+          this.emit({
+            method: "item/completed",
+            params: {
+              threadId: "thr-1",
+              turnId: "turn-1",
+              item: { type: "agentMessage", text: "Real subscription answer" },
+            },
+          });
+        }
         this.emit({
           method: "turn/completed",
           params: {
             threadId: "thr-1",
-            turn: { id: "turn-1", status: "completed", error: null },
+            turn: {
+              id: "turn-1",
+              status: "completed",
+              error: null,
+              items: [{ type: "agentMessage", text: "Real subscription answer" }],
+            },
           },
         });
       });
@@ -84,7 +92,7 @@ describe("OpenAICodexProvider", () => {
     await expect(provider.listModels()).rejects.toThrow(/subscription-only/i);
   });
 
-  it("runs an ephemeral read-only Codex turn and returns the completed agent message", async () => {
+  it("runs an ephemeral read-only Codex turn using the current text-input schema", async () => {
     const client = new FakeCodexClient();
     const provider = new OpenAICodexProvider(client);
 
@@ -104,8 +112,22 @@ describe("OpenAICodexProvider", () => {
     const turnStart = client.requests.find(request => request.method === "turn/start");
     expect(turnStart?.params).toMatchObject({
       threadId: "thr-1",
+      input: [{ type: "text", text: "USER:\nExplain the tradeoff.", text_elements: [] }],
       approvalPolicy: "never",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
     });
+  });
+
+  it("can recover the final answer from turn/completed when item events are absent", async () => {
+    const client = new FakeCodexClient();
+    client.emitItemCompleted = false;
+    const provider = new OpenAICodexProvider(client);
+
+    const response = await provider.generate({
+      model: "gpt-default",
+      messages: [{ role: "user", content: "Explain the tradeoff." }],
+    });
+
+    expect(response.content).toBe("Real subscription answer");
   });
 });
