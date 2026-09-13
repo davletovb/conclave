@@ -4,6 +4,7 @@ import type { OrchestrationRequest, ProviderAdapter, ProviderStatus } from "@con
 import { AnthropicClaudeProvider } from "./providers/anthropic-claude.js";
 import { MockProvider } from "./providers/mock.js";
 import { OpenAICodexProvider } from "./providers/openai-codex.js";
+import { XaiGrokProvider } from "./providers/xai-grok.js";
 import { Orchestrator } from "./orchestrator.js";
 
 const app = Fastify({ logger: true });
@@ -12,24 +13,28 @@ await app.register(cors, { origin: true });
 const mock = new MockProvider();
 const openai = new OpenAICodexProvider();
 const anthropic = new AnthropicClaudeProvider();
+const xai = new XaiGrokProvider();
 const providers = new Map<string, ProviderAdapter>([
   [mock.id, mock],
   [openai.id, openai],
   [anthropic.id, anthropic],
+  [xai.id, xai],
 ]);
 const orchestrator = new Orchestrator(providers);
 
 app.get("/health", async () => ({ ok: true }));
 
 app.get("/providers", async (): Promise<ProviderStatus[]> => {
-  const [openaiStatus, anthropicStatus] = await Promise.all([
+  const [openaiStatus, anthropicStatus, xaiStatus] = await Promise.all([
     openai.status(),
     anthropic.status(),
+    xai.status(),
   ]);
 
   return [
     openaiStatus,
     anthropicStatus,
+    xaiStatus,
     {
       id: "mock",
       label: "Mock provider",
@@ -43,9 +48,10 @@ app.get("/providers", async (): Promise<ProviderStatus[]> => {
 
 app.get("/models", async () => {
   const mockModels = await mock.listModels();
-  const [openaiModels, anthropicModels] = await Promise.all([
+  const [openaiModels, anthropicModels, xaiModels] = await Promise.all([
     openai.listModels().catch(() => []),
     anthropic.listModels().catch(() => []),
+    xai.listModels().catch(() => []),
   ]);
 
   const mockGpt = mockModels.filter(model => model.model === "mock-gpt");
@@ -55,7 +61,7 @@ app.get("/models", async () => {
   return [
     ...(openaiModels.length > 0 ? openaiModels : mockGpt),
     ...(anthropicModels.length > 0 ? anthropicModels : mockClaude),
-    ...mockGrok,
+    ...(xaiModels.length > 0 ? xaiModels : mockGrok),
   ];
 });
 
