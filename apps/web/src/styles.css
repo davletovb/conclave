@@ -329,3 +329,15 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
   .composer { left: 14px; right: 14px; bottom: 14px; }
   .run-inspector { width: 100vw; }
 }
+
+
+/* model activity line heads */
+.member-line > summary { grid-template-columns: 16px 28px minmax(120px, 1fr) minmax(86px, auto) auto auto auto; }
+.member-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-card); }
+.member-line > summary .provider-mark { width: 26px; height: 26px; border-radius: 50%; position: relative; }
+.provider-mark-glyph { position: relative; z-index: 1; }
+.provider-mark.active::after { content: ""; position: absolute; inset: -4px; border: 1px solid var(--link); border-radius: 50%; opacity: .7; animation: model-activity-pulse 1.35s ease-out infinite; }
+@keyframes model-activity-pulse { 0% { transform: scale(.82); opacity: .75; } 75%, 100% { transform: scale(1.25); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .provider-mark.active::after { animation: none; opacity: .45; } }
+@media (max-width: 980px) { .member-line > summary { grid-template-columns: 16px 28px minmax(110px, 1fr) auto auto; } .member-role, .member-stat { display: none; } }
+@media (max-width: 760px) { .member-line > summary { grid-template-columns: 16px 28px minmax(0, 1fr) auto; } .member-role, .member-stat { display: none; } }

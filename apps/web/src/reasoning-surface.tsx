@@ -61,9 +61,9 @@ function providerText(provider: ModelRef["provider"]) {
   return "Mock";
 }
 
-export function ProviderMark({ provider }: { provider: ModelRef["provider"] }) {
+export function ProviderMark({ provider, active = false }: { provider: ModelRef["provider"]; active?: boolean }) {
   const mark = provider === "openai" ? "◎" : provider === "anthropic" ? "A" : provider === "xai" ? "x" : "M";
-  return <span className={`provider-mark provider-${provider}`} aria-label={providerText(provider)} title={providerText(provider)}>{mark}</span>;
+  return <span className={`provider-mark provider-${provider}${active ? " active" : ""}`} aria-label={providerText(provider)} title={providerText(provider)}><span className="provider-mark-glyph">{mark}</span></span>;
 }
 
 export function ModelIdentity({ model, compact = false }: { model: ModelRef; compact?: boolean }) {
@@ -235,7 +235,8 @@ export function CouncilWork({
             <details className="member-line" key={step.id}>
               <summary>
                 <span className="member-chevron">›</span>
-                <ModelIdentity model={step.model} compact />
+                <ProviderMark provider={step.model.provider} active={status === "working" || status === "streaming"} />
+                <span className="member-model-name">{step.model.label}</span>
                 <span className="member-role">{stepRole(step)}</span>
                 <span className={`member-status status-${status}`}>{status}</span>
                 {stepMeta?.durationMs !== undefined && <span className="member-stat">{Math.max(1, Math.round(stepMeta.durationMs / 1000))}s</span>}
