@@ -1,0 +1,45 @@
+name: Run recovery patch
+on:
+  push:
+    branches: [feat/partial-failure-recovery]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/partial-failure-recovery
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Extract and apply patch
+        shell: bash
+        run: |
+          if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
+          python <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/apply-recovery.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(source) if "python <<'PY'" in line) + 1
+          end = next(i for i in range(start, len(source)) if source[i].strip() == 'PY')
+          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in source[start:end])
+          exec(compile(body, 'apply-recovery.py', 'exec'))
+          PY
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Commit verified implementation
+        shell: bash
+        run: |
+          if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/core/src/index.ts apps/server/src/orchestrator.ts apps/server/src/orchestrator.test.ts apps/server/src/state/run-inspection.ts apps/web/src/main.tsx apps/web/src/reasoning-surface.tsx apps/web/src/styles.css
+          git commit -m "feat: recover from partial provider failures" || exit 0
+          git push origin HEAD:feat/partial-failure-recovery
