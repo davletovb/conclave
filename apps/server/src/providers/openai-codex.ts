@@ -1,4 +1,11 @@
-import type { ModelRef, ProviderAdapter, ProviderRequest, ProviderResponse, ProviderStatus } from "@conclave/core";
+import type {
+  ModelRef,
+  ProviderAdapter,
+  ProviderEventSink,
+  ProviderRequest,
+  ProviderResponse,
+  ProviderStatus,
+} from "@conclave/core";
 import { CodexAppServerClient, type CodexClientLike, type CodexNotification } from "../codex/app-server-client.js";
 
 type AccountReadResponse = {
@@ -116,7 +123,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
       .filter(model => Boolean(model.model));
   }
 
-  async generate(request: ProviderRequest): Promise<ProviderResponse> {
+  async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
     await this.requireChatGptAccount();
     const startedAt = Date.now();
     const prompt = this.buildPrompt(request);
@@ -129,7 +136,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
       developerInstructions: TEXT_ONLY_INSTRUCTIONS,
     });
 
-    const content = await this.runTurn(thread.thread.id, request.model, prompt);
+    const content = await this.runTurn(thread.thread.id, request.model, prompt, emit);
     return {
       provider: this.id,
       model: request.model,
@@ -164,7 +171,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
     return parts.join("\n\n");
   }
 
-  private async runTurn(threadId: string, model: string, prompt: string) {
+  private async runTurn(threadId: string, model: string, prompt: string, emit?: ProviderEventSink) {
     let expectedTurnId: string | null = null;
     const completedTurns = new Map<string, TurnCompletedParams>();
     const completedMessages = new Map<string, string[]>();
@@ -190,7 +197,10 @@ export class OpenAICodexProvider implements ProviderAdapter {
 
       if (notification.method === "item/agentMessage/delta") {
         const delta = typeof params.delta === "string" ? params.delta : "";
-        streamedText.set(turnId, `${streamedText.get(turnId) ?? ""}${delta}`);
+        if (delta) {
+          streamedText.set(turnId, `${streamedText.get(turnId) ?? ""}${delta}`);
+          emit?.({ type: "text_delta", delta });
+        }
         return;
       }
 
