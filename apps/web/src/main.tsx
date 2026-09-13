@@ -510,9 +510,6 @@ function App() {
           if (buffer.trim()) consumeLine(buffer);
         } catch (cause) {
           if (controller.signal.aborted || !isCurrent(epoch)) return false;
-          // A browser/network stream can disappear while the server-owned run
-          // keeps working. Fall through to persisted status inspection, then
-          // reconnect from the last durable sequence cursor.
         }
 
         if (controller.signal.aborted || !isCurrent(epoch)) return false;
@@ -608,11 +605,14 @@ function App() {
 
   async function cancelActiveRun() {
     if (!activeRunId || !loading || cancelling) return;
+    const epoch = viewEpochRef.current;
+    const runId = activeRunId;
     setCancelling(true);
     setError("Stopping the active provider call…");
     try {
-      const run = await fetch(`${API}/runs/${activeRunId}/cancel`, { method: "POST" })
+      const run = await fetch(`${API}/runs/${runId}/cancel`, { method: "POST" })
         .then(response => readJson<StoredRun>(response));
+      if (!isCurrent(epoch)) return;
       setRunUsage(run.usage ?? freshUsage());
       if (run.status === "completed") {
         setCancelling(false);
@@ -623,6 +623,7 @@ function App() {
         }
       }
     } catch (cause) {
+      if (!isCurrent(epoch)) return;
       setCancelling(false);
       setError(cause instanceof Error ? cause.message : "Could not cancel run");
     }
