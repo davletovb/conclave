@@ -266,6 +266,9 @@ export class FileStateStore {
       if (run.status !== "failed" && run.status !== "interrupted") {
         throw new Error(`Run ${runId} cannot be resumed while it is ${run.status}`);
       }
+
+      const previousAttempt = run.attempt;
+      await this.archiveRunEvents(run.id, previousAttempt);
       run.status = "queued";
       run.attempt += 1;
       run.updatedAt = now();
@@ -349,6 +352,17 @@ export class FileStateStore {
     await Promise.all(entries
       .filter(entry => entry.isFile() && entry.name.endsWith(".ndjson"))
       .map(entry => chmod(join(this.runsDir, entry.name), 0o600)));
+  }
+
+  private async archiveRunEvents(runId: string, attempt: number) {
+    const current = this.eventsPath(runId);
+    const archive = join(this.runsDir, `${runId}.attempt-${attempt}.ndjson`);
+    try {
+      await rename(current, archive);
+      await chmod(archive, 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 
   private async clearRunEvents(runId: string) {
