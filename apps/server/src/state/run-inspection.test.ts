@@ -36,8 +36,6 @@ describe("run inspection", () => {
       { seq: 1, attempt: 1, at: "2026-09-13T00:00:00.000Z", event: { type: "run_started", runId, mode: "single" } },
       { seq: 2, attempt: 1, at: "2026-09-13T00:00:01.000Z", event: { type: "step_started", runId, stepId: "answer-1", kind: "answer", model } },
       { seq: 3, attempt: 1, at: "2026-09-13T00:00:02.000Z", event: { type: "run_usage", runId, usage: { callsStarted: 1, callsCompleted: 0, inputTokens: 10, outputTokens: 3, tokenReports: 1 } } },
-      // The orchestrator's terminal error is run-level and may not identify the
-      // provider step that was active when it failed.
       { seq: 4, attempt: 1, at: "2026-09-13T00:00:03.000Z", event: { type: "error", runId, message: "temporary failure" } },
     ];
     for (const record of first) await store.appendRunEvent(record);
@@ -88,5 +86,43 @@ describe("run inspection", () => {
       durationMs: 3000,
       dependsOn: [],
     });
+  });
+
+  it("marks the originating workflow step failed and aborted siblings cancelled", async () => {
+    const store = await makeStore();
+    const created = await store.createRun({
+      mode: "custom",
+      prompt: "Inspect branch failure",
+      participants: [model],
+      workflow: {
+        name: "Failure inspection",
+        outputNodeId: "final",
+        nodes: [
+          { id: "bad", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: "bad" },
+          { id: "slow", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: "slow" },
+          { id: "final", kind: "synthesis", model: { type: "participant", index: 0 }, dependsOn: ["bad", "slow"], promptTemplate: "final" },
+        ],
+      },
+      budget: { maxCalls: 3, maxRounds: 1 },
+    });
+    const runId = created.run.id;
+
+    const records: RunEventRecord[] = [
+      { seq: 1, attempt: 1, at: "2026-09-13T01:00:00.000Z", event: { type: "run_started", runId, mode: "custom" } },
+      { seq: 2, attempt: 1, at: "2026-09-13T01:00:01.000Z", event: { type: "step_started", runId, stepId: "bad", kind: "answer", model } },
+      { seq: 3, attempt: 1, at: "2026-09-13T01:00:01.100Z", event: { type: "step_started", runId, stepId: "slow", kind: "answer", model } },
+      { seq: 4, attempt: 1, at: "2026-09-13T01:00:02.000Z", event: { type: "error", runId, stepId: "bad", message: "branch exploded" } },
+      { seq: 5, attempt: 1, at: "2026-09-13T01:00:02.100Z", event: { type: "error", runId, message: "branch exploded" } },
+    ];
+    for (const record of records) await store.appendRunEvent(record);
+    await store.updateRun(runId, { status: "failed", error: "branch exploded" });
+
+    const run = await store.getRun(runId);
+    const inspection = await inspectRun(store, run!);
+    const attempt = inspection.attempts[0]!;
+
+    expect(attempt.status).toBe("failed");
+    expect(attempt.steps.find(step => step.id === "bad")).toMatchObject({ status: "failed", durationMs: 1000 });
+    expect(attempt.steps.find(step => step.id === "slow")).toMatchObject({ status: "cancelled", durationMs: 1000 });
   });
 });
