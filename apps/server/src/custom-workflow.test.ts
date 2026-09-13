@@ -204,8 +204,8 @@ describe("custom workflow graphs", () => {
     })).rejects.toThrow("branch exploded");
 
     expect(provider.siblingAborted).toBe(true);
-    expect(events.some(event => event.type === "error" && event.stepId === "bad" && /branch exploded/.test(event.message))).toBe(true);
-    expect(events.some(event => event.type === "error" && event.stepId === "slow")).toBe(false);
+    expect(events.some(event => event.type === "step_failed" && event.failure.stepId === "bad" && /branch exploded/.test(event.failure.message))).toBe(true);
+    expect(events.some(event => event.type === "step_failed" && event.failure.stepId === "slow")).toBe(false);
     expect(events.at(-1)).toMatchObject({ type: "error", runId: "failing-workflow", message: "branch exploded" });
   });
 

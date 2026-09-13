@@ -75,6 +75,7 @@ function finishRunningSteps(
 
 function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventRecord[]): RunAttemptInspection {
   const steps = new Map<string, RunStepInspection>();
+  const retryUsageBase = new Map<string, { inputTokens: number; outputTokens: number }>();
   let usage = emptyRunUsage();
   let rateLimit = undefined as RunAttemptInspection["rateLimit"];
   let error = undefined as string | undefined;
@@ -94,15 +95,37 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
         dependsOn: [...(event.dependsOn ?? [])],
         status: "running",
         startedAt: record.at,
+        attempts: 1,
       });
+    } else if (event.type === "step_retrying") {
+      const existing = steps.get(event.stepId) ?? { id: event.stepId, dependsOn: [], status: "running" as const };
+      existing.attempts = event.attempt;
+      existing.error = event.message;
+      retryUsageBase.set(event.stepId, {
+        inputTokens: existing.inputTokens ?? 0,
+        outputTokens: existing.outputTokens ?? 0,
+      });
+      steps.set(event.stepId, existing);
+    } else if (event.type === "step_failed") {
+      sawStepFailure = true;
+      const existing = steps.get(event.failure.stepId) ?? { id: event.failure.stepId, dependsOn: [], status: "running" as const };
+      existing.kind = event.failure.kind;
+      existing.model = event.failure.model;
+      existing.status = "failed";
+      existing.attempts = event.failure.attempts;
+      existing.error = event.failure.message;
+      existing.completedAt = record.at;
+      existing.durationMs = durationMs(existing.startedAt, record.at);
+      steps.set(event.failure.stepId, existing);
     } else if (event.type === "usage") {
       const step = steps.get(event.stepId) ?? {
         id: event.stepId,
         dependsOn: [],
         status: "running" as const,
       };
-      if (event.inputTokens !== undefined) step.inputTokens = event.inputTokens;
-      if (event.outputTokens !== undefined) step.outputTokens = event.outputTokens;
+      const base = retryUsageBase.get(event.stepId) ?? { inputTokens: 0, outputTokens: 0 };
+      if (event.inputTokens !== undefined) step.inputTokens = base.inputTokens + event.inputTokens;
+      if (event.outputTokens !== undefined) step.outputTokens = base.outputTokens + event.outputTokens;
       steps.set(event.stepId, step);
     } else if (event.type === "step_completed") {
       const existing = steps.get(event.step.id) ?? {

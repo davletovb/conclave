@@ -24,12 +24,16 @@ const primaryModes: OrchestrationMode[] = [
 
 const advancedModes: OrchestrationMode[] = ["router", "custom"];
 
-function modeUsesSynthesizer(mode: OrchestrationMode) {
+export function modeUsesSynthesizer(mode: OrchestrationMode) {
   return ["panel", "debate", "consensus", "judge", "research-council", "planner-executor", "custom"].includes(mode);
 }
 
-function defaultFinalizer(mode: OrchestrationMode, participants: ModelRef[]) {
-  if (participants.length === 0) return undefined;
+export function defaultFinalizer(mode: OrchestrationMode, participants: ModelRef[], allModels: ModelRef[] = participants) {
+  const participantKeys = new Set(participants.map(modelKey));
+  const independent = allModels.find(model => model.source !== "mock" && !participantKeys.has(modelKey(model)))
+    ?? allModels.find(model => !participantKeys.has(modelKey(model)));
+  if (independent) return independent;
+  if (participants.length === 0) return allModels[0];
   return mode === "planner-executor" ? participants.at(-1) : participants[0];
 }
 
@@ -117,8 +121,8 @@ export function RunSetup(props: RunSetupProps) {
     maxRounds, onMaxRoundsChange, expectedCalls, loading,
   } = props;
   const meta = (id: OrchestrationMode) => modes.find(item => item.id === id)!;
-  const selectedSynthesizer = participants.find(model => modelKey(model) === synthesizerKey);
-  const defaultSynthesizer = defaultFinalizer(mode, participants);
+  const selectedSynthesizer = models.find(model => modelKey(model) === synthesizerKey);
+  const defaultSynthesizer = defaultFinalizer(mode, participants, models);
 
   return (
     <section className="setup-surface" aria-label="Conversation setup">
@@ -188,7 +192,7 @@ export function RunSetup(props: RunSetupProps) {
             <span><strong>{synthesizerRole(mode)}</strong><small>This is a separate finalization role, not an extra council member.</small></span>
             <select value={selectedSynthesizer ? synthesizerKey : ""} disabled={loading} onChange={event => onSynthesizerChange(event.target.value)}>
               <option value="">{defaultSynthesizer ? `Default · ${defaultSynthesizer.label}` : "Default"}</option>
-              {participants.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}</option>)}
+              {models.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}{participants.some(participant => modelKey(participant) === modelKey(model)) ? " · participant" : " · independent"}</option>)}
             </select>
           </label>
         )}
@@ -275,6 +279,7 @@ export function RunConfigSummary({
   mode,
   modes,
   participants,
+  models,
   synthesizer,
   onConfigure,
   onInspect,
@@ -283,13 +288,14 @@ export function RunConfigSummary({
   mode: OrchestrationMode;
   modes: ModeMeta[];
   participants: ModelRef[];
+  models: ModelRef[];
   synthesizer?: ModelRef;
   onConfigure: () => void;
   onInspect: () => void;
   canInspect: boolean;
 }) {
   const modeName = modes.find(item => item.id === mode)?.label ?? mode;
-  const synth = synthesizer ?? defaultFinalizer(mode, participants);
+  const synth = synthesizer ?? defaultFinalizer(mode, participants, models);
   return (
     <div className="run-config-summary">
       <button type="button" className="config-pill" onClick={onConfigure}>

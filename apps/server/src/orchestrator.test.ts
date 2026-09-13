@@ -43,8 +43,62 @@ class UsageMockProvider extends MockProvider {
 }
 
 class RateLimitedProvider extends MockProvider {
+  calls = 0;
+
   override async generate(request: ProviderRequest) {
-    if (request.model) throw new Error("Rate limit exceeded; try again later");
+    this.calls += 1;
+    if (request.model) throw new Error("Too many requests; try again later");
+    return super.generate(request);
+  }
+}
+
+class FlakyProvider extends MockProvider {
+  attempts = new Map<string, number>();
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    const count = (this.attempts.get(request.model) ?? 0) + 1;
+    this.attempts.set(request.model, count);
+    if (request.model === "mock-claude" && count === 1) throw new Error("temporary connection unavailable");
+    return super.generate(request);
+  }
+}
+
+class PartialFailureProvider extends MockProvider {
+  calls: string[] = [];
+
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    this.calls.push(request.model);
+    if (request.model === "mock-claude" || request.model === "mock-finalizer") throw new Error("provider authentication unavailable");
+    return super.generate(request);
+  }
+}
+
+class AllAnswersFailProvider extends MockProvider {
+  calls: string[] = [];
+
+  override async generate(request: ProviderRequest) {
+    this.calls.push(request.model);
+    if (request.model !== "mock-finalizer") throw new Error("provider authentication unavailable");
+    return super.generate(request);
+  }
+}
+
+class DebateReclaimProvider extends MockProvider {
+  roundOneGrokAttempts = 0;
+
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+    const latest = request.messages.at(-1)?.content ?? "";
+    if (
+      request.model === "mock-claude" &&
+      latest.startsWith("You are in debate round 1.")
+    ) {
+      throw new Error("provider authentication unavailable");
+    }
+    if (request.model === "mock-grok" && latest.startsWith("You are in debate round 1.")) {
+      this.roundOneGrokAttempts += 1;
+      if (this.roundOneGrokAttempts === 1) {
+        throw new Error("temporary connection unavailable");
+      }
+    }
     return super.generate(request);
   }
 }
@@ -242,6 +296,115 @@ describe("Orchestrator", () => {
     });
   });
 
+  it("retries one transient failed step without restarting successful siblings", async () => {
+    const flaky = new FlakyProvider();
+    const instance = new Orchestrator(new Map([[flaky.id, flaky]]));
+    const events: OrchestrationStreamEvent[] = [];
+    const result = await instance.run({ mode: "panel", prompt: "Recover", participants, budget: { maxCalls: 6, maxRounds: 1 } }, { runId: "retry-step", emit: event => events.push(event) });
+    expect(result.degraded).not.toBe(true);
+    expect(flaky.attempts.get("mock-claude")).toBe(2);
+    expect(events.some(event => event.type === "step_retrying" && event.stepId === "answer-2")).toBe(true);
+  });
+
+  it("reserves the required finalizer call instead of spending it on a retry", async () => {
+    const flaky = new FlakyProvider();
+    const instance = new Orchestrator(new Map([[flaky.id, flaky]]));
+    const result = await instance.run({
+      mode: "panel",
+      prompt: "Protect the finalizer",
+      participants,
+      budget: { maxCalls: 4, maxRounds: 1 },
+    });
+
+    expect(flaky.attempts.get("mock-claude")).toBe(1);
+    expect(result.degraded).toBe(true);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("chooses a consensus verifier only from successful candidate models", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const result = await instance.run({
+      mode: "consensus",
+      prompt: "Use a surviving verifier",
+      participants,
+      budget: { maxCalls: 5, maxRounds: 1 },
+    });
+
+    expect(result.degraded).toBe(true);
+    expect(partial.calls.filter(model => model === "mock-claude")).toHaveLength(1);
+    expect(result.steps.at(-1)?.kind).toBe("review");
+    expect(result.steps.at(-1)?.model.model).toBe("mock-grok");
+  });
+
+  it("narrows debate rounds to providers that survived the previous stage", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const result = await instance.run({
+      mode: "debate",
+      prompt: "Drop failed debaters",
+      participants,
+      budget: { maxCalls: 10, maxRounds: 2 },
+    });
+
+    expect(result.degraded).toBe(true);
+    expect(partial.calls.filter(model => model === "mock-claude")).toHaveLength(1);
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(4);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("reclaims same-round debate dropouts before retry gating", async () => {
+    const provider = new DebateReclaimProvider();
+    const instance = new Orchestrator(new Map([[provider.id, provider]]));
+    const result = await instance.run({
+      mode: "debate",
+      prompt: "Reclaim debate slots",
+      participants,
+      budget: { maxCalls: 10, maxRounds: 2 },
+    });
+
+    expect(provider.roundOneGrokAttempts).toBe(2);
+    expect(result.steps.filter(step => step.kind === "answer")).toHaveLength(3);
+    expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(4);
+    expect(result.degraded).toBe(true);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("does not invoke a finalizer when every independent answer fails", async () => {
+    const failing = new AllAnswersFailProvider();
+    const instance = new Orchestrator(new Map([[failing.id, failing]]));
+    const finalizer: ModelRef = { provider: "mock", model: "mock-finalizer", label: "External Judge" };
+
+    await expect(instance.run({
+      mode: "judge",
+      prompt: "No survivors",
+      participants: [participants[0], participants[2]],
+      synthesizer: finalizer,
+      budget: { maxCalls: 3, maxRounds: 1 },
+    })).rejects.toThrow(/all parallel model steps failed/i);
+    expect(failing.calls).not.toContain("mock-finalizer");
+  });
+
+  it("keeps successful panel contributions when one provider fails permanently", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const result = await instance.run({ mode: "panel", prompt: "Use survivors", participants, budget: { maxCalls: 6, maxRounds: 1 } });
+    expect(result.degraded).toBe(true);
+    expect(result.failures?.map(failure => failure.stepId)).toContain("answer-2");
+    expect(result.steps.filter(step => step.kind === "answer")).toHaveLength(2);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("returns a degraded survivor result when an independent finalizer fails", async () => {
+    const partial = new PartialFailureProvider();
+    const instance = new Orchestrator(new Map([[partial.id, partial]]));
+    const finalizer: ModelRef = { provider: "mock", model: "mock-finalizer", label: "External Judge" };
+    const result = await instance.run({ mode: "judge", prompt: "Judge fairly", participants: [participants[0], participants[2]], synthesizer: finalizer, budget: { maxCalls: 5, maxRounds: 1 } });
+    expect(result.degraded).toBe(true);
+    expect(result.failures?.some(failure => failure.model.model === "mock-finalizer")).toBe(true);
+    expect(result.final).toMatch(/preserves the surviving model work/i);
+  });
+
   it("normalizes provider rate-limit failures", async () => {
     const limited = new RateLimitedProvider();
     const limitedOrchestrator = new Orchestrator(new Map([[limited.id, limited]]));
@@ -251,13 +414,16 @@ describe("Orchestrator", () => {
       mode: "single",
       prompt: "Hit limit",
       participants: [participants[0]],
+      budget: { maxCalls: 2, maxRounds: 1 },
     }, {
       runId: "limit-test",
       emit: event => events.push(event),
-    })).rejects.toThrow(/rate limit/i);
+    })).rejects.toThrow(/too many requests/i);
 
     const notice = events.find((event): event is Extract<OrchestrationStreamEvent, { type: "rate_limit" }> => event.type === "rate_limit");
     expect(notice?.notice).toMatchObject({ provider: "mock", model: "mock-gpt", stepId: "answer-1" });
+    expect(limited.calls).toBe(1);
+    expect(events.some(event => event.type === "step_retrying")).toBe(false);
   });
 
   it("propagates run cancellation into the active provider call", async () => {

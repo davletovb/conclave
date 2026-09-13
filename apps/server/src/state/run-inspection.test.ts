@@ -88,6 +88,44 @@ describe("run inspection", () => {
     });
   });
 
+  it("accumulates per-step token usage across retry attempts", async () => {
+    const store = await makeStore();
+    const created = await store.createRun({
+      mode: "single",
+      prompt: "Retry usage",
+      participants: [model],
+      budget: { maxCalls: 2, maxRounds: 1 },
+    });
+    const runId = created.run.id;
+    const result: OrchestrationResult = {
+      mode: "single",
+      steps: [{ id: "answer-1", kind: "answer", model, content: "Recovered", dependsOn: [] }],
+      final: "Recovered",
+    };
+    const records: RunEventRecord[] = [
+      { seq: 1, attempt: 1, at: "2026-09-13T00:10:00.000Z", event: { type: "run_started", runId, mode: "single" } },
+      { seq: 2, attempt: 1, at: "2026-09-13T00:10:01.000Z", event: { type: "step_started", runId, stepId: "answer-1", kind: "answer", model } },
+      { seq: 3, attempt: 1, at: "2026-09-13T00:10:02.000Z", event: { type: "usage", runId, stepId: "answer-1", inputTokens: 10, outputTokens: 4 } },
+      { seq: 4, attempt: 1, at: "2026-09-13T00:10:03.000Z", event: { type: "step_retrying", runId, stepId: "answer-1", attempt: 2, message: "temporary connection unavailable" } },
+      { seq: 5, attempt: 1, at: "2026-09-13T00:10:04.000Z", event: { type: "usage", runId, stepId: "answer-1", inputTokens: 6, outputTokens: 1 } },
+      { seq: 6, attempt: 1, at: "2026-09-13T00:10:05.000Z", event: { type: "usage", runId, stepId: "answer-1", inputTokens: 6, outputTokens: 3 } },
+      { seq: 7, attempt: 1, at: "2026-09-13T00:10:06.000Z", event: { type: "step_completed", runId, step: result.steps[0] } },
+      { seq: 8, attempt: 1, at: "2026-09-13T00:10:07.000Z", event: { type: "run_completed", runId, result } },
+    ];
+    for (const record of records) await store.appendRunEvent(record);
+    await store.completeRun(runId, result);
+
+    const run = await store.getRun(runId);
+    const inspection = await inspectRun(store, run!);
+    expect(inspection.attempts[0]?.steps[0]).toMatchObject({
+      id: "answer-1",
+      status: "completed",
+      attempts: 2,
+      inputTokens: 16,
+      outputTokens: 7,
+    });
+  });
+
   it("marks the originating workflow step failed and aborted siblings cancelled", async () => {
     const store = await makeStore();
     const created = await store.createRun({

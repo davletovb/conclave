@@ -13,6 +13,7 @@ import type {
   ProviderStatus,
   RateLimitNotice,
   RunEventRecord,
+  StepFailure,
   RunInspection,
   RunUsage,
   StartRunResponse,
@@ -21,7 +22,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { Markdown } from "./markdown";
-import { CouncilWork, RunConfigSummary, RunSetup } from "./reasoning-surface";
+import { CouncilWork, RunConfigSummary, RunSetup, defaultFinalizer, modeUsesSynthesizer } from "./reasoning-surface";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -345,7 +346,10 @@ function App() {
     [models, selected],
   );
   const selectedSynthesizer = synthesizerKey
-    ? participants.find(model => modelKey(model) === synthesizerKey)
+    ? models.find(model => modelKey(model) === synthesizerKey)
+    : undefined;
+  const effectiveSynthesizer = modeUsesSynthesizer(mode)
+    ? selectedSynthesizer ?? defaultFinalizer(mode, participants, models)
     : undefined;
   const workflowState = useMemo(() => parseWorkflow(workflowText), [workflowText]);
   const activeWorkflow = mode === "custom" ? workflowState.graph : undefined;
@@ -713,6 +717,20 @@ function App() {
       return;
     }
 
+    if (streamEvent.type === "step_retrying") {
+      setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
+      setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
+        ? { ...step, content: "" }
+        : step));
+      return;
+    }
+
+    if (streamEvent.type === "step_failed") {
+      setCompletedStepIds(current => current.filter(id => id !== streamEvent.failure.stepId));
+      setLiveSteps(current => current.filter(step => step.id !== streamEvent.failure.stepId));
+      return;
+    }
+
     if (streamEvent.type === "text_delta") {
       setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
         ? { ...step, content: step.content + streamEvent.delta }
@@ -877,7 +895,7 @@ function App() {
             mode,
             prompt,
             participants,
-            synthesizer: selectedSynthesizer,
+            synthesizer: effectiveSynthesizer,
             workflow: mode === "custom" ? activeWorkflow : undefined,
             budget: { maxCalls, maxRounds },
           },
@@ -1166,11 +1184,13 @@ function App() {
                         </div>
                         <div className="inspection-step-meta">
                           <span>{step.status}</span>
+                          {step.attempts && step.attempts > 1 && <span>{step.attempts} attempts</span>}
                           <span>{elapsedLabel(step.durationMs)}</span>
                           {(step.inputTokens !== undefined || step.outputTokens !== undefined) && (
                             <span>{step.inputTokens ?? 0} in / {step.outputTokens ?? 0} out</span>
                           )}
                         </div>
+                        {step.error && <small className="inspection-step-error">{step.error}</small>}
                         {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
                       </div>
                     ))}
@@ -1188,7 +1208,13 @@ function App() {
                   <Markdown content={result.final} />
                 </div>
               )}
-              <div className="run-telemetry">
+              {result?.degraded && result.failures && result.failures.length > 0 && (
+      <div className="degraded-result">
+        <strong>Completed with partial provider failures</strong>
+        <span>{result.failures.map((failure: StepFailure) => `${failure.model.label}: ${failure.message}`).join(" · ")}</span>
+      </div>
+    )}
+    <div className="run-telemetry">
                 <span>{runUsage.callsStarted}/{maxCalls} calls started</span>
                 <span>{runUsage.callsCompleted} completed</span>
                 <span>{tokenText}</span>
@@ -1213,7 +1239,8 @@ function App() {
             mode={mode}
             modes={modes}
             participants={participants}
-            synthesizer={selectedSynthesizer}
+            models={models}
+            synthesizer={effectiveSynthesizer}
             onConfigure={() => setSetupOpen(current => !current)}
             onInspect={toggleInspector}
             canInspect={Boolean(activeRunId)}
