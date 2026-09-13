@@ -19,9 +19,9 @@ const participants: ModelRef[] = [
 class CountingMockProvider extends MockProvider {
   calls = 0;
 
-  override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+  override async generate(request: ProviderRequest) {
     this.calls += 1;
-    return super.generate(request, emit);
+    return super.generate(request);
   }
 }
 
