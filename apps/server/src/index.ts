@@ -16,8 +16,20 @@ import { Orchestrator } from "./orchestrator.js";
 import { FileStateStore } from "./state/file-store.js";
 import { RunManager } from "./state/run-manager.js";
 
+const allowedOrigins = (process.env.CONCLAVE_WEB_ORIGIN
+  ? process.env.CONCLAVE_WEB_ORIGIN.split(",")
+  : ["http://localhost:5173", "http://127.0.0.1:5173"])
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
 const app = Fastify({ logger: true });
-await app.register(cors, { origin: true });
+await app.register(cors, { origin: allowedOrigins });
+
+function applyStreamCors(raw: import("node:http").ServerResponse, origin?: string) {
+  if (!origin || !allowedOrigins.includes(origin)) return;
+  raw.setHeader("access-control-allow-origin", origin);
+  raw.setHeader("vary", "origin");
+}
 
 const mock = new MockProvider();
 const openai = new OpenAICodexProvider();
@@ -34,7 +46,7 @@ const stateStore = new FileStateStore();
 const runManager = new RunManager(orchestrator, stateStore);
 await runManager.init();
 
-app.get("/health", async () => ({ ok: true, dataDir: stateStore.dataDir }));
+app.get("/health", async () => ({ ok: true }));
 
 app.get("/providers", async (): Promise<ProviderStatus[]> => {
   const [openaiStatus, anthropicStatus, xaiStatus] = await Promise.all([
@@ -126,7 +138,7 @@ app.get<{
   raw.setHeader("content-type", "application/x-ndjson; charset=utf-8");
   raw.setHeader("cache-control", "no-cache, no-transform");
   raw.setHeader("connection", "keep-alive");
-  raw.setHeader("access-control-allow-origin", "*");
+  applyStreamCors(raw, request.headers.origin);
   raw.flushHeaders?.();
 
   let cursor = after;
@@ -187,7 +199,7 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, 
   raw.setHeader("content-type", "application/x-ndjson; charset=utf-8");
   raw.setHeader("cache-control", "no-cache, no-transform");
   raw.setHeader("connection", "keep-alive");
-  raw.setHeader("access-control-allow-origin", "*");
+  applyStreamCors(raw, request.headers.origin);
   raw.flushHeaders?.();
 
   const emit = (event: OrchestrationStreamEvent) => {
@@ -206,7 +218,8 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, 
 });
 
 const port = Number(process.env.PORT ?? 8787);
-await app.listen({ port, host: "0.0.0.0" });
+const host = process.env.CONCLAVE_HOST ?? "127.0.0.1";
+await app.listen({ port, host });
 
 const shutdown = async () => {
   openai.close();
