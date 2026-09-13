@@ -29,13 +29,15 @@ export interface GrokAcpClientLike {
 function subscriptionOnlyEnv() {
   const env = { ...process.env };
 
-  // Grok can fall back to developer credentials and custom model endpoints.
-  // Remove those routes so this adapter uses the cached OAuth session only.
+  // Grok can otherwise resolve developer credentials before the saved OAuth
+  // session. Remove common API/custom-endpoint routes and use Grok's official
+  // lockdown switch so first-party API keys cannot bypass cached OAuth.
   delete env.XAI_API_KEY;
   delete env.GROK_CODE_XAI_API_KEY;
   delete env.GROK_MODELS_BASE_URL;
   delete env.GROK_MODELS_LIST_URL;
 
+  env.GROK_DISABLE_API_KEY_AUTH = "1";
   env.GROK_DISABLE_AUTOUPDATER = "1";
   env.GROK_SUBAGENTS = "0";
   env.GROK_MEMORY = "0";
