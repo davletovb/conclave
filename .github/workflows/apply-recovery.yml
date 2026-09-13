@@ -6,7 +6,7 @@ permissions:
   contents: write
 jobs:
   apply:
-    if: github.actor != 'github-actions[bot]'
+    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -260,7 +260,6 @@ export class Orchestrator {
 '''
           s = once(s, old, new, 'independentAnswers')
 
-          # Critic-revise
           s = between(s, '      if (request.mode === "critic-revise") {', '      if (request.mode === "red-team") {', '''      if (request.mode === "critic-revise") {
         const author = request.participants[0];
         const critic = request.participants[1] ?? author;
@@ -288,18 +287,13 @@ export class Orchestrator {
 
 ''', 'critic revise')
 
-          # Red team
           s = between(s, '      if (request.mode === "red-team") {', '      if (request.mode === "router") {', '''      if (request.mode === "red-team") {
         const author = request.participants[0];
         const draftId = makeStepId("answer", 0);
         const draft = await this.executeStep({ id: draftId, kind: "answer", model: author, prompt: request.prompt, history: request.history }, context);
         const critics = request.participants.slice(1);
         const redTeam = critics.length > 0 ? critics : [author];
-        const settled = await this.settleSteps(redTeam.map((model, index) => ({
-          id: makeStepId("red-team", index), kind: "critique" as const, model,
-          prompt: `Red-team the draft below. Look for false assumptions, counterexamples, safety or implementation failures, adversarial cases, and ways the conclusion could be wrong. Do not merely rewrite it.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`,
-          history: request.history, dependsOn: [draftId],
-        })), context, false);
+        const settled = await this.settleSteps(redTeam.map((model, index) => ({ id: makeStepId("red-team", index), kind: "critique" as const, model, prompt: `Red-team the draft below. Look for false assumptions, counterexamples, safety or implementation failures, adversarial cases, and ways the conclusion could be wrong. Do not merely rewrite it.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}`, history: request.history, dependsOn: [draftId] })), context, false);
         if (settled.steps.length === 0) return complete(this.buildResult(request.mode, [draft], draft.content, settled.failures));
         try {
           const revision = await this.executeStep({ id: makeStepId("revision", 0), kind: "revision", model: author, prompt: `Produce a hardened final answer after the red-team review. Address valid attacks, reject invalid ones explicitly when necessary, and preserve uncertainty.\n\nQuestion:\n${request.prompt}\n\nDraft:\n${draft.content}\n\nRed-team findings:\n${transcript(settled.steps, " critique")}`, history: request.history, dependsOn: [draftId, ...settled.steps.map(step => step.id)] }, context);
@@ -312,7 +306,6 @@ export class Orchestrator {
 
 ''', 'red team')
 
-          # Planner-executor
           s = between(s, '      if (request.mode === "planner-executor") {', '      if (request.mode === "research-council") {', '''      if (request.mode === "planner-executor") {
         const planner = request.participants[0];
         const planId = makeStepId("plan", 0);
@@ -333,7 +326,6 @@ export class Orchestrator {
 
 ''', 'planner executor')
 
-          # Research council
           s = between(s, '      if (request.mode === "research-council") {', '      const independent = await this.independentAnswers(request, context);', '''      if (request.mode === "research-council") {
         const researchBriefs = request.participants.map((_, memberIndex) => {
           const assignedAngles = researchAngles.filter((_, angleIndex) => angleIndex % request.participants.length === memberIndex);
@@ -355,7 +347,6 @@ export class Orchestrator {
       const failures: StepFailure[] = [...independentOutcome.failures];
 ''', 'research council and independent outcome')
 
-          # Replace compare and all downstream panel/judge/consensus/debate section through final unsupported.
           s = between(s, '      if (request.mode === "compare") {', '      throw new Error(`Unsupported orchestration mode: ${request.mode}`);', '''      if (request.mode === "compare") {
         return complete(this.buildResult(request.mode, independent, independent.map(step => step.content).join("\n\n---\n\n"), failures));
       }
@@ -429,7 +420,6 @@ export class Orchestrator {
 ''', 'parallel mode recovery')
           p.write_text(s)
 
-          # Inspector: retry count and non-terminal step failures.
           p = Path('apps/server/src/state/run-inspection.ts')
           s = p.read_text()
           s = once(s, '''    if (event.type === "step_started") {
@@ -472,12 +462,9 @@ export class Orchestrator {
 ''', 'inspection recovery events')
           p.write_text(s)
 
-          # Web: allow independent finalizer from all models and show degraded result.
           p = Path('apps/web/src/reasoning-surface.tsx')
           s = p.read_text()
-          s = once(s, '''function modeUsesSynthesizer(mode: OrchestrationMode) {
-''', '''export function modeUsesSynthesizer(mode: OrchestrationMode) {
-''', 'export modeUsesSynthesizer')
+          s = once(s, 'function modeUsesSynthesizer(mode: OrchestrationMode) {', 'export function modeUsesSynthesizer(mode: OrchestrationMode) {', 'export modeUsesSynthesizer')
           s = once(s, '''function defaultFinalizer(mode: OrchestrationMode, participants: ModelRef[]) {
   if (participants.length === 0) return undefined;
   return mode === "planner-executor" ? participants.at(-1) : participants[0];
@@ -498,9 +485,6 @@ export class Orchestrator {
           s = once(s, '''              {participants.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}</option>)}
 ''', '''              {models.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}{participants.some(participant => modelKey(participant) === modelKey(model)) ? " · participant" : " · independent"}</option>)}
 ''', 'all-model finalizer options')
-          s = once(s, '''  const synth = synthesizer ?? defaultFinalizer(mode, participants);
-''', '''  const synth = synthesizer ?? defaultFinalizer(mode, participants);
-''', 'summary finalizer no-op')
           p.write_text(s)
 
           p = Path('apps/web/src/main.tsx')
@@ -511,9 +495,7 @@ export class Orchestrator {
   RunEventRecord,
   StepFailure,
 ''', 'StepFailure web import')
-          s = once(s, '''import { CouncilWork, RunConfigSummary, RunSetup } from "./reasoning-surface";
-''', '''import { CouncilWork, RunConfigSummary, RunSetup, defaultFinalizer, modeUsesSynthesizer } from "./reasoning-surface";
-''', 'surface helper imports')
+          s = once(s, 'import { CouncilWork, RunConfigSummary, RunSetup } from "./reasoning-surface";', 'import { CouncilWork, RunConfigSummary, RunSetup, defaultFinalizer, modeUsesSynthesizer } from "./reasoning-surface";', 'surface helper imports')
           s = once(s, '''  const selectedSynthesizer = synthesizerKey
     ? participants.find(model => modelKey(model) === synthesizerKey)
     : undefined;
@@ -524,12 +506,8 @@ export class Orchestrator {
     ? selectedSynthesizer ?? defaultFinalizer(mode, participants, models)
     : undefined;
 ''', 'effective finalizer')
-          s = once(s, '''            synthesizer: selectedSynthesizer,
-''', '''            synthesizer: effectiveSynthesizer,
-''', 'submit effective finalizer')
-          s = once(s, '''            synthesizer={selectedSynthesizer}
-''', '''            synthesizer={effectiveSynthesizer}
-''', 'summary effective finalizer')
+          s = once(s, '            synthesizer: selectedSynthesizer,', '            synthesizer: effectiveSynthesizer,', 'submit effective finalizer')
+          s = once(s, '            synthesizer={selectedSynthesizer}', '            synthesizer={effectiveSynthesizer}', 'summary effective finalizer')
           s = once(s, '''              <div className="run-telemetry">
 ''', '''              {result?.degraded && result.failures && result.failures.length > 0 && (
                 <div className="degraded-result">
@@ -552,15 +530,11 @@ export class Orchestrator {
           p.write_text(s)
 
           p = Path('apps/web/src/styles.css')
-          s = p.read_text()
-          s += '''\n.degraded-result { border: 1px solid var(--border); background: var(--surface-soft); border-radius: 12px; padding: 11px 13px; display: grid; gap: 4px; }\n.degraded-result strong { font-size: 11px; }\n.degraded-result span, .inspection-step-error { color: var(--muted); font-size: 10px; line-height: 1.45; }\n'''
-          p.write_text(s)
+          p.write_text(p.read_text() + '\n.degraded-result { border: 1px solid var(--border); background: var(--surface-soft); border-radius: 12px; padding: 11px 13px; display: grid; gap: 4px; }\n.degraded-result strong { font-size: 11px; }\n.degraded-result span, .inspection-step-error { color: var(--muted); font-size: 10px; line-height: 1.45; }\n')
 
-          # Tests
           p = Path('apps/server/src/orchestrator.test.ts')
           s = p.read_text()
-          s = once(s, '''class AbortAwareProvider extends MockProvider {
-''', '''class FlakyProvider extends MockProvider {
+          s = once(s, 'class AbortAwareProvider extends MockProvider {', '''class FlakyProvider extends MockProvider {
   attempts = new Map<string, number>();
   override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
     const count = (this.attempts.get(request.model) ?? 0) + 1;
@@ -572,14 +546,13 @@ export class Orchestrator {
 
 class PartialFailureProvider extends MockProvider {
   override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
-    if (request.model === "mock-claude") throw new Error("provider authentication unavailable");
-    if (request.model === "mock-finalizer") throw new Error("provider authentication unavailable");
+    if (request.model === "mock-claude" || request.model === "mock-finalizer") throw new Error("provider authentication unavailable");
     return super.generate(request, emit);
   }
 }
 
-class AbortAwareProvider extends MockProvider {
-''', 'test providers')
+class AbortAwareProvider extends MockProvider {''', 'test providers')
+          marker = '\n  it("normalizes provider rate-limit failures", async () => {'
           insert = '''
   it("retries one transient failed step without restarting successful siblings", async () => {
     const flaky = new FlakyProvider();
@@ -611,8 +584,7 @@ class AbortAwareProvider extends MockProvider {
     expect(result.final).toMatch(/preserves the surviving model work/i);
   });
 '''
-          marker = '\n  it("normalizes provider rate-limit failures", async () => {'
-          if marker not in s: raise SystemExit('missing test insertion marker')
+          if marker not in s: raise SystemExit('missing test marker')
           s = s.replace(marker, insert + marker, 1)
           p.write_text(s)
           PY
