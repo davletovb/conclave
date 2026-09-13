@@ -42,6 +42,12 @@ type RunContext = {
   plannedCallsRemaining: number;
 };
 
+type ExecuteStepOptions = {
+  startingAttempt?: number;
+  announced?: boolean;
+  deferRetry?: boolean;
+};
+
 const researchAngles = [
   "Evidence auditor: separate established facts, assumptions, and uncertain claims. Identify what evidence would change the answer.",
   "Alternative-hypothesis analyst: develop the strongest competing explanations or options and compare them fairly.",
@@ -109,6 +115,13 @@ class StepExecutionError extends Error {
   constructor(readonly failure: StepFailure) {
     super(failure.message);
     this.name = "StepExecutionError";
+  }
+}
+
+class DeferredStepRetryError extends StepExecutionError {
+  constructor(failure: StepFailure) {
+    super(failure);
+    this.name = "DeferredStepRetryError";
   }
 }
 
@@ -461,10 +474,14 @@ export class Orchestrator {
     }
   }
 
-  private async executeStep(spec: StepSpec, context: RunContext) {
+  private async executeStep(
+    spec: StepSpec,
+    context: RunContext,
+    options: ExecuteStepOptions = {},
+  ) {
     this.throwIfCancelled(context);
-    let attempt = 0;
-    let announced = false;
+    let attempt = options.startingAttempt ?? 0;
+    let announced = options.announced ?? false;
 
     while (true) {
       this.throwIfCancelled(context);
@@ -555,6 +572,16 @@ export class Orchestrator {
       } catch (error) {
         if (context.signal?.aborted) throw cancelledError();
         const retryable = isRetryableStepError(error);
+        if (retryable && attempt < 2 && options.deferRetry) {
+          throw new DeferredStepRetryError({
+            stepId: spec.id,
+            kind: spec.kind,
+            model: spec.model,
+            message: errorMessage(error),
+            retryable: true,
+            attempts: attempt,
+          });
+        }
         const hasRetryHeadroom =
           maxCalls === undefined ||
           maxCalls - context.usage.callsStarted > context.plannedCallsRemaining;
@@ -627,6 +654,102 @@ export class Orchestrator {
         `All parallel model steps failed${detail ? `: ${detail}` : "."}`,
       );
     }
+    return { steps, failures };
+  }
+
+  private async settleRetryAwareBatch(
+    specs: StepSpec[],
+    context: RunContext,
+    futureCallsPerTerminalFailure: number,
+    requireSuccess = true,
+  ) {
+    const settled = await Promise.allSettled(
+      specs.map((spec) => this.executeStep(spec, context, { deferRetry: true })),
+    );
+    this.throwIfCancelled(context);
+
+    const stepsByIndex = new Map<number, OrchestrationStep>();
+    const failures: StepFailure[] = [];
+    const deferred: Array<{ index: number; spec: StepSpec; failure: StepFailure }> = [];
+    const reclaimFutureCalls = () => {
+      if (futureCallsPerTerminalFailure <= 0) return;
+      context.plannedCallsRemaining = Math.max(
+        0,
+        context.plannedCallsRemaining - futureCallsPerTerminalFailure,
+      );
+    };
+
+    for (let index = 0; index < settled.length; index += 1) {
+      const item = settled[index];
+      if (item.status === "fulfilled") {
+        stepsByIndex.set(index, item.value);
+        continue;
+      }
+
+      if (item.reason instanceof DeferredStepRetryError) {
+        deferred.push({ index, spec: specs[index], failure: item.reason.failure });
+        continue;
+      }
+
+      const failure = this.failureFrom(item.reason);
+      if (!failure) throw item.reason;
+      failures.push(failure);
+      reclaimFutureCalls();
+    }
+
+    for (const item of deferred) {
+      const maxCalls = context.budget?.maxCalls;
+      const hasRetryHeadroom =
+        maxCalls === undefined ||
+        maxCalls - context.usage.callsStarted > context.plannedCallsRemaining;
+
+      if (!hasRetryHeadroom) {
+        context.emit?.({
+          type: "step_failed",
+          runId: context.runId,
+          failure: item.failure,
+        });
+        failures.push(item.failure);
+        reclaimFutureCalls();
+        continue;
+      }
+
+      context.stepUsage.delete(item.spec.id);
+      context.emit?.({
+        type: "step_retrying",
+        runId: context.runId,
+        stepId: item.spec.id,
+        attempt: 2,
+        message: item.failure.message,
+      });
+
+      try {
+        const step = await this.executeStep(item.spec, context, {
+          startingAttempt: 1,
+          announced: true,
+        });
+        stepsByIndex.set(item.index, step);
+      } catch (error) {
+        const failure = this.failureFrom(error);
+        if (!failure) throw error;
+        failures.push(failure);
+        reclaimFutureCalls();
+      }
+    }
+
+    const steps = specs
+      .map((_, index) => stepsByIndex.get(index))
+      .filter((step): step is OrchestrationStep => Boolean(step));
+
+    if (requireSuccess && steps.length === 0) {
+      const detail = failures
+        .map((failure) => `${failure.model.label}: ${failure.message}`)
+        .join("; ");
+      throw new Error(
+        `All parallel model steps failed${detail ? `: ${detail}` : "."}`,
+      );
+    }
+
     return { steps, failures };
   }
 
@@ -1202,10 +1325,20 @@ ${transcript(settled.steps, " report")}`,
         }
       }
 
-      const independentOutcome = await this.independentAnswers(
-        request,
-        context,
-      );
+      const independentOutcome =
+        request.mode === "debate"
+          ? await this.settleRetryAwareBatch(
+              request.participants.map((model, index) => ({
+                id: makeStepId("answer", index),
+                kind: "answer" as const,
+                model,
+                prompt: request.prompt,
+                history: request.history,
+              })),
+              context,
+              this.debateRounds(request),
+            )
+          : await this.independentAnswers(request, context);
       const independent = independentOutcome.steps;
       const failures: StepFailure[] = [...independentOutcome.failures];
 
@@ -1392,13 +1525,6 @@ ${synthesis.content}`,
         let debateTranscript = answersTranscript;
         let previousIds = independentIds;
         let activeDebaters = independent.map((step) => step.model);
-        const skippedInitialDebaters = request.participants.length - activeDebaters.length;
-        if (skippedInitialDebaters > 0) {
-          context.plannedCallsRemaining = Math.max(
-            0,
-            context.plannedCallsRemaining - skippedInitialDebaters * maxRounds,
-          );
-        }
 
         for (
           let round = 0;
@@ -1406,8 +1532,8 @@ ${synthesis.content}`,
           round += 1
         ) {
           this.throwIfCancelled(context);
-          const roundDebaterCount = activeDebaters.length;
-          const settled = await this.settleSteps(
+          const remainingRounds = maxRounds - round - 1;
+          const settled = await this.settleRetryAwareBatch(
             activeDebaters.map((model, index) => ({
               id: makeStepId(`critique-r${round + 1}`, index),
               kind: "critique" as const,
@@ -1423,19 +1549,11 @@ ${debateTranscript}`,
               dependsOn: previousIds,
             })),
             context,
+            remainingRounds,
             false,
           );
           failures.push(...settled.failures);
-          const nextDebaters = settled.steps.map((step) => step.model);
-          const droppedDebaters = roundDebaterCount - nextDebaters.length;
-          const remainingRounds = maxRounds - round - 1;
-          if (droppedDebaters > 0 && remainingRounds > 0) {
-            context.plannedCallsRemaining = Math.max(
-              0,
-              context.plannedCallsRemaining - droppedDebaters * remainingRounds,
-            );
-          }
-          activeDebaters = nextDebaters;
+          activeDebaters = settled.steps.map((step) => step.model);
           if (settled.steps.length === 0) break;
 
           debateSteps.push(...settled.steps);

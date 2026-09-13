@@ -84,7 +84,10 @@ class DebateReclaimProvider extends MockProvider {
 
   override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
     const latest = request.messages.at(-1)?.content ?? "";
-    if (request.model === "mock-claude" && latest === "Reclaim debate slots") {
+    if (
+      request.model === "mock-claude" &&
+      latest.startsWith("You are in debate round 1.")
+    ) {
       throw new Error("provider authentication unavailable");
     }
     if (request.model === "mock-grok" && latest.startsWith("You are in debate round 1.")) {
@@ -347,7 +350,7 @@ describe("Orchestrator", () => {
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
-  it("reclaims skipped debate slots so surviving debaters can still retry", async () => {
+  it("reclaims same-round debate dropouts before retry gating", async () => {
     const provider = new DebateReclaimProvider();
     const instance = new Orchestrator(new Map([[provider.id, provider]]));
     const result = await instance.run({
@@ -358,7 +361,9 @@ describe("Orchestrator", () => {
     });
 
     expect(provider.roundOneGrokAttempts).toBe(2);
+    expect(result.steps.filter(step => step.kind === "answer")).toHaveLength(3);
     expect(result.steps.filter(step => step.kind === "critique")).toHaveLength(4);
+    expect(result.degraded).toBe(true);
     expect(result.steps.at(-1)?.kind).toBe("synthesis");
   });
 
