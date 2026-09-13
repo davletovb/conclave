@@ -23,7 +23,17 @@ const modes: { id: OrchestrationMode; label: string; description: string }[] = [
   { id: "panel", label: "Panel", description: "Independent answers, then synthesis" },
   { id: "debate", label: "Debate", description: "Challenge positions, then judge" },
   { id: "critic-revise", label: "Critic → Revise", description: "Draft, critique, improve" },
+  { id: "consensus", label: "Consensus", description: "Find agreement, then audit it" },
+  { id: "judge", label: "Judge", description: "Generate candidates, adjudicate once" },
+  { id: "red-team", label: "Red Team", description: "Attack a draft, then harden it" },
+  { id: "router", label: "Router", description: "Choose one specialist for the task" },
+  { id: "research-council", label: "Research Council", description: "Evidence, alternatives, risks, synthesis" },
+  { id: "planner-executor", label: "Planner → Executors", description: "Plan, execute in parallel, review" },
 ];
+
+function minimumParticipants(mode: OrchestrationMode) {
+  return mode === "consensus" || mode === "judge" || mode === "router" || mode === "research-council" ? 2 : 1;
+}
 
 function modelKey(model: ModelRef) {
   return `${model.provider}:${model.model}`;
@@ -100,6 +110,8 @@ function App() {
     () => models.filter(model => selected.includes(modelKey(model))),
     [models, selected],
   );
+  const requiredParticipants = minimumParticipants(mode);
+  const participantShortfall = participants.length < requiredParticipants;
 
   const priorMessages = useMemo(
     () => conversation?.messages.filter(
@@ -273,6 +285,20 @@ function App() {
         const model = current[0] ?? (models[0] ? modelKey(models[0]) : undefined);
         return model ? [model] : [];
       });
+      return;
+    }
+
+    const minimum = minimumParticipants(nextMode);
+    if (minimum > 1) {
+      setSelected(current => {
+        const next = [...current];
+        for (const model of models) {
+          const key = modelKey(model);
+          if (!next.includes(key)) next.push(key);
+          if (next.length >= minimum) break;
+        }
+        return next;
+      });
     }
   }
 
@@ -422,7 +448,7 @@ function App() {
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!prompt.trim() || participants.length === 0 || loading) return;
+    if (!prompt.trim() || participantShortfall || loading) return;
     const epoch = beginViewOperation();
     setLoading(true);
     setError("");
@@ -561,7 +587,7 @@ function App() {
             <section className="hero">
               <span className="eyebrow">CONVENE THE COUNCIL</span>
               <h3>Ask once. Let different minds work the problem.</h3>
-              <p>Compare independent reasoning, run a panel, stage a debate, or send an answer through critique and revision.</p>
+              <p>Compare, debate, route to a specialist, red-team a draft, build consensus, or run a plan through executors and review.</p>
             </section>
           )}
 
@@ -602,8 +628,12 @@ function App() {
         <form className="composer" onSubmit={submit}>
           <textarea value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversation ? "Continue the conversation…" : "Ask the council…"} rows={3} />
           <div className="composer-footer">
-            <span>{conversation ? "Persistent conversation" : `${participants.length} participant${participants.length === 1 ? "" : "s"}`}</span>
-            <button type="submit" disabled={loading || !prompt.trim() || participants.length === 0}>{loading ? "Running…" : "Convene"}</button>
+            <span>{participantShortfall
+              ? `${requiredParticipants} participants required for ${modes.find(item => item.id === mode)?.label}`
+              : conversation
+                ? "Persistent conversation"
+                : `${participants.length} participant${participants.length === 1 ? "" : "s"}`}</span>
+            <button type="submit" disabled={loading || !prompt.trim() || participantShortfall}>{loading ? "Running…" : "Convene"}</button>
           </div>
         </form>
       </section>
