@@ -43,6 +43,12 @@ jobs:
           duplicate = '      const failures: StepFailure[] = [...independentOutcome.failures];\n      const independent = await this.independentAnswers(request, context);\n'
           text = text.replace(duplicate, '      const failures: StepFailure[] = [...independentOutcome.failures];\n', 1)
           orchestrator.write_text(text)
+
+          custom = Path('apps/server/src/custom-workflow.test.ts')
+          text = custom.read_text()
+          text = text.replace('expect(events.some(event => event.type === "error" && event.stepId === "bad" && /branch exploded/.test(event.message))).toBe(true);', 'expect(events.some(event => event.type === "step_failed" && event.failure.stepId === "bad" && /branch exploded/.test(event.failure.message))).toBe(true);')
+          text = text.replace('expect(events.some(event => event.type === "error" && event.stepId === "slow")).toBe(false);', 'expect(events.some(event => event.type === "step_failed" && event.failure.stepId === "slow")).toBe(false);')
+          custom.write_text(text)
           PY
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
@@ -54,6 +60,6 @@ jobs:
           if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packages/core/src/index.ts apps/server/src/orchestrator.ts apps/server/src/orchestrator.test.ts apps/server/src/state/run-inspection.ts apps/web/src/main.tsx apps/web/src/reasoning-surface.tsx apps/web/src/styles.css
+          git add packages/core/src/index.ts apps/server/src/orchestrator.ts apps/server/src/orchestrator.test.ts apps/server/src/custom-workflow.test.ts apps/server/src/state/run-inspection.ts apps/web/src/main.tsx apps/web/src/reasoning-surface.tsx apps/web/src/styles.css
           git commit -m "feat: recover from partial provider failures" || exit 0
           git push origin HEAD:feat/partial-failure-recovery
