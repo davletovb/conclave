@@ -265,7 +265,11 @@ function parseWorkflow(raw: string): { graph?: WorkflowGraph; error: string } {
 
 function App() {
   const [models, setModels] = useState<ModelRef[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError] = useState("");
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(true);
+  const [providersError, setProvidersError] = useState("");
   const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);
   const [workflowPresets, setWorkflowPresets] = useState<WorkflowPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState("");
@@ -362,12 +366,18 @@ function App() {
 
   const subscriptionProviders = providers.filter(provider => provider.id !== "mock");
   const connectedProviders = subscriptionProviders.filter(provider => provider.connected);
-  const runtimeLabel = connectedProviders.length > 0
-    ? `${connectedProviders.map(runtimeName).join(" · ")} connected`
-    : "Subscription runtimes not connected · mocks active";
-  const runtimeTitle = subscriptionProviders
-    .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
-    .join("\n");
+  const runtimeLabel = providersLoading
+    ? "Checking subscription runtimes…"
+    : connectedProviders.length > 0
+      ? `${connectedProviders.map(runtimeName).join(" · ")} connected`
+      : providers.length === 0
+        ? "Runtime status unavailable"
+        : "Subscription runtimes not connected · mocks active";
+  const runtimeTitle = providersLoading
+    ? "Checking local subscription runtimes…"
+    : providersError || subscriptionProviders
+      .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
+      .join("\n");
   const quotaSummary = providerLimits.map(limitText).filter(Boolean).join(" · ");
   const quotaTitle = providerLimits
     .map(snapshot => `${snapshot.provider}: ${limitText(snapshot) || snapshot.message || "structured limits unavailable"}`)
@@ -416,27 +426,63 @@ function App() {
     }
   }
 
-  async function initialize(epoch: number) {
+  async function loadModels(epoch: number) {
+    if (isCurrent(epoch)) {
+      setModelsLoading(true);
+      setModelsError("");
+    }
     try {
-      const [modelData, providerData, conversationData, limitData, presetData] = await Promise.all([
-        fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response)),
-        fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response)),
+      const data = await fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response));
+      if (!isCurrent(epoch)) return;
+      setModels(data);
+      setSelected(current => current.length > 0 ? current : initialSelection(data));
+    } catch (cause) {
+      if (!isCurrent(epoch)) return;
+      setModelsError(cause instanceof Error ? cause.message : "Could not load models.");
+    } finally {
+      if (isCurrent(epoch)) setModelsLoading(false);
+    }
+  }
+
+  async function loadProviders(epoch: number) {
+    if (isCurrent(epoch)) {
+      setProvidersLoading(true);
+      setProvidersError("");
+    }
+    try {
+      const data = await fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response));
+      if (!isCurrent(epoch)) return;
+      setProviders(data);
+    } catch (cause) {
+      if (!isCurrent(epoch)) return;
+      setProviders([]);
+      setProvidersError(cause instanceof Error ? cause.message : "Could not load runtime status.");
+    } finally {
+      if (isCurrent(epoch)) setProvidersLoading(false);
+    }
+  }
+
+  async function refreshRuntimeCatalog(epoch: number) {
+    // Native runtime discovery can be comparatively slow. Keep it independent
+    // from conversation/preset bootstrap so one status call cannot blank the
+    // whole setup screen.
+    await Promise.all([loadModels(epoch), loadProviders(epoch)]);
+    if (isCurrent(epoch)) await refreshLimits(epoch);
+  }
+
+  async function initialize(epoch: number) {
+    void refreshRuntimeCatalog(epoch);
+    try {
+      const [conversationData, presetData] = await Promise.all([
         fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),
-        fetch(`${API}/provider-limits`)
-          .then(response => readJson<ProviderLimitSnapshot[]>(response))
-          .catch(() => [] as ProviderLimitSnapshot[]),
         fetch(`${API}/workflow-presets`)
           .then(response => readJson<WorkflowPreset[]>(response))
           .catch(() => [] as WorkflowPreset[]),
       ]);
       if (!isCurrent(epoch)) return;
-      setModels(modelData);
-      setProviders(providerData);
-      setProviderLimits(limitData);
       setConversations(conversationData);
       workflowPresetsRef.current = presetData;
       setWorkflowPresets(presetData);
-      setSelected(initialSelection(modelData));
       if (presetData[0]) {
         setSelectedPresetId(presetData[0].id);
         setWorkflowText(JSON.stringify(presetData[0].graph, null, 2));
@@ -451,7 +497,7 @@ function App() {
       }
     } catch (cause) {
       if (isCurrent(epoch)) {
-        setError(cause instanceof Error ? cause.message : "Could not reach the Conclave server.");
+        setError(cause instanceof Error ? cause.message : "Could not load local conversation history.");
       }
     }
   }
@@ -1001,6 +1047,9 @@ function App() {
               modes={modes}
               onModeChange={selectMode}
               models={models}
+              modelsLoading={modelsLoading}
+              modelsError={modelsError}
+              onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current)}
               selectedKeys={selected}
               participants={participants}
               onToggleModel={toggleModel}
