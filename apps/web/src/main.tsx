@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   Conversation,
@@ -66,6 +66,10 @@ async function readJson<T>(response: Response): Promise<T> {
   return data as T;
 }
 
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function App() {
   const [models, setModels] = useState<ModelRef[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
@@ -80,9 +84,16 @@ function App() {
   const [resumeRunId, setResumeRunId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const viewEpochRef = useRef(0);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    void initialize();
+    const epoch = beginViewOperation();
+    void initialize(epoch);
+    return () => {
+      streamAbortRef.current?.abort();
+      viewEpochRef.current += 1;
+    };
   }, []);
 
   const participants = useMemo(
@@ -91,7 +102,9 @@ function App() {
   );
 
   const priorMessages = useMemo(
-    () => conversation?.messages.filter(message => message.runId !== activeRunId) ?? [],
+    () => conversation?.messages.filter(
+      message => !(message.runId === activeRunId && message.role === "assistant"),
+    ) ?? [],
     [conversation, activeRunId],
   );
 
@@ -104,13 +117,25 @@ function App() {
     .map(provider => `${runtimeName(provider)}: ${provider.message ?? (provider.connected ? "connected" : "not connected")}`)
     .join("\n");
 
-  async function initialize() {
+  function beginViewOperation() {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    viewEpochRef.current += 1;
+    return viewEpochRef.current;
+  }
+
+  function isCurrent(epoch: number) {
+    return viewEpochRef.current === epoch;
+  }
+
+  async function initialize(epoch: number) {
     try {
       const [modelData, providerData, conversationData] = await Promise.all([
         fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response)),
         fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response)),
         fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),
       ]);
+      if (!isCurrent(epoch)) return;
       setModels(modelData);
       setProviders(providerData);
       setConversations(conversationData);
@@ -119,27 +144,40 @@ function App() {
       const rememberedRun = localStorage.getItem("conclave.activeRunId");
       const rememberedConversation = localStorage.getItem("conclave.conversationId");
       if (rememberedRun) {
-        await recoverRun(rememberedRun);
+        await recoverRun(rememberedRun, epoch);
       } else if (rememberedConversation && conversationData.some(item => item.id === rememberedConversation)) {
-        await loadConversation(rememberedConversation);
+        await loadConversation(rememberedConversation, epoch);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not reach the Conclave server.");
+      if (isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Could not reach the Conclave server.");
+      }
     }
   }
 
-  async function refreshConversations() {
+  async function refreshConversations(epoch?: number) {
     const data = await fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response));
-    setConversations(data);
+    if (epoch === undefined || isCurrent(epoch)) setConversations(data);
   }
 
-  async function loadConversation(id: string) {
+  async function loadConversation(id: string, existingEpoch?: number) {
+    const epoch = existingEpoch ?? beginViewOperation();
+    if (existingEpoch === undefined) {
+      setLoading(false);
+      setError("");
+      setResult(null);
+      setLiveSteps([]);
+      setResumeRunId(null);
+    }
+
     const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
+    if (!isCurrent(epoch)) return;
     setConversation(data);
     localStorage.setItem("conclave.conversationId", id);
 
     if (data.lastRunId) {
       const run = await fetch(`${API}/runs/${data.lastRunId}`).then(response => readJson<StoredRun>(response));
+      if (!isCurrent(epoch)) return;
       setActiveRunId(run.id);
       localStorage.setItem("conclave.activeRunId", run.id);
       if (run.status === "completed" && run.result) {
@@ -147,7 +185,7 @@ function App() {
         setLiveSteps(run.result.steps);
         setResumeRunId(null);
       } else if (run.status === "running" || run.status === "queued") {
-        await recoverRun(run.id);
+        await recoverRun(run.id, epoch);
       } else {
         setResult(run.result ?? null);
         setLiveSteps(run.result?.steps ?? []);
@@ -163,53 +201,62 @@ function App() {
     }
   }
 
-  async function recoverRun(runId: string) {
-    const run = await fetch(`${API}/runs/${runId}`).then(response => readJson<StoredRun>(response));
-    setActiveRunId(run.id);
-    localStorage.setItem("conclave.activeRunId", run.id);
-    localStorage.setItem("conclave.conversationId", run.conversationId);
-    const thread = await fetch(`${API}/conversations/${run.conversationId}`).then(response => readJson<Conversation>(response));
-    setConversation(thread);
+  async function recoverRun(runId: string, existingEpoch?: number) {
+    const epoch = existingEpoch ?? beginViewOperation();
+    try {
+      const run = await fetch(`${API}/runs/${runId}`).then(response => readJson<StoredRun>(response));
+      if (!isCurrent(epoch)) return;
+      setActiveRunId(run.id);
+      localStorage.setItem("conclave.activeRunId", run.id);
+      localStorage.setItem("conclave.conversationId", run.conversationId);
+      const thread = await fetch(`${API}/conversations/${run.conversationId}`).then(response => readJson<Conversation>(response));
+      if (!isCurrent(epoch)) return;
+      setConversation(thread);
 
-    if (run.status === "completed" && run.result) {
-      setResult(run.result);
-      setLiveSteps(run.result.steps);
-      setLoading(false);
+      if (run.status === "completed" && run.result) {
+        setResult(run.result);
+        setLiveSteps(run.result.steps);
+        setLoading(false);
+        setResumeRunId(null);
+        return;
+      }
+
+      if (run.status === "failed" || run.status === "interrupted") {
+        setResult(run.result ?? null);
+        setLiveSteps(run.result?.steps ?? []);
+        setError(run.error ?? "This run was interrupted before it completed.");
+        setResumeRunId(run.id);
+        setLoading(false);
+        return;
+      }
+
+      setResult(null);
+      setLiveSteps([]);
+      setError("");
       setResumeRunId(null);
-      return;
+      setLoading(true);
+      const attached = await consumeRun(run.id, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(run.conversationId, epoch);
+    } finally {
+      if (isCurrent(epoch)) setLoading(false);
     }
-
-    if (run.status === "failed" || run.status === "interrupted") {
-      setResult(run.result ?? null);
-      setLiveSteps(run.result?.steps ?? []);
-      setError(run.error ?? "This run was interrupted before it completed.");
-      setResumeRunId(run.id);
-      setLoading(false);
-      return;
-    }
-
-    setResult(null);
-    setLiveSteps([]);
-    setError("");
-    setResumeRunId(null);
-    setLoading(true);
-    await consumeRun(run.id);
-    setLoading(false);
-    await refreshConversation(run.conversationId);
   }
 
-  async function refreshConversation(id: string) {
+  async function refreshConversation(id: string, epoch?: number) {
     const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
+    if (epoch !== undefined && !isCurrent(epoch)) return;
     setConversation(data);
-    await refreshConversations();
+    await refreshConversations(epoch);
   }
 
   function newConversation() {
+    beginViewOperation();
     setConversation(null);
     setActiveRunId(null);
     setResumeRunId(null);
     setResult(null);
     setLiveSteps([]);
+    setLoading(false);
     setError("");
     setPrompt("");
     localStorage.removeItem("conclave.conversationId");
@@ -271,59 +318,90 @@ function App() {
 
     if (streamEvent.type === "error") {
       setError(streamEvent.message);
-      setResumeRunId(streamEvent.runId);
     }
   }
 
-  async function consumeRun(runId: string) {
+  async function consumeRun(runId: string, epoch: number) {
     let cursor = 0;
-    while (true) {
-      const response = await fetch(`${API}/runs/${runId}/events?after=${cursor}&follow=1`);
-      if (!response.ok) await readJson(response);
-      if (!response.body) throw new Error("This browser did not expose the response stream.");
+    const controller = new AbortController();
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = controller;
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      const consumeLine = (line: string) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        const record = JSON.parse(trimmed) as RunEventRecord;
-        cursor = Math.max(cursor, record.seq);
-        applyStreamEvent(record.event);
-      };
+    try {
+      while (isCurrent(epoch) && !controller.signal.aborted) {
+        try {
+          const response = await fetch(`${API}/runs/${runId}/events?after=${cursor}&follow=1`, {
+            signal: controller.signal,
+          });
+          if (!response.ok) await readJson(response);
+          if (!response.body) throw new Error("This browser did not expose the response stream.");
 
-      while (true) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) consumeLine(line);
-        if (done) break;
-      }
-      if (buffer.trim()) consumeLine(buffer);
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          const consumeLine = (line: string) => {
+            const trimmed = line.trim();
+            if (!trimmed || !isCurrent(epoch) || controller.signal.aborted) return;
+            const record = JSON.parse(trimmed) as RunEventRecord;
+            cursor = Math.max(cursor, record.seq);
+            applyStreamEvent(record.event);
+          };
 
-      const run = await fetch(`${API}/runs/${runId}`).then(next => readJson<StoredRun>(next));
-      if (run.status === "completed") {
-        if (run.result) {
-          setResult(run.result);
-          setLiveSteps(run.result.steps);
+          while (true) {
+            const { done, value } = await reader.read();
+            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) consumeLine(line);
+            if (done) break;
+          }
+          if (buffer.trim()) consumeLine(buffer);
+        } catch (cause) {
+          if (controller.signal.aborted || !isCurrent(epoch)) return false;
+          // A browser/network stream can disappear while the server-owned run
+          // keeps working. Fall through to persisted status inspection, then
+          // reconnect from the last durable sequence cursor.
         }
-        return;
-      }
-      if (run.status === "failed" || run.status === "interrupted") {
-        setError(run.error ?? "The run stopped before completion.");
-        setResumeRunId(run.id);
-        return;
-      }
 
-      await new Promise(resolve => setTimeout(resolve, 350));
+        if (controller.signal.aborted || !isCurrent(epoch)) return false;
+
+        let run: StoredRun | null = null;
+        try {
+          run = await fetch(`${API}/runs/${runId}`, { signal: controller.signal })
+            .then(next => readJson<StoredRun>(next));
+        } catch (cause) {
+          if (controller.signal.aborted || !isCurrent(epoch)) return false;
+          await sleep(600);
+          continue;
+        }
+
+        if (!isCurrent(epoch)) return false;
+        if (run.status === "completed") {
+          if (run.result) {
+            setResult(run.result);
+            setLiveSteps(run.result.steps);
+          }
+          setResumeRunId(null);
+          return true;
+        }
+        if (run.status === "failed" || run.status === "interrupted") {
+          setError(run.error ?? "The run stopped before completion.");
+          setResumeRunId(run.id);
+          return true;
+        }
+
+        await sleep(500);
+      }
+      return false;
+    } finally {
+      if (streamAbortRef.current === controller) streamAbortRef.current = null;
     }
   }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!prompt.trim() || participants.length === 0 || loading) return;
+    const epoch = beginViewOperation();
     setLoading(true);
     setError("");
     setResumeRunId(null);
@@ -339,39 +417,49 @@ function App() {
           request: { mode, prompt, participants, maxRounds: 1 },
         }),
       }).then(response => readJson<StartRunResponse>(response));
+      if (!isCurrent(epoch)) return;
 
       setActiveRunId(started.runId);
       localStorage.setItem("conclave.activeRunId", started.runId);
       localStorage.setItem("conclave.conversationId", started.conversationId);
       setPrompt("");
-      await refreshConversation(started.conversationId);
-      await consumeRun(started.runId);
-      await refreshConversation(started.conversationId);
+      await refreshConversation(started.conversationId, epoch);
+      if (!isCurrent(epoch)) return;
+      const attached = await consumeRun(started.runId, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(started.conversationId, epoch);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Orchestration failed");
+      if (isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Orchestration failed");
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent(epoch)) setLoading(false);
     }
   }
 
   async function resumeInterruptedRun() {
     if (!resumeRunId || loading) return;
+    const epoch = beginViewOperation();
+    const runId = resumeRunId;
     setLoading(true);
     setError("");
     setResult(null);
     setLiveSteps([]);
     try {
-      const resumed = await fetch(`${API}/runs/${resumeRunId}/resume`, { method: "POST" })
+      const resumed = await fetch(`${API}/runs/${runId}/resume`, { method: "POST" })
         .then(response => readJson<StartRunResponse>(response));
+      if (!isCurrent(epoch)) return;
       setActiveRunId(resumed.runId);
       setResumeRunId(null);
       localStorage.setItem("conclave.activeRunId", resumed.runId);
-      await consumeRun(resumed.runId);
-      await refreshConversation(resumed.conversationId);
+      localStorage.setItem("conclave.conversationId", resumed.conversationId);
+      const attached = await consumeRun(resumed.runId, epoch);
+      if (attached && isCurrent(epoch)) await refreshConversation(resumed.conversationId, epoch);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not resume run");
+      if (isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Could not resume run");
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent(epoch)) setLoading(false);
     }
   }
 
