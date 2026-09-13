@@ -23,12 +23,14 @@ type ModelListResponse = {
 type ThreadStartResponse = { thread: { id: string } };
 type TurnStartResponse = { turn: { id: string } };
 
+type AgentMessageItem = { type: "agentMessage"; text: string };
 type TurnCompletedParams = {
   threadId?: string;
   turn?: {
     id?: string;
     status?: string;
     error?: { message?: string } | null;
+    items?: Array<Record<string, unknown>>;
   };
 };
 
@@ -37,6 +39,10 @@ const TEXT_ONLY_INSTRUCTIONS = [
   "Answer the user's request directly as text.",
   "Do not modify files, execute commands, or take external side effects.",
 ].join(" ");
+
+function isAgentMessage(item: Record<string, unknown>): item is Record<string, unknown> & AgentMessageItem {
+  return item.type === "agentMessage" && typeof item.text === "string";
+}
 
 export class OpenAICodexProvider implements ProviderAdapter {
   readonly id = "openai" as const;
@@ -190,7 +196,7 @@ export class OpenAICodexProvider implements ProviderAdapter {
 
       if (notification.method === "item/completed") {
         const item = params.item as Record<string, unknown> | undefined;
-        if (item?.type === "agentMessage" && typeof item.text === "string") {
+        if (item && isAgentMessage(item)) {
           const messages = completedMessages.get(turnId) ?? [];
           messages.push(item.text);
           completedMessages.set(turnId, messages);
@@ -210,10 +216,11 @@ export class OpenAICodexProvider implements ProviderAdapter {
       }
     });
 
+    let timeout: NodeJS.Timeout | undefined;
     try {
       const turn = await this.client.request<TurnStartResponse>("turn/start", {
         threadId,
-        input: [{ type: "text", text: prompt }],
+        input: [{ type: "text", text: prompt, text_elements: [] }],
         model,
         approvalPolicy: "never",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
@@ -224,21 +231,27 @@ export class OpenAICodexProvider implements ProviderAdapter {
       if (earlyCompletion) resolveDone(earlyCompletion);
 
       const timeoutMs = Number(process.env.CONCLAVE_CODEX_TURN_TIMEOUT_MS ?? 180_000);
-      const completion = await Promise.race([
-        done,
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Codex turn timed out")), timeoutMs)),
-      ]);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Codex turn timed out")), timeoutMs);
+      });
+      const completion = await Promise.race([done, timeoutPromise]);
 
       const status = completion.turn?.status;
       if (status && status !== "completed") {
         throw new Error(completion.turn?.error?.message ?? `Codex turn ended with status ${status}`);
       }
 
-      const finalItems = completedMessages.get(expectedTurnId) ?? [];
-      const content = finalItems.join("\n\n").trim() || (streamedText.get(expectedTurnId) ?? "").trim();
+      const eventMessages = completedMessages.get(expectedTurnId) ?? [];
+      const turnMessages = (completion.turn?.items ?? [])
+        .filter(isAgentMessage)
+        .map(item => item.text);
+      const content = eventMessages.join("\n\n").trim()
+        || turnMessages.join("\n\n").trim()
+        || (streamedText.get(expectedTurnId) ?? "").trim();
       if (!content) throw new Error("Codex completed without an assistant message");
       return content;
     } finally {
+      if (timeout) clearTimeout(timeout);
       unsubscribe();
     }
   }
