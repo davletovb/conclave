@@ -42,6 +42,39 @@ describe("FileStateStore", () => {
     expect(conversation?.messages.at(-1)?.content).toBe("Use local persistence.");
   });
 
+  it("keeps each assistant response beside its user turn when runs finish out of order", async () => {
+    const { store } = await tempStore();
+    const first = await store.createRun({
+      mode: "single",
+      prompt: "Question A",
+      participants: [participant],
+    });
+    const second = await store.createRun({
+      mode: "single",
+      prompt: "Question B",
+      participants: [participant],
+    }, first.conversation.id);
+
+    await store.completeRun(second.run.id, {
+      mode: "single",
+      steps: [{ id: "answer-1", kind: "answer", model: participant, content: "Answer B" }],
+      final: "Answer B",
+    });
+    await store.completeRun(first.run.id, {
+      mode: "single",
+      steps: [{ id: "answer-1", kind: "answer", model: participant, content: "Answer A" }],
+      final: "Answer A",
+    });
+
+    const conversation = await store.getConversation(first.conversation.id);
+    expect(conversation?.messages.map(message => `${message.role}:${message.content}`)).toEqual([
+      "user:Question A",
+      "assistant:Answer A",
+      "user:Question B",
+      "assistant:Answer B",
+    ]);
+  });
+
   it("marks in-flight runs interrupted after a server restart", async () => {
     const { dir, store } = await tempStore();
     const created = await store.createRun({
