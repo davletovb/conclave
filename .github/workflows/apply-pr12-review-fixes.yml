@@ -1,0 +1,116 @@
+name: Apply PR 12 review fixes
+on:
+  push:
+    branches: [feat/reasoning-first-ui]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply review fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          surface = Path('apps/web/src/reasoning-surface.tsx')
+          s = surface.read_text()
+
+          anchor = '''function modeUsesSynthesizer(mode: OrchestrationMode) {
+            return ["panel", "debate", "consensus", "judge", "research-council", "planner-executor", "custom"].includes(mode);
+          }
+          '''.replace('          ', '')
+          if 'function defaultFinalizer(' not in s:
+              if anchor not in s:
+                  raise SystemExit('modeUsesSynthesizer anchor not found')
+              s = s.replace(anchor, anchor + '''\nfunction defaultFinalizer(mode: OrchestrationMode, participants: ModelRef[]) {\n  if (participants.length === 0) return undefined;\n  return mode === "planner-executor" ? participants.at(-1) : participants[0];\n}\n''', 1)
+
+          if '  fresh: boolean;\n' not in s:
+              s = s.replace('type RunSetupProps = {\n  mode: OrchestrationMode;\n', 'type RunSetupProps = {\n  mode: OrchestrationMode;\n  fresh: boolean;\n', 1)
+          s = s.replace('    mode, modes, onModeChange, models, selectedKeys, participants, onToggleModel,\n', '    mode, fresh, modes, onModeChange, models, selectedKeys, participants, onToggleModel,\n', 1)
+
+          if 'const defaultSynthesizer = defaultFinalizer(mode, participants);' not in s:
+              s = s.replace('  const selectedSynthesizer = participants.find(model => modelKey(model) === synthesizerKey);\n', '  const selectedSynthesizer = participants.find(model => modelKey(model) === synthesizerKey);\n  const defaultSynthesizer = defaultFinalizer(mode, participants);\n', 1)
+
+          s = s.replace('<span className="eyebrow">NEW CONVERSATION</span>\n        <h2>How should Conclave work this problem?</h2>\n        <p>Choose the reasoning pattern first, then assign models to the roles that matter.</p>', '<span className="eyebrow">{fresh ? "NEW CONVERSATION" : "RUN CONFIGURATION"}</span>\n        <h2>{fresh ? "How should Conclave work this problem?" : "Configure the next turn"}</h2>\n        <p>{fresh ? "Choose the reasoning pattern first, then assign models to the roles that matter." : "Adjust the workflow or model roles for the next message in this conversation."}</p>', 1)
+
+          s = s.replace('<option value="">First selected · default</option>', '<option value="">{defaultSynthesizer ? `Default · ${defaultSynthesizer.label}` : "Default"}</option>', 1)
+
+          old_sig = '''  inspection,\n  onInspect,\n}: {\n  steps: OrchestrationStep[];\n  loading: boolean;\n  inspection: RunInspection | null;\n  onInspect: () => void;\n}) {'''
+          new_sig = '''  inspection,\n  completedStepIds,\n  onInspect,\n}: {\n  steps: OrchestrationStep[];\n  loading: boolean;\n  inspection: RunInspection | null;\n  completedStepIds: string[];\n  onInspect: () => void;\n}) {'''
+          if old_sig in s:
+              s = s.replace(old_sig, new_sig, 1)
+          elif 'completedStepIds: string[];' not in s:
+              raise SystemExit('CouncilWork signature anchor not found')
+
+          old_status = '          const status = stepMeta?.status ?? (loading && !step.content ? "working" : loading ? "streaming" : "completed");'
+          new_status = '          const status = stepMeta?.status ?? (completedStepIds.includes(step.id) ? "completed" : loading ? (step.content ? "streaming" : "working") : (step.content ? "partial" : "pending"));'
+          if old_status in s:
+              s = s.replace(old_status, new_status, 1)
+          elif new_status not in s:
+              raise SystemExit('CouncilWork status anchor not found')
+
+          s = s.replace('  const synth = synthesizer ?? participants[0];', '  const synth = synthesizer ?? defaultFinalizer(mode, participants);', 1)
+          surface.write_text(s)
+
+          main = Path('apps/web/src/main.tsx')
+          m = main.read_text()
+          if 'const [completedStepIds, setCompletedStepIds]' not in m:
+              m = m.replace('  const [liveSteps, setLiveSteps] = useState<OrchestrationStep[]>([]);\n', '  const [liveSteps, setLiveSteps] = useState<OrchestrationStep[]>([]);\n  const [completedStepIds, setCompletedStepIds] = useState<string[]>([]);\n', 1)
+
+          # Reset completion state wherever the live step list is reset.
+          m = re.sub(r'(?m)^(\s*)setLiveSteps\(\[\]\);(?!\n\1setCompletedStepIds)', lambda match: f'{match.group(1)}setLiveSteps([]);\n{match.group(1)}setCompletedStepIds([]);', m)
+          # Completed persisted/final results should mark all displayed steps complete.
+          m = re.sub(r'(?m)^(\s*)setLiveSteps\(run\.result\.steps\);(?!\n\1setCompletedStepIds)', lambda match: f'{match.group(1)}setLiveSteps(run.result.steps);\n{match.group(1)}setCompletedStepIds(run.result.steps.map(step => step.id));', m)
+          m = re.sub(r'(?m)^(\s*)setLiveSteps\(streamEvent\.result\.steps\);(?!\n\1setCompletedStepIds)', lambda match: f'{match.group(1)}setLiveSteps(streamEvent.result.steps);\n{match.group(1)}setCompletedStepIds(streamEvent.result.steps.map(step => step.id));', m)
+
+          started = '''    if (streamEvent.type === "step_started") {\n      setLiveSteps(current => current.some(step => step.id === streamEvent.stepId)'''
+          if started in m and 'setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));' not in m:
+              m = m.replace(started, '''    if (streamEvent.type === "step_started") {\n      setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));\n      setLiveSteps(current => current.some(step => step.id === streamEvent.stepId)''', 1)
+
+          completed = '''    if (streamEvent.type === "step_completed") {\n      setLiveSteps(current => current.some(step => step.id === streamEvent.step.id)\n        ? current.map(step => step.id === streamEvent.step.id ? streamEvent.step : step)\n        : [...current, streamEvent.step]);\n      return;\n    }'''
+          if completed in m:
+              m = m.replace(completed, '''    if (streamEvent.type === "step_completed") {\n      setLiveSteps(current => current.some(step => step.id === streamEvent.step.id)\n        ? current.map(step => step.id === streamEvent.step.id ? streamEvent.step : step)\n        : [...current, streamEvent.step]);\n      setCompletedStepIds(current => current.includes(streamEvent.step.id) ? current : [...current, streamEvent.step.id]);\n      return;\n    }''', 1)
+          elif 'current.includes(streamEvent.step.id)' not in m:
+              raise SystemExit('step_completed anchor not found')
+
+          runsetup = '''            <RunSetup\n              mode={mode}\n              modes={modes}'''
+          if runsetup in m:
+              m = m.replace(runsetup, '''            <RunSetup\n              mode={mode}\n              fresh={!conversation}\n              modes={modes}''', 1)
+          elif 'fresh={!conversation}' not in m:
+              raise SystemExit('RunSetup call anchor not found')
+
+          council = '''              <CouncilWork\n                steps={displayedSteps}\n                loading={loading}\n                inspection={inspection}\n                onInspect={toggleInspector}\n              />'''
+          if council in m:
+              m = m.replace(council, '''              <CouncilWork\n                steps={displayedSteps}\n                loading={loading}\n                inspection={inspection}\n                completedStepIds={completedStepIds}\n                onInspect={toggleInspector}\n              />''', 1)
+          elif 'completedStepIds={completedStepIds}' not in m:
+              raise SystemExit('CouncilWork call anchor not found')
+          main.write_text(m)
+
+          css = Path('apps/web/src/styles.css')
+          styles = css.read_text()
+          mobile = '''\n/* keep recent conversations reachable on small screens */\n@media (max-width: 760px) {\n  .sidebar .conversation-list {\n    grid-column: 1 / -1;\n    grid-row: 2;\n    display: flex;\n    gap: 6px;\n    min-width: 0;\n    overflow-x: auto;\n    padding: 8px 0 0;\n    scrollbar-width: thin;\n  }\n  .sidebar .conversation-list > .eyebrow { display: none; }\n  .sidebar .conversation-link { flex: 0 0 min(72vw, 250px); }\n}\n'''
+          if 'keep recent conversations reachable on small screens' not in styles:
+              styles += mobile
+          css.write_text(styles)
+          PY
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Commit verified fixes
+        run: |
+          rm .github/workflows/apply-pr12-review-fixes.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/main.tsx apps/web/src/reasoning-surface.tsx apps/web/src/styles.css .github/workflows/apply-pr12-review-fixes.yml
+          git commit -m "fix: address reasoning UI review feedback"
+          git push origin HEAD:feat/reasoning-first-ui
