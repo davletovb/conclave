@@ -310,13 +310,18 @@ export class Orchestrator {
 
       if (request.mode === "research-council") {
         this.requireParticipants(request, 2);
-        const research = await Promise.all(request.participants.map((model, index) => this.executeStep({
-          id: makeStepId("research", index),
-          kind: "research",
-          model,
-          prompt: `You are one member of a research council. ${researchAngles[index % researchAngles.length]} Use only knowledge and context actually available to you; do not claim that you browsed, ran experiments, or consulted sources unless that happened in this run. Clearly mark uncertainty.\n\nQuestion:\n${request.prompt}`,
-          history: request.history,
-        }, runId, emit)));
+        const passCount = Math.max(researchAngles.length, request.participants.length);
+        const research = await Promise.all(Array.from({ length: passCount }, (_, index) => {
+          const model = request.participants[index % request.participants.length];
+          const angle = researchAngles[index % researchAngles.length];
+          return this.executeStep({
+            id: makeStepId("research", index),
+            kind: "research",
+            model,
+            prompt: `You are one member of a research council. ${angle} Use only knowledge and context actually available to you; do not claim that you browsed, ran experiments, or consulted sources unless that happened in this run. Clearly mark uncertainty.\n\nQuestion:\n${request.prompt}`,
+            history: request.history,
+          }, runId, emit);
+        }));
         const synthesizer = request.synthesizer ?? request.participants[0];
         const synthesis = await this.executeStep({
           id: makeStepId("synthesis", 0),
