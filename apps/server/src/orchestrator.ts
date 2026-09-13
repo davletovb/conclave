@@ -99,6 +99,7 @@ function cancelledError() {
 }
 
 function isRetryableStepError(error: unknown) {
+  if (isRateLimitError(error)) return false;
   const message = errorMessage(error);
   if (
     /abort|cancel|rate.?limit|quota|usage limit|auth|login|billing|api.?key|permission|unsupported|invalid request/i.test(

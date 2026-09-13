@@ -43,8 +43,11 @@ class UsageMockProvider extends MockProvider {
 }
 
 class RateLimitedProvider extends MockProvider {
+  calls = 0;
+
   override async generate(request: ProviderRequest) {
-    if (request.model) throw new Error("Rate limit exceeded; try again later");
+    this.calls += 1;
+    if (request.model) throw new Error("Too many requests; try again later");
     return super.generate(request);
   }
 }
@@ -411,13 +414,16 @@ describe("Orchestrator", () => {
       mode: "single",
       prompt: "Hit limit",
       participants: [participants[0]],
+      budget: { maxCalls: 2, maxRounds: 1 },
     }, {
       runId: "limit-test",
       emit: event => events.push(event),
-    })).rejects.toThrow(/rate limit/i);
+    })).rejects.toThrow(/too many requests/i);
 
     const notice = events.find((event): event is Extract<OrchestrationStreamEvent, { type: "rate_limit" }> => event.type === "rate_limit");
     expect(notice?.notice).toMatchObject({ provider: "mock", model: "mock-gpt", stepId: "answer-1" });
+    expect(limited.calls).toBe(1);
+    expect(events.some(event => event.type === "step_retrying")).toBe(false);
   });
 
   it("propagates run cancellation into the active provider call", async () => {
