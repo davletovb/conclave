@@ -16,7 +16,7 @@ Conclave is a personal multi-model reasoning environment: one interface where GP
 - **Research Council** — selected models examine evidence, alternatives, implementation risks, and skepticism before synthesis; it does not pretend external browsing occurred
 - **Planner → Executors** — the first model plans, the remaining selected models execute in parallel, and a reviewer produces the final answer
 
-The architecture is deliberately provider-agnostic so subscription-backed runtimes can be added behind adapters without changing the UI or orchestration engine. Multi-stage modes have explicit bounded stages; Debate additionally clamps rounds to 1–3. Per-run budget and cancellation controls are the next roadmap item.
+The architecture is deliberately provider-agnostic so subscription-backed runtimes can be added behind adapters without changing the UI or orchestration engine. Multi-stage modes have explicit bounded stages, and Debate clamps critique rounds to 1–3.
 
 ## Repository structure
 
@@ -47,6 +47,22 @@ Claude paid plans can separately enable Anthropic **usage credits**. If usage cr
 Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex and Grok ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
 
 Conversations and run state are persisted locally. A run is owned by the server rather than by one browser request, so closing or refreshing the page does not cancel it. The browser reconnects to the run event log and replays anything it missed. If the Conclave server itself stops during a run, startup reconciles any already-persisted terminal event first; only genuinely unfinished work is marked `interrupted` and offered for a new attempt in the same conversation.
+
+## Run controls and subscription usage
+
+Each persistent run has a server-enforced budget. The default is **12 model calls per attempt**; the UI can choose a lower or higher cap up to the server hard ceiling of **64**. Conclave calculates the complete call count for the chosen orchestration mode before the first provider call and rejects a run that cannot fit within its budget. Debate additionally has a **1–3 round** hard limit.
+
+The web UI shows planned calls before submission and live `calls started / calls completed` telemetry while a run is executing. Token counts are shown when the underlying runtime reports them; token reporting is best-effort because the three subscription runtimes expose different levels of telemetry and an interrupted call may not produce a final token update.
+
+Active runs have a **Stop** control. Cancellation propagates into the current local provider runtime rather than merely disconnecting the browser:
+
+- OpenAI Codex — `turn/interrupt`
+- Claude Code — terminate that call's non-interactive Claude child process
+- Grok Build — close that call's dedicated ACP process
+
+Cancelled attempts retain their already-persisted partial output and can be resumed as a new attempt.
+
+Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code and Grok Build ACP do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
 
 ## Run locally
 
@@ -79,9 +95,11 @@ The persistent runtime API is:
 - `GET /conversations` — recent conversations
 - `GET /conversations/:id` — one conversation with messages
 - `POST /runs` — start a background orchestration run
-- `GET /runs/:id` — inspect persisted run state
+- `GET /runs/:id` — inspect persisted run state, budget, and usage
 - `GET /runs/:id/events?after=<seq>&follow=1` — replay and follow the run's NDJSON event log
-- `POST /runs/:id/resume` — restart a failed/interrupted run as the next attempt
+- `POST /runs/:id/cancel` — stop an active run/provider call
+- `POST /runs/:id/resume` — restart a failed/interrupted/cancelled run as the next attempt
+- `GET /provider-limits` — available structured subscription-limit snapshots
 
 The earlier `POST /orchestrate` and `POST /orchestrate/stream` endpoints remain available for compatibility, but the web app now uses persistent runs.
 
@@ -163,4 +181,5 @@ GitHub Actions runs the same checks on pull requests.
 4. ✅ Normalized streaming event protocol for partial output and future tool events
 5. ✅ Persistent conversations and resumable orchestration runs
 6. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
-7. Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
+7. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
+8. Custom workflow graph/presets and richer run inspection
