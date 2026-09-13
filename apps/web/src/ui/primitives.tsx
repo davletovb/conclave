@@ -177,7 +177,14 @@ export function Layer({
     const container = containerRef.current;
     const target = initialFocus?.current ?? (container ? focusables(container)[0] : null);
     target?.focus();
-    return () => previous?.focus?.();
+    return () => {
+      // Restore focus only when this layer still owns it. An action that runs
+      // as the layer closes — "jump to the prompt", say — has deliberately
+      // moved focus somewhere better, and pulling it back would undo that.
+      const active = document.activeElement as HTMLElement | null;
+      const ours = !active || active === document.body || container?.contains(active);
+      if (ours) previous?.focus?.();
+    };
   }, [initialFocus]);
 
   function onKeyDown(event: React.KeyboardEvent) {

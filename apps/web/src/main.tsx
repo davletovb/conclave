@@ -383,7 +383,7 @@ function App() {
     setSynthesizerKey(run.request.synthesizer ? modelKey(run.request.synthesizer) : "");
     setMaxCalls(run.request.budget?.maxCalls ?? 12);
     setMaxRounds(run.request.budget?.maxRounds ?? run.request.maxRounds ?? 1);
-    setRunStartedAt(Date.parse(run.createdAt) || Date.now());
+    setRunStartedAt(Date.parse(run.attemptStartedAt ?? run.createdAt) || Date.now());
     if (run.request.mode === "custom" && run.request.workflow) {
       setWorkflowText(serializeWorkflow(run.request.workflow));
       const preset = workflowPresetsRef.current.find(item => item.graph.id && item.graph.id === run.request.workflow?.id);
@@ -1214,7 +1214,7 @@ function App() {
                 loading={loading}
                 workflowSlot={mode === "custom" ? (
                   <WorkflowEditor
-                    graph={workflowState.graph}
+                    graph={workflowState.draft}
                     text={workflowText}
                     error={workflowState.error}
                     presets={workflowPresets}

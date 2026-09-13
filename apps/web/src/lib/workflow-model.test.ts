@@ -87,19 +87,43 @@ describe("graph editing", () => {
     expect(validateWorkflow(emptyWorkflow()).error).toBe("");
   });
 
-  it("adds nodes with unique ids and keeps the graph parseable once wired up", () => {
+  it("adds nodes with unique ids, already wired into the output", () => {
     const added = addNode(graph(), "critique");
     expect(added.nodes.at(-1)?.id).toBe("critique");
     const twice = addNode(added, "critique");
     expect(twice.nodes.at(-1)?.id).toBe("critique-2");
-    // A brand new node is not yet connected to the output, which the editor
-    // surfaces as a validation error until the user wires it in.
-    expect(validateWorkflow(twice).error).toMatch(/not connected/);
-    expect(validateWorkflow(toggleDependency(
-      toggleDependency(twice, "final", "critique"),
-      "final",
-      "critique-2",
-    )).error).toBe("");
+
+    // A node that feeds nothing is never what the user meant, and it would
+    // invalidate the graph the moment it appeared.
+    expect(twice.nodes.find(node => node.id === "final")?.dependsOn)
+      .toEqual(["a", "b", "critique", "critique-2"]);
+    expect(validateWorkflow(twice).error).toBe("");
+  });
+
+  it("keeps an editable draft when an edit leaves the graph unrunnable", () => {
+    // Detaching a node from the output is a legitimate step mid-edit; losing
+    // the whole structured editor at that moment is not.
+    const detached = toggleDependency(graph(), "final", "b");
+    const parsed = validateWorkflow(detached);
+    expect(parsed.error).toMatch(/not connected/);
+    expect(parsed.graph).toBeUndefined();
+    expect(parsed.draft?.nodes).toHaveLength(3);
+
+    const cyclic = graph();
+    cyclic.nodes[0].dependsOn = ["final"];
+    expect(validateWorkflow(cyclic).draft?.nodes).toHaveLength(3);
+
+    // Structural damage leaves nothing coherent to render, so no draft.
+    expect(parseWorkflow("{oops}").draft).toBeUndefined();
+    expect(parseWorkflow(JSON.stringify({ name: "x", nodes: [], outputNodeId: "a" })).draft).toBeUndefined();
+
+    const badKind = graph();
+    (badKind.nodes[0] as { kind: string }).kind = "vibes";
+    expect(validateWorkflow(badKind).draft).toBeUndefined();
+
+    // A valid graph is both runnable and editable.
+    const good = validateWorkflow(graph());
+    expect(good.graph).toBe(good.draft);
   });
 
   it("removes a node from dependencies and reassigns the output", () => {

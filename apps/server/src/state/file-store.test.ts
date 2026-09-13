@@ -76,6 +76,26 @@ describe("FileStateStore", () => {
     expect(conversation?.lastRunId).toBe(second.run.id);
   });
 
+  it("moves the attempt start timestamp on resume while createdAt stays put", async () => {
+    const { store } = await tempStore();
+    const created = await store.createRun({
+      mode: "single",
+      prompt: "Long running question",
+      participants: [participant],
+    });
+    expect(created.run.attemptStartedAt).toBe(created.run.createdAt);
+
+    await store.updateRun(created.run.id, { status: "interrupted", error: "stopped" });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const resumed = await store.prepareResume(created.run.id);
+
+    // Elapsed time is measured from the current attempt, so a run resumed
+    // hours later must not report the whole wall-clock gap.
+    expect(resumed.createdAt).toBe(created.run.createdAt);
+    expect(resumed.attempt).toBe(2);
+    expect(Date.parse(resumed.attemptStartedAt!)).toBeGreaterThan(Date.parse(resumed.createdAt));
+  });
+
   it("reconciles a durable run_completed event after a crash before state commit", async () => {
     const { dir, store } = await tempStore();
     const created = await store.createRun({

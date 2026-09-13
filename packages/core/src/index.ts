@@ -272,6 +272,12 @@ export interface StoredRun {
   userMessageId: string;
   status: RunStatus;
   attempt: number;
+  /**
+   * When the current attempt started. Unlike createdAt this moves with each
+   * resume, so elapsed time reflects the attempt rather than the whole run.
+   * Absent on runs persisted before it existed; fall back to createdAt.
+   */
+  attemptStartedAt?: string;
   request: OrchestrationRequest;
   usage: RunUsage;
   createdAt: string;

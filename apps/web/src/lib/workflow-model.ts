@@ -17,7 +17,17 @@ const kindSet = new Set<string>(workflowKinds);
 const NODE_ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const MAX_NODES = 64;
 
-export type ParsedWorkflow = { graph?: WorkflowGraph; error: string };
+export type ParsedWorkflow = {
+  /** Structurally sound and valid to run. */
+  graph?: WorkflowGraph;
+  /**
+   * Structurally sound enough to keep editing, even when a rule below fails.
+   * An edit that transiently disconnects a node must not take the editor away
+   * from the user and leave them with only the raw JSON.
+   */
+  draft?: WorkflowGraph;
+  error: string;
+};
 
 /**
  * Mirrors the server's graph validation so the editor can refuse a run before
@@ -80,21 +90,25 @@ export function validateWorkflow(graph: WorkflowGraph): ParsedWorkflow {
     byId.set(candidate.id, candidate);
   }
 
+  // Past this point the graph can be rendered and edited, so every remaining
+  // rule reports its error alongside a draft the editor keeps working on.
+  const draft = graph;
+
   if (!byId.has(graph.outputNodeId)) {
-    return { error: `Output node '${graph.outputNodeId}' does not exist.` };
+    return { draft, error: `Output node '${graph.outputNodeId}' does not exist.` };
   }
 
   for (const node of graph.nodes) {
     const dependencies = node.dependsOn ?? [];
     if (new Set(dependencies).size !== dependencies.length) {
-      return { error: `Node '${node.id}' contains duplicate dependencies.` };
+      return { draft, error: `Node '${node.id}' contains duplicate dependencies.` };
     }
     for (const dependency of dependencies) {
-      if (dependency === node.id) return { error: `Node '${node.id}' cannot depend on itself.` };
-      if (!byId.has(dependency)) return { error: `Node '${node.id}' depends on missing node '${dependency}'.` };
+      if (dependency === node.id) return { draft, error: `Node '${node.id}' cannot depend on itself.` };
+      if (!byId.has(dependency)) return { draft, error: `Node '${node.id}' depends on missing node '${dependency}'.` };
     }
     const hidden = explicitDependencyRefs(node.promptTemplate).find(reference => !dependencies.includes(reference));
-    if (hidden) return { error: `Node '${node.id}' uses {{dep.${hidden}}} without declaring it.` };
+    if (hidden) return { draft, error: `Node '${node.id}' uses {{dep.${hidden}}} without declaring it.` };
   }
 
   const state = new Map<string, "visiting" | "done">();
@@ -110,16 +124,16 @@ export function validateWorkflow(graph: WorkflowGraph): ParsedWorkflow {
     return true;
   };
   if (!graph.nodes.every(node => visit(node.id))) {
-    return { error: "Workflow graph contains a dependency cycle." };
+    return { draft, error: "Workflow graph contains a dependency cycle." };
   }
 
   const reachable = ancestorsOf(graph, graph.outputNodeId);
   const unused = graph.nodes.filter(node => !reachable.has(node.id)).map(node => node.id);
   if (unused.length > 0) {
-    return { error: `Node${unused.length === 1 ? "" : "s"} not connected to the output: ${unused.join(", ")}.` };
+    return { draft, error: `Node${unused.length === 1 ? "" : "s"} not connected to the output: ${unused.join(", ")}.` };
   }
 
-  return { graph, error: "" };
+  return { graph, draft, error: "" };
 }
 
 export function explicitDependencyRefs(template: string) {
@@ -234,7 +248,13 @@ export function addNode(graph: WorkflowGraph, kind: OrchestrationStepKind = "ans
     model: { type: "participant", index: Math.max(0, requiredParticipants(graph) - 1) },
     promptTemplate: "{{prompt}}",
   };
-  return { ...graph, nodes: [...graph.nodes, node] };
+
+  // Wire the new node into the output so the graph stays runnable the moment it
+  // appears; it has no dependencies of its own, so this can never form a cycle.
+  const nodes = [...graph.nodes, node].map(candidate => (candidate.id === graph.outputNodeId
+    ? { ...candidate, dependsOn: [...(candidate.dependsOn ?? []), id] }
+    : candidate));
+  return { ...graph, nodes };
 }
 
 export function removeNode(graph: WorkflowGraph, nodeId: string): WorkflowGraph {

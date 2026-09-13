@@ -303,6 +303,7 @@ export class FileStateStore {
         userMessageId,
         status: "queued",
         attempt: 1,
+        attemptStartedAt: timestamp,
         request: cleanRequest(request),
         usage: emptyRunUsage(),
         createdAt: timestamp,
@@ -381,10 +382,12 @@ export class FileStateStore {
 
       const previousAttempt = run.attempt;
       await this.archiveRunEvents(run.id, previousAttempt);
+      const resumedAt = now();
       run.status = "queued";
       run.attempt += 1;
       run.usage = emptyRunUsage();
-      run.updatedAt = now();
+      run.attemptStartedAt = resumedAt;
+      run.updatedAt = resumedAt;
       delete run.error;
       delete run.result;
       delete run.rateLimit;
