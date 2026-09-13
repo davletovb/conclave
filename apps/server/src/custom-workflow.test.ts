@@ -41,6 +41,28 @@ class SchedulingProvider extends MockProvider {
   }
 }
 
+class FailingWorkflowProvider extends MockProvider {
+  siblingAborted = false;
+
+  override async generate(request: ProviderRequest) {
+    const prompt = request.messages.at(-1)?.content ?? "";
+    if (prompt === "slow-sibling") {
+      return new Promise<never>((_resolve, reject) => {
+        const abort = () => {
+          this.siblingAborted = true;
+          const error = new Error("slow sibling aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (request.signal?.aborted) return abort();
+        request.signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
+    if (prompt === "failing-branch") throw new Error("branch exploded");
+    return super.generate(request);
+  }
+}
+
 async function waitFor(predicate: () => boolean) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;
@@ -158,6 +180,35 @@ describe("custom workflow graphs", () => {
     expect(provider.started.indexOf("after-fast")).toBeLessThan(provider.started.indexOf("final"));
   });
 
+  it("aborts and settles sibling work when one workflow branch fails", async () => {
+    const provider = new FailingWorkflowProvider();
+    const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
+    const events: OrchestrationStreamEvent[] = [];
+
+    await expect(orchestrator.run({
+      mode: "custom",
+      prompt: "fail cleanly",
+      participants,
+      workflow: {
+        name: "Failing branches",
+        outputNodeId: "final",
+        nodes: [
+          { id: "slow", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: "slow-sibling" },
+          { id: "bad", kind: "answer", model: { type: "participant", index: 1 }, promptTemplate: "failing-branch" },
+          { id: "final", kind: "synthesis", model: { type: "participant", index: 0 }, dependsOn: ["slow", "bad"], promptTemplate: "final" },
+        ],
+      },
+    }, {
+      runId: "failing-workflow",
+      emit: event => events.push(event),
+    })).rejects.toThrow("branch exploded");
+
+    expect(provider.siblingAborted).toBe(true);
+    expect(events.some(event => event.type === "error" && event.stepId === "bad" && /branch exploded/.test(event.message))).toBe(true);
+    expect(events.some(event => event.type === "error" && event.stepId === "slow")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "error", runId: "failing-workflow", message: "branch exploded" });
+  });
+
   it("rejects cycles before spending provider calls", async () => {
     const provider = new RecordingProvider();
     const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
@@ -179,6 +230,37 @@ describe("custom workflow graphs", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("rejects malformed nodes before spending provider calls", async () => {
+    const provider = new RecordingProvider();
+    const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
+    const malformed = {
+      name: "Malformed",
+      outputNodeId: "bad",
+      nodes: [null],
+    } as unknown as WorkflowGraph;
+
+    await expect(orchestrator.run({
+      mode: "custom",
+      prompt: "Do not run",
+      participants,
+      workflow: malformed,
+    })).rejects.toThrow(/node must be an object/i);
+    expect(provider.calls).toHaveLength(0);
+
+    const nonStringTemplate = {
+      name: "Bad template",
+      outputNodeId: "bad",
+      nodes: [{ id: "bad", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: 42 }],
+    } as unknown as WorkflowGraph;
+    await expect(orchestrator.run({
+      mode: "custom",
+      prompt: "Do not run",
+      participants,
+      workflow: nonStringTemplate,
+    })).rejects.toThrow(/string prompt template/i);
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("rejects unsupported node kinds before spending provider calls", async () => {
     const provider = new RecordingProvider();
     const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
@@ -196,6 +278,27 @@ describe("custom workflow graphs", () => {
       participants,
       workflow: invalid,
     })).rejects.toThrow(/unsupported kind/i);
+
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("rejects nodes that do not contribute to the output", async () => {
+    const provider = new RecordingProvider();
+    const orchestrator = new Orchestrator(new Map([[provider.id, provider]]));
+
+    await expect(orchestrator.run({
+      mode: "custom",
+      prompt: "Do not run",
+      participants,
+      workflow: {
+        name: "Unused node",
+        outputNodeId: "used",
+        nodes: [
+          { id: "used", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: "Used" },
+          { id: "leftover", kind: "answer", model: { type: "participant", index: 1 }, promptTemplate: "Leftover" },
+        ],
+      },
+    })).rejects.toThrow(/not connected to output/i);
 
     expect(provider.calls).toHaveLength(0);
   });
