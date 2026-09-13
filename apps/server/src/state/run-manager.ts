@@ -80,11 +80,14 @@ export class RunManager {
     if (isTerminal(run.status)) return run;
 
     // Completion wins a race with cancellation once its terminal event is
-    // already durable, even if state.json has not yet caught up.
+    // durable, even if state.json has not yet caught up.
     await this.flush(runId);
     const records = await this.store.readRunEvents(runId);
-    if (records.some(record => record.attempt === run.attempt && record.event.type === "run_completed")) {
-      return this.store.getRun(runId);
+    const durableCompletion = [...records]
+      .reverse()
+      .find(record => record.attempt === run.attempt && record.event.type === "run_completed");
+    if (durableCompletion?.event.type === "run_completed") {
+      return this.store.completeRun(runId, durableCompletion.event.result);
     }
 
     const requestedAt = new Date().toISOString();
