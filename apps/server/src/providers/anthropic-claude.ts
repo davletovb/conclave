@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type {
   ModelRef,
   ProviderAdapter,
+  ProviderEventSink,
   ProviderRequest,
   ProviderResponse,
   ProviderStatus,
@@ -22,7 +23,7 @@ type RunResult = {
 };
 
 export interface ClaudeCliRunner {
-  run(args: string[], timeoutMs?: number): Promise<RunResult>;
+  run(args: string[], timeoutMs?: number, onStdoutLine?: (line: string) => void): Promise<RunResult>;
 }
 
 const CLAUDE_MODELS: ModelRef[] = [
@@ -56,9 +57,6 @@ const TEXT_ONLY_SYSTEM = [
 function subscriptionOnlyEnv() {
   const env = { ...process.env };
 
-  // Claude Code gives environment credentials precedence over the saved
-  // claude.ai login. Remove metered/platform routes so this adapter cannot
-  // silently switch away from the user's Claude subscription.
   delete env.ANTHROPIC_API_KEY;
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.CLAUDE_CODE_USE_BEDROCK;
@@ -68,8 +66,24 @@ function subscriptionOnlyEnv() {
   return env;
 }
 
+function partialTextDelta(rawLine: string) {
+  const line = rawLine.trim();
+  if (!line) return "";
+
+  try {
+    const outer = JSON.parse(line) as Record<string, unknown>;
+    if (outer.type !== "stream_event") return "";
+    const event = outer.event as Record<string, unknown> | undefined;
+    if (event?.type !== "content_block_delta") return "";
+    const delta = event.delta as Record<string, unknown> | undefined;
+    return delta?.type === "text_delta" && typeof delta.text === "string" ? delta.text : "";
+  } catch {
+    return "";
+  }
+}
+
 export class NativeClaudeCliRunner implements ClaudeCliRunner {
-  run(args: string[], timeoutMs = 180_000): Promise<RunResult> {
+  run(args: string[], timeoutMs = 180_000, onStdoutLine?: (line: string) => void): Promise<RunResult> {
     return new Promise((resolve, reject) => {
       const child = spawn("claude", args, {
         env: subscriptionOnlyEnv(),
@@ -78,6 +92,7 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
 
       let stdout = "";
       let stderr = "";
+      let lineBuffer = "";
       let settled = false;
 
       const timer = setTimeout(() => {
@@ -89,7 +104,16 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
 
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
-      child.stdout.on("data", chunk => { stdout += chunk; });
+      child.stdout.on("data", chunk => {
+        const text = String(chunk);
+        stdout += text;
+        if (!onStdoutLine) return;
+
+        lineBuffer += text;
+        const lines = lineBuffer.split(/\r?\n/);
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) onStdoutLine(line);
+      });
       child.stderr.on("data", chunk => { stderr += chunk; });
 
       child.once("error", error => {
@@ -103,6 +127,7 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (onStdoutLine && lineBuffer) onStdoutLine(lineBuffer);
         resolve({ stdout, stderr, code: code ?? 1 });
       });
     });
@@ -164,7 +189,7 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
     return CLAUDE_MODELS;
   }
 
-  async generate(request: ProviderRequest): Promise<ProviderResponse> {
+  async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
     await this.requireSubscriptionAccount();
     const startedAt = Date.now();
     const prompt = this.buildPrompt(request);
@@ -173,6 +198,7 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
     const result = await this.runner.run([
       "-p",
       "--output-format", "stream-json",
+      "--include-partial-messages",
       "--verbose",
       "--safe-mode",
       "--no-session-persistence",
@@ -184,7 +210,10 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
       "--model", request.model,
       "--system-prompt", TEXT_ONLY_SYSTEM,
       prompt,
-    ], timeoutMs);
+    ], timeoutMs, line => {
+      const delta = partialTextDelta(line);
+      if (delta) emit?.({ type: "text_delta", delta });
+    });
 
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
