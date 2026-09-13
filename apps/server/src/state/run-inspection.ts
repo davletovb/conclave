@@ -79,6 +79,7 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
   let rateLimit = undefined as RunAttemptInspection["rateLimit"];
   let error = undefined as string | undefined;
   let terminalAt: string | undefined;
+  let sawStepFailure = false;
 
   for (const record of records) {
     const event = record.event;
@@ -118,8 +119,8 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
       steps.set(event.step.id, existing);
     } else if (event.type === "error") {
       error = event.message;
-      terminalAt = record.at;
       if (event.stepId) {
+        sawStepFailure = true;
         const existing = steps.get(event.stepId) ?? {
           id: event.stepId,
           dependsOn: [],
@@ -129,10 +130,13 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
         existing.completedAt = record.at;
         existing.durationMs = durationMs(existing.startedAt, record.at);
         steps.set(event.stepId, existing);
+      } else {
+        terminalAt = record.at;
+        // Once the actual failing step has been identified, any still-running
+        // sibling work in the same failed attempt was aborted by workflow
+        // teardown rather than independently failing.
+        finishRunningSteps(steps, sawStepFailure ? "cancelled" : "failed", record.at);
       }
-      // A top-level orchestration error is terminal for the attempt. Any
-      // provider step still open at that point did not complete successfully.
-      finishRunningSteps(steps, "failed", record.at);
     } else if (event.type === "run_cancelled") {
       error = event.message;
       terminalAt = record.at;
