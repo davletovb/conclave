@@ -29,6 +29,9 @@ jobs:
           end = next(i for i in range(start, len(source)) if source[i].strip() == 'PY')
           body = '\n'.join(line[10:] if line.startswith('          ') else line for line in source[start:end])
           body = body.replace("if old not in text:\n        raise SystemExit(f'missing target: {label}')", "if old not in text:\n        if label in {'inspector attempts', 'inspector step error'}:\n            return text\n        raise SystemExit(f'missing target: {label}')")
+          body = body.replace(r'join("\n\n---\n\n")', r'join("\\n\\n---\\n\\n")')
+          body = body.replace(r'debateTranscript += "\n\n" +', r'debateTranscript += "\\n\\n" +')
+          body = body.replace(r'.join("\n\n");', r'.join("\\n\\n");')
           exec(compile(body, 'apply-recovery.py', 'exec'))
           PY
       - run: pnpm install --no-frozen-lockfile
