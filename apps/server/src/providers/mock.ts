@@ -20,6 +20,12 @@ export class MockProvider implements ProviderAdapter {
   }
 
   async generate(request: ProviderRequest): Promise<ProviderResponse> {
+    if (request.signal?.aborted) {
+      const error = new Error("Mock request cancelled");
+      error.name = "AbortError";
+      throw error;
+    }
+
     const started = Date.now();
     const latest = request.messages.at(-1)?.content ?? "";
     const persona = request.model.includes("claude")
