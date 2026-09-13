@@ -39,6 +39,19 @@ const modes: { id: OrchestrationMode; label: string; description: string }[] = [
   { id: "custom", label: "Custom Workflow", description: "Run a reusable or edited workflow graph" },
 ];
 
+const workflowKinds = new Set([
+  "answer",
+  "critique",
+  "revision",
+  "synthesis",
+  "judgment",
+  "route",
+  "research",
+  "plan",
+  "execution",
+  "review",
+]);
+
 type Theme = "dark" | "light";
 
 function initialTheme(): Theme {
@@ -54,7 +67,7 @@ function minimumParticipants(mode: OrchestrationMode) {
 function requiredWorkflowParticipants(workflow?: WorkflowGraph) {
   if (!workflow) return 1;
   const indices = workflow.nodes
-    .filter(node => node.model?.type === "participant")
+    .filter(node => node?.model?.type === "participant")
     .map(node => node.model.type === "participant" ? node.model.index : -1);
   return Math.max(1, ...indices.map(index => index + 1));
 }
@@ -148,13 +161,101 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function parseWorkflow(raw: string) {
+function parseWorkflow(raw: string): { graph?: WorkflowGraph; error: string } {
   if (!raw.trim()) return { graph: undefined, error: "Choose a preset or enter a workflow graph." };
   try {
-    const graph = JSON.parse(raw) as WorkflowGraph;
-    if (!graph || typeof graph !== "object" || !Array.isArray(graph.nodes) || !graph.outputNodeId || !graph.name) {
-      return { graph: undefined, error: "Workflow JSON must include name, nodes, and outputNodeId." };
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { graph: undefined, error: "Workflow JSON must be an object." };
     }
+    const graph = parsed as WorkflowGraph;
+    if (typeof graph.name !== "string" || !graph.name.trim() || !Array.isArray(graph.nodes) || typeof graph.outputNodeId !== "string" || !graph.outputNodeId.trim()) {
+      return { graph: undefined, error: "Workflow JSON must include a string name, nodes array, and outputNodeId." };
+    }
+    if (graph.nodes.length === 0) return { graph: undefined, error: "Workflow must contain at least one node." };
+    if (graph.nodes.length > 64) return { graph: undefined, error: "Workflow cannot contain more than 64 nodes." };
+
+    const byId = new Map<string, WorkflowGraph["nodes"][number]>();
+    for (const candidate of graph.nodes) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return { graph: undefined, error: "Every workflow node must be an object." };
+      }
+      if (typeof candidate.id !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(candidate.id)) {
+        return { graph: undefined, error: `Invalid workflow node ID '${String(candidate.id)}'.` };
+      }
+      if (byId.has(candidate.id)) return { graph: undefined, error: `Workflow node '${candidate.id}' is duplicated.` };
+      if (typeof candidate.kind !== "string" || !workflowKinds.has(candidate.kind)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' has unsupported kind '${String(candidate.kind)}'.` };
+      }
+      if (typeof candidate.promptTemplate !== "string" || !candidate.promptTemplate.trim()) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' requires a string promptTemplate.` };
+      }
+      if (!candidate.model || typeof candidate.model !== "object" || Array.isArray(candidate.model)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' needs a model selector.` };
+      }
+      if (candidate.model.type === "participant") {
+        if (!Number.isInteger(candidate.model.index) || candidate.model.index < 0) {
+          return { graph: undefined, error: `Workflow node '${candidate.id}' has an invalid participant index.` };
+        }
+      } else if (candidate.model.type !== "synthesizer") {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' has an unsupported model selector.` };
+      }
+      if (candidate.dependsOn !== undefined && !Array.isArray(candidate.dependsOn)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' dependsOn must be an array.` };
+      }
+      if ((candidate.dependsOn ?? []).some(dependency => typeof dependency !== "string")) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' dependencies must be node IDs.` };
+      }
+      byId.set(candidate.id, candidate);
+    }
+
+    if (!byId.has(graph.outputNodeId)) {
+      return { graph: undefined, error: `Workflow output node '${graph.outputNodeId}' does not exist.` };
+    }
+
+    for (const node of graph.nodes) {
+      const dependencies = node.dependsOn ?? [];
+      if (new Set(dependencies).size !== dependencies.length) {
+        return { graph: undefined, error: `Workflow node '${node.id}' contains duplicate dependencies.` };
+      }
+      for (const dependency of dependencies) {
+        if (dependency === node.id) return { graph: undefined, error: `Workflow node '${node.id}' cannot depend on itself.` };
+        if (!byId.has(dependency)) return { graph: undefined, error: `Workflow node '${node.id}' depends on missing node '${dependency}'.` };
+      }
+      const explicitRefs = [...node.promptTemplate.matchAll(/\{\{dep\.([A-Za-z][A-Za-z0-9_-]{0,63})\}\}/g)].map(match => match[1]);
+      const hidden = explicitRefs.find(reference => !dependencies.includes(reference));
+      if (hidden) return { graph: undefined, error: `Workflow node '${node.id}' references '${hidden}' without declaring it in dependsOn.` };
+    }
+
+    const state = new Map<string, "visiting" | "done">();
+    const visit = (nodeId: string): boolean => {
+      const current = state.get(nodeId);
+      if (current === "visiting") return false;
+      if (current === "done") return true;
+      state.set(nodeId, "visiting");
+      const node = byId.get(nodeId)!;
+      for (const dependency of node.dependsOn ?? []) {
+        if (!visit(dependency)) return false;
+      }
+      state.set(nodeId, "done");
+      return true;
+    };
+    if (!graph.nodes.every(node => visit(node.id))) {
+      return { graph: undefined, error: "Workflow graph contains a dependency cycle." };
+    }
+
+    const outputCone = new Set<string>();
+    const includeAncestors = (nodeId: string) => {
+      if (outputCone.has(nodeId)) return;
+      outputCone.add(nodeId);
+      for (const dependency of byId.get(nodeId)?.dependsOn ?? []) includeAncestors(dependency);
+    };
+    includeAncestors(graph.outputNodeId);
+    const unused = graph.nodes.filter(node => !outputCone.has(node.id)).map(node => node.id);
+    if (unused.length > 0) {
+      return { graph: undefined, error: `Workflow node${unused.length === 1 ? "" : "s"} not connected to output: ${unused.join(", ")}.` };
+    }
+
     return { graph, error: "" };
   } catch (cause) {
     return { graph: undefined, error: cause instanceof Error ? `Invalid workflow JSON: ${cause.message}` : "Invalid workflow JSON." };
@@ -168,6 +269,7 @@ function App() {
   const [workflowPresets, setWorkflowPresets] = useState<WorkflowPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [workflowText, setWorkflowText] = useState("");
+  const [synthesizerKey, setSynthesizerKey] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [mode, setMode] = useState<OrchestrationMode>("panel");
   const [theme, setTheme] = useState<Theme>(initialTheme);
@@ -190,6 +292,7 @@ function App() {
   const [error, setError] = useState("");
   const viewEpochRef = useRef(0);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const workflowPresetsRef = useRef<WorkflowPreset[]>([]);
   const composerRef = useRef<HTMLFormElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -216,10 +319,25 @@ function App() {
     textarea.style.overflowY = textarea.scrollHeight > 180 ? "auto" : "hidden";
   }, [prompt]);
 
+  useEffect(() => {
+    if (!inspectorOpen || !activeRunId) return;
+    const epoch = viewEpochRef.current;
+    const runId = activeRunId;
+    void refreshInspector(runId, epoch, true);
+    if (!loading) return;
+    const timer = window.setInterval(() => {
+      void refreshInspector(runId, epoch, false);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [inspectorOpen, activeRunId, loading]);
+
   const participants = useMemo(
     () => models.filter(model => selected.includes(modelKey(model))),
     [models, selected],
   );
+  const selectedSynthesizer = synthesizerKey
+    ? participants.find(model => modelKey(model) === synthesizerKey)
+    : undefined;
   const workflowState = useMemo(() => parseWorkflow(workflowText), [workflowText]);
   const activeWorkflow = mode === "custom" ? workflowState.graph : undefined;
   const workflowInvalid = mode === "custom" && !activeWorkflow;
@@ -263,7 +381,7 @@ function App() {
 
   function setPreset(presetId: string) {
     setSelectedPresetId(presetId);
-    const preset = workflowPresets.find(item => item.id === presetId);
+    const preset = workflowPresetsRef.current.find(item => item.id === presetId);
     if (preset) setWorkflowText(JSON.stringify(preset.graph, null, 2));
   }
 
@@ -273,11 +391,12 @@ function App() {
     setCancelling(run.status === "cancelling");
     setMode(run.request.mode);
     setSelected(run.request.participants.map(modelKey));
+    setSynthesizerKey(run.request.synthesizer ? modelKey(run.request.synthesizer) : "");
     setMaxCalls(run.request.budget?.maxCalls ?? 12);
     setMaxRounds(run.request.budget?.maxRounds ?? run.request.maxRounds ?? 1);
     if (run.request.mode === "custom" && run.request.workflow) {
       setWorkflowText(JSON.stringify(run.request.workflow, null, 2));
-      const preset = workflowPresets.find(item => item.graph.id && item.graph.id === run.request.workflow?.id);
+      const preset = workflowPresetsRef.current.find(item => item.graph.id && item.graph.id === run.request.workflow?.id);
       setSelectedPresetId(preset?.id ?? "");
     }
   }
@@ -310,6 +429,7 @@ function App() {
       setProviders(providerData);
       setProviderLimits(limitData);
       setConversations(conversationData);
+      workflowPresetsRef.current = presetData;
       setWorkflowPresets(presetData);
       setSelected(initialSelection(modelData));
       if (presetData[0]) {
@@ -450,6 +570,7 @@ function App() {
     setRateLimit(null);
     setInspection(null);
     setInspectorOpen(false);
+    setSynthesizerKey("");
     setLoading(false);
     setCancelling(false);
     setError("");
@@ -461,6 +582,7 @@ function App() {
   function selectMode(nextMode: OrchestrationMode) {
     setMode(nextMode);
     if (nextMode === "single") {
+      setSynthesizerKey("");
       setSelected(current => {
         const model = current[0] ?? (models[0] ? modelKey(models[0]) : undefined);
         return model ? [model] : [];
@@ -490,7 +612,13 @@ function App() {
       setSelected([key]);
       return;
     }
-    setSelected(current => current.includes(key) ? current.filter(id => id !== key) : [...current, key]);
+    setSelected(current => {
+      if (current.includes(key)) {
+        if (synthesizerKey === key) setSynthesizerKey("");
+        return current.filter(id => id !== key);
+      }
+      return [...current, key];
+    });
   }
 
   function applyStreamEvent(streamEvent: OrchestrationStreamEvent) {
@@ -683,6 +811,7 @@ function App() {
             mode,
             prompt,
             participants,
+            synthesizer: selectedSynthesizer,
             workflow: mode === "custom" ? activeWorkflow : undefined,
             budget: { maxCalls, maxRounds },
           },
@@ -768,22 +897,29 @@ function App() {
     }
   }
 
-  async function toggleInspector() {
+  async function refreshInspector(runId: string, epoch: number, showLoading: boolean) {
+    if (showLoading && isCurrent(epoch)) setInspectorLoading(true);
+    try {
+      const data = await fetch(`${API}/runs/${runId}/inspection`).then(response => readJson<RunInspection>(response));
+      if (!isCurrent(epoch)) return;
+      setInspection(data);
+    } catch (cause) {
+      if (showLoading && isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Could not load run inspection");
+      }
+    } finally {
+      if (showLoading && isCurrent(epoch)) setInspectorLoading(false);
+    }
+  }
+
+  function toggleInspector() {
     if (inspectorOpen) {
       setInspectorOpen(false);
       return;
     }
     if (!activeRunId) return;
+    setInspection(null);
     setInspectorOpen(true);
-    setInspectorLoading(true);
-    try {
-      const data = await fetch(`${API}/runs/${activeRunId}/inspection`).then(response => readJson<RunInspection>(response));
-      setInspection(data);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not load run inspection");
-    } finally {
-      setInspectorLoading(false);
-    }
   }
 
   const displayedSteps = result?.steps ?? liveSteps;
@@ -878,6 +1014,17 @@ function App() {
                     {workflowPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
                   </select>
                 </label>
+                <label className="workflow-preset-picker">
+                  <span>Synthesizer</span>
+                  <select
+                    value={selectedSynthesizer ? synthesizerKey : ""}
+                    disabled={loading || participants.length === 0}
+                    onChange={event => setSynthesizerKey(event.target.value)}
+                  >
+                    <option value="">First selected · default</option>
+                    {participants.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}</option>)}
+                  </select>
+                </label>
               </div>
               <div className="workflow-summary">
                 <span>{activeWorkflow?.nodes.length ?? 0} nodes</span>
@@ -935,7 +1082,7 @@ function App() {
 
           {activeRunId && (
             <div className="inspector-bar">
-              <button type="button" className="inspector-toggle" onClick={() => void toggleInspector()}>
+              <button type="button" className="inspector-toggle" onClick={toggleInspector}>
                 {inspectorOpen ? "Hide run inspector" : "Inspect run"}
               </button>
               <span>{activeRunId.slice(0, 8)} · {loading ? "active" : result ? "completed" : resumeRunId ? "stopped" : "saved"}</span>
