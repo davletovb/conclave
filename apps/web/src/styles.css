@@ -7,7 +7,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(circle at 70% 10%, #18202c 0, #0b0f15 34%, #07090d 72%); }
-button, textarea, select { font: inherit; }
+button, textarea, select, input { font: inherit; }
 button { color: inherit; }
 
 .shell { min-height: 100vh; display: grid; grid-template-columns: 280px minmax(0, 1fr); }
@@ -30,6 +30,7 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
 .conversation-link.active { border-color: #2d3746; background: #131a24; color: #eef3f9; }
 .conversation-link span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .conversation-link small { display: block; color: #687588; font-size: 9px; margin-top: 3px; }
+.quota { color: #8fa0b7; border: 1px solid #283444; background: #101720; border-radius: 10px; padding: 9px 10px; font-size: 10px; line-height: 1.45; }
 .status { margin-top: auto; color: #7f8b9d; font-size: 11px; display: flex; align-items: center; gap: 8px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: #6bd6a7; box-shadow: 0 0 10px rgba(107,214,167,.7); }
 
@@ -42,7 +43,7 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
 .chip { border: 1px solid #2c3543; background: #101620; padding: 8px 11px; border-radius: 999px; color: #8490a1; cursor: pointer; font-size: 12px; }
 .chip.selected { color: #f0f4fa; border-color: #69768a; background: #1b2431; }
 
-.content { flex: 1; width: min(1120px, 100%); margin: 0 auto; padding: 58px 34px 190px; }
+.content { flex: 1; width: min(1120px, 100%); margin: 0 auto; padding: 58px 34px 225px; }
 .hero { max-width: 690px; margin: 12vh auto 0; text-align: center; }
 .hero h3 { font: 500 clamp(32px, 5vw, 58px)/1.04 Georgia, serif; letter-spacing: -.045em; margin: 16px 0 18px; }
 .hero p { margin: 0 auto; max-width: 620px; color: #99a4b4; font-size: 16px; line-height: 1.6; }
@@ -58,8 +59,11 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
 @keyframes pulse { to { opacity: .2; transform: translateY(-3px); } }
 .error { margin: 18px 0; border: 1px solid #653a41; background: #2a171c; color: #ffb8c1; border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .error button { flex: 0 0 auto; border: 1px solid #8b525b; background: #381e24; color: #ffd2d7; border-radius: 9px; padding: 7px 10px; cursor: pointer; }
+.rate-limit { margin: 12px 0; border: 1px solid #64522d; background: #241f13; color: #e7cb86; border-radius: 12px; padding: 10px 14px; font-size: 11px; line-height: 1.5; }
 .results { display: grid; gap: 18px; }
 .stream-status { width: fit-content; display: flex; align-items: center; gap: 8px; color: #8ea0b7; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.run-telemetry { display: flex; flex-wrap: wrap; gap: 8px; color: #8290a3; font-size: 10px; }
+.run-telemetry span { border: 1px solid #263241; background: #0f151e; border-radius: 999px; padding: 6px 9px; }
 .final-card, .step-card { border: 1px solid #26303e; background: rgba(17,23,32,.8); border-radius: 17px; }
 .final-card { padding: 24px 26px; }
 .final-card p { margin: 12px 0 0; font-size: 16px; line-height: 1.7; white-space: pre-wrap; }
@@ -69,10 +73,18 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
 .step-meta { display: flex; justify-content: space-between; gap: 8px; color: #8390a1; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 
 .composer { position: fixed; z-index: 5; left: calc(280px + (100vw - 280px - min(1120px, calc(100vw - 280px))) / 2 + 34px); right: max(34px, calc((100vw - 280px - 1120px) / 2 + 34px)); bottom: 26px; border: 1px solid #344052; background: rgba(17,23,32,.94); backdrop-filter: blur(18px); border-radius: 18px; padding: 13px; box-shadow: 0 20px 60px rgba(0,0,0,.34); }
+.run-controls { display: flex; align-items: center; gap: 10px; padding: 0 5px 8px; color: #728095; font-size: 10px; }
+.run-controls label { display: flex; align-items: center; gap: 6px; }
+.run-controls input, .run-controls select { width: 62px; border: 1px solid #2e3949; background: #0e141d; color: #d7dfeb; border-radius: 8px; padding: 5px 7px; outline: none; }
+.run-controls select { width: 50px; }
+.budget-estimate { margin-left: auto; color: #738297; }
+.budget-estimate.warning { color: #e1b971; }
 .composer textarea { width: 100%; resize: none; border: 0; outline: 0; background: transparent; color: #f3f6fa; padding: 5px 7px 11px; line-height: 1.5; }
 .composer textarea::placeholder { color: #647184; }
-.composer-footer { display: flex; align-items: center; justify-content: space-between; color: #748196; font-size: 11px; }
+.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #748196; font-size: 11px; }
+.composer-actions { display: flex; align-items: center; gap: 8px; }
 .composer button { border: 1px solid #77869d; background: #e7edf6; color: #0c1118; border-radius: 10px; padding: 9px 14px; font-weight: 700; cursor: pointer; }
+.composer button.stop-run { border-color: #70454d; background: #2b181d; color: #ffc1ca; }
 .composer button:disabled { opacity: .45; cursor: not-allowed; }
 
 @media (max-width: 760px) {
@@ -84,9 +96,12 @@ h1 { margin: 12px 0 4px; font: 600 24px/1.1 Georgia, serif; letter-spacing: -.02
   .mobile-mode-picker select { width: 100%; border: 1px solid #313b4c; background: #151d29; color: #f0f4fa; border-radius: 10px; padding: 10px 12px; outline: none; }
   .model-picker { justify-content: flex-start; }
   .mobile-new-chat { display: inline-flex; }
-  .content { padding: 36px 18px 190px; }
+  .content { padding: 36px 18px 230px; }
   .hero { margin-top: 7vh; }
   .message { max-width: 94%; }
   .error { align-items: flex-start; flex-direction: column; }
+  .run-controls { flex-wrap: wrap; }
+  .budget-estimate { margin-left: 0; width: 100%; }
+  .composer-footer { align-items: flex-start; }
   .composer { left: 16px; right: 16px; bottom: 16px; }
 }
