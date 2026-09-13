@@ -13,9 +13,12 @@ import type {
   ProviderStatus,
   RateLimitNotice,
   RunEventRecord,
+  RunInspection,
   RunUsage,
   StartRunResponse,
   StoredRun,
+  WorkflowGraph,
+  WorkflowPreset,
 } from "@conclave/core";
 import { Markdown } from "./markdown";
 import "./styles.css";
@@ -33,7 +36,21 @@ const modes: { id: OrchestrationMode; label: string; description: string }[] = [
   { id: "router", label: "Router", description: "Choose one specialist for the task" },
   { id: "research-council", label: "Research Council", description: "Evidence, alternatives, risks, synthesis" },
   { id: "planner-executor", label: "Planner → Executors", description: "Plan, execute in parallel, review" },
+  { id: "custom", label: "Custom Workflow", description: "Run a reusable or edited workflow graph" },
 ];
+
+const workflowKinds = new Set([
+  "answer",
+  "critique",
+  "revision",
+  "synthesis",
+  "judgment",
+  "route",
+  "research",
+  "plan",
+  "execution",
+  "review",
+]);
 
 type Theme = "dark" | "light";
 
@@ -47,7 +64,15 @@ function minimumParticipants(mode: OrchestrationMode) {
   return mode === "consensus" || mode === "judge" || mode === "router" || mode === "research-council" ? 2 : 1;
 }
 
-function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds: number) {
+function requiredWorkflowParticipants(workflow?: WorkflowGraph) {
+  if (!workflow) return 1;
+  const indices = workflow.nodes
+    .filter(node => node?.model?.type === "participant")
+    .map(node => node.model.type === "participant" ? node.model.index : -1);
+  return Math.max(1, ...indices.map(index => index + 1));
+}
+
+function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds: number, workflow?: WorkflowGraph) {
   switch (mode) {
     case "single": return 1;
     case "compare": return participantCount;
@@ -60,6 +85,7 @@ function plannedCalls(mode: OrchestrationMode, participantCount: number, rounds:
     case "router": return 2;
     case "research-council": return Math.max(4, participantCount) + 1;
     case "planner-executor": return 1 + Math.max(participantCount - 1, 1) + 1;
+    case "custom": return workflow?.nodes.length ?? 0;
   }
 }
 
@@ -105,6 +131,13 @@ function durationLabel(minutes?: number) {
   return `${minutes}m`;
 }
 
+function elapsedLabel(ms?: number) {
+  if (ms === undefined) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
 function limitText(snapshot: ProviderLimitSnapshot) {
   if (!snapshot.available) return "";
   const windows = [snapshot.primary, snapshot.secondary]
@@ -128,10 +161,115 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function parseWorkflow(raw: string): { graph?: WorkflowGraph; error: string } {
+  if (!raw.trim()) return { graph: undefined, error: "Choose a preset or enter a workflow graph." };
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { graph: undefined, error: "Workflow JSON must be an object." };
+    }
+    const graph = parsed as WorkflowGraph;
+    if (typeof graph.name !== "string" || !graph.name.trim() || !Array.isArray(graph.nodes) || typeof graph.outputNodeId !== "string" || !graph.outputNodeId.trim()) {
+      return { graph: undefined, error: "Workflow JSON must include a string name, nodes array, and outputNodeId." };
+    }
+    if (graph.nodes.length === 0) return { graph: undefined, error: "Workflow must contain at least one node." };
+    if (graph.nodes.length > 64) return { graph: undefined, error: "Workflow cannot contain more than 64 nodes." };
+
+    const byId = new Map<string, WorkflowGraph["nodes"][number]>();
+    for (const candidate of graph.nodes) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return { graph: undefined, error: "Every workflow node must be an object." };
+      }
+      if (typeof candidate.id !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(candidate.id)) {
+        return { graph: undefined, error: `Invalid workflow node ID '${String(candidate.id)}'.` };
+      }
+      if (byId.has(candidate.id)) return { graph: undefined, error: `Workflow node '${candidate.id}' is duplicated.` };
+      if (typeof candidate.kind !== "string" || !workflowKinds.has(candidate.kind)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' has unsupported kind '${String(candidate.kind)}'.` };
+      }
+      if (typeof candidate.promptTemplate !== "string" || !candidate.promptTemplate.trim()) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' requires a string promptTemplate.` };
+      }
+      if (!candidate.model || typeof candidate.model !== "object" || Array.isArray(candidate.model)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' needs a model selector.` };
+      }
+      if (candidate.model.type === "participant") {
+        if (!Number.isInteger(candidate.model.index) || candidate.model.index < 0) {
+          return { graph: undefined, error: `Workflow node '${candidate.id}' has an invalid participant index.` };
+        }
+      } else if (candidate.model.type !== "synthesizer") {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' has an unsupported model selector.` };
+      }
+      if (candidate.dependsOn !== undefined && !Array.isArray(candidate.dependsOn)) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' dependsOn must be an array.` };
+      }
+      if ((candidate.dependsOn ?? []).some(dependency => typeof dependency !== "string")) {
+        return { graph: undefined, error: `Workflow node '${candidate.id}' dependencies must be node IDs.` };
+      }
+      byId.set(candidate.id, candidate);
+    }
+
+    if (!byId.has(graph.outputNodeId)) {
+      return { graph: undefined, error: `Workflow output node '${graph.outputNodeId}' does not exist.` };
+    }
+
+    for (const node of graph.nodes) {
+      const dependencies = node.dependsOn ?? [];
+      if (new Set(dependencies).size !== dependencies.length) {
+        return { graph: undefined, error: `Workflow node '${node.id}' contains duplicate dependencies.` };
+      }
+      for (const dependency of dependencies) {
+        if (dependency === node.id) return { graph: undefined, error: `Workflow node '${node.id}' cannot depend on itself.` };
+        if (!byId.has(dependency)) return { graph: undefined, error: `Workflow node '${node.id}' depends on missing node '${dependency}'.` };
+      }
+      const explicitRefs = [...node.promptTemplate.matchAll(/\{\{dep\.([A-Za-z][A-Za-z0-9_-]{0,63})\}\}/g)].map(match => match[1]);
+      const hidden = explicitRefs.find(reference => !dependencies.includes(reference));
+      if (hidden) return { graph: undefined, error: `Workflow node '${node.id}' references '${hidden}' without declaring it in dependsOn.` };
+    }
+
+    const state = new Map<string, "visiting" | "done">();
+    const visit = (nodeId: string): boolean => {
+      const current = state.get(nodeId);
+      if (current === "visiting") return false;
+      if (current === "done") return true;
+      state.set(nodeId, "visiting");
+      const node = byId.get(nodeId)!;
+      for (const dependency of node.dependsOn ?? []) {
+        if (!visit(dependency)) return false;
+      }
+      state.set(nodeId, "done");
+      return true;
+    };
+    if (!graph.nodes.every(node => visit(node.id))) {
+      return { graph: undefined, error: "Workflow graph contains a dependency cycle." };
+    }
+
+    const outputCone = new Set<string>();
+    const includeAncestors = (nodeId: string) => {
+      if (outputCone.has(nodeId)) return;
+      outputCone.add(nodeId);
+      for (const dependency of byId.get(nodeId)?.dependsOn ?? []) includeAncestors(dependency);
+    };
+    includeAncestors(graph.outputNodeId);
+    const unused = graph.nodes.filter(node => !outputCone.has(node.id)).map(node => node.id);
+    if (unused.length > 0) {
+      return { graph: undefined, error: `Workflow node${unused.length === 1 ? "" : "s"} not connected to output: ${unused.join(", ")}.` };
+    }
+
+    return { graph, error: "" };
+  } catch (cause) {
+    return { graph: undefined, error: cause instanceof Error ? `Invalid workflow JSON: ${cause.message}` : "Invalid workflow JSON." };
+  }
+}
+
 function App() {
   const [models, setModels] = useState<ModelRef[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);
+  const [workflowPresets, setWorkflowPresets] = useState<WorkflowPreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [workflowText, setWorkflowText] = useState("");
+  const [synthesizerKey, setSynthesizerKey] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [mode, setMode] = useState<OrchestrationMode>("panel");
   const [theme, setTheme] = useState<Theme>(initialTheme);
@@ -144,6 +282,9 @@ function App() {
   const [resumeRunId, setResumeRunId] = useState<string | null>(null);
   const [runUsage, setRunUsage] = useState<RunUsage>(freshUsage);
   const [rateLimit, setRateLimit] = useState<RateLimitNotice | null>(null);
+  const [inspection, setInspection] = useState<RunInspection | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorLoading, setInspectorLoading] = useState(false);
   const [maxCalls, setMaxCalls] = useState(12);
   const [maxRounds, setMaxRounds] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -151,6 +292,7 @@ function App() {
   const [error, setError] = useState("");
   const viewEpochRef = useRef(0);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const workflowPresetsRef = useRef<WorkflowPreset[]>([]);
   const composerRef = useRef<HTMLFormElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -177,14 +319,34 @@ function App() {
     textarea.style.overflowY = textarea.scrollHeight > 180 ? "auto" : "hidden";
   }, [prompt]);
 
+  useEffect(() => {
+    if (!inspectorOpen || !activeRunId) return;
+    const epoch = viewEpochRef.current;
+    const runId = activeRunId;
+    void refreshInspector(runId, epoch, true);
+    if (!loading) return;
+    const timer = window.setInterval(() => {
+      void refreshInspector(runId, epoch, false);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [inspectorOpen, activeRunId, loading]);
+
   const participants = useMemo(
     () => models.filter(model => selected.includes(modelKey(model))),
     [models, selected],
   );
-  const requiredParticipants = minimumParticipants(mode);
+  const selectedSynthesizer = synthesizerKey
+    ? participants.find(model => modelKey(model) === synthesizerKey)
+    : undefined;
+  const workflowState = useMemo(() => parseWorkflow(workflowText), [workflowText]);
+  const activeWorkflow = mode === "custom" ? workflowState.graph : undefined;
+  const workflowInvalid = mode === "custom" && !activeWorkflow;
+  const requiredParticipants = mode === "custom"
+    ? requiredWorkflowParticipants(activeWorkflow)
+    : minimumParticipants(mode);
   const participantShortfall = participants.length < requiredParticipants;
-  const expectedCalls = plannedCalls(mode, participants.length, maxRounds);
-  const budgetShortfall = !participantShortfall && expectedCalls > maxCalls;
+  const expectedCalls = plannedCalls(mode, participants.length, maxRounds, activeWorkflow);
+  const budgetShortfall = !participantShortfall && !workflowInvalid && expectedCalls > maxCalls;
 
   const priorMessages = useMemo(
     () => conversation?.messages.filter(
@@ -217,14 +379,26 @@ function App() {
     return viewEpochRef.current === epoch;
   }
 
+  function setPreset(presetId: string) {
+    setSelectedPresetId(presetId);
+    const preset = workflowPresetsRef.current.find(item => item.id === presetId);
+    if (preset) setWorkflowText(JSON.stringify(preset.graph, null, 2));
+  }
+
   function adoptRun(run: StoredRun) {
     setRunUsage(run.usage ?? freshUsage());
     setRateLimit(run.rateLimit ?? null);
     setCancelling(run.status === "cancelling");
     setMode(run.request.mode);
     setSelected(run.request.participants.map(modelKey));
+    setSynthesizerKey(run.request.synthesizer ? modelKey(run.request.synthesizer) : "");
     setMaxCalls(run.request.budget?.maxCalls ?? 12);
     setMaxRounds(run.request.budget?.maxRounds ?? run.request.maxRounds ?? 1);
+    if (run.request.mode === "custom" && run.request.workflow) {
+      setWorkflowText(JSON.stringify(run.request.workflow, null, 2));
+      const preset = workflowPresetsRef.current.find(item => item.graph.id && item.graph.id === run.request.workflow?.id);
+      setSelectedPresetId(preset?.id ?? "");
+    }
   }
 
   async function refreshLimits(epoch?: number) {
@@ -239,20 +413,29 @@ function App() {
 
   async function initialize(epoch: number) {
     try {
-      const [modelData, providerData, conversationData, limitData] = await Promise.all([
+      const [modelData, providerData, conversationData, limitData, presetData] = await Promise.all([
         fetch(`${API}/models`).then(response => readJson<ModelRef[]>(response)),
         fetch(`${API}/providers`).then(response => readJson<ProviderStatus[]>(response)),
         fetch(`${API}/conversations`).then(response => readJson<ConversationSummary[]>(response)),
         fetch(`${API}/provider-limits`)
           .then(response => readJson<ProviderLimitSnapshot[]>(response))
           .catch(() => [] as ProviderLimitSnapshot[]),
+        fetch(`${API}/workflow-presets`)
+          .then(response => readJson<WorkflowPreset[]>(response))
+          .catch(() => [] as WorkflowPreset[]),
       ]);
       if (!isCurrent(epoch)) return;
       setModels(modelData);
       setProviders(providerData);
       setProviderLimits(limitData);
       setConversations(conversationData);
+      workflowPresetsRef.current = presetData;
+      setWorkflowPresets(presetData);
       setSelected(initialSelection(modelData));
+      if (presetData[0]) {
+        setSelectedPresetId(presetData[0].id);
+        setWorkflowText(JSON.stringify(presetData[0].graph, null, 2));
+      }
 
       const rememberedRun = localStorage.getItem("conclave.activeRunId");
       const rememberedConversation = localStorage.getItem("conclave.conversationId");
@@ -284,6 +467,8 @@ function App() {
       setResumeRunId(null);
       setRunUsage(freshUsage());
       setRateLimit(null);
+      setInspection(null);
+      setInspectorOpen(false);
     }
 
     const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
@@ -383,6 +568,9 @@ function App() {
     setLiveSteps([]);
     setRunUsage(freshUsage());
     setRateLimit(null);
+    setInspection(null);
+    setInspectorOpen(false);
+    setSynthesizerKey("");
     setLoading(false);
     setCancelling(false);
     setError("");
@@ -394,6 +582,7 @@ function App() {
   function selectMode(nextMode: OrchestrationMode) {
     setMode(nextMode);
     if (nextMode === "single") {
+      setSynthesizerKey("");
       setSelected(current => {
         const model = current[0] ?? (models[0] ? modelKey(models[0]) : undefined);
         return model ? [model] : [];
@@ -401,7 +590,9 @@ function App() {
       return;
     }
 
-    const minimum = minimumParticipants(nextMode);
+    const minimum = nextMode === "custom"
+      ? requiredWorkflowParticipants(parseWorkflow(workflowText).graph)
+      : minimumParticipants(nextMode);
     if (minimum > 1) {
       setSelected(current => {
         const next = [...current];
@@ -421,7 +612,13 @@ function App() {
       setSelected([key]);
       return;
     }
-    setSelected(current => current.includes(key) ? current.filter(id => id !== key) : [...current, key]);
+    setSelected(current => {
+      if (current.includes(key)) {
+        if (synthesizerKey === key) setSynthesizerKey("");
+        return current.filter(id => id !== key);
+      }
+      return [...current, key];
+    });
   }
 
   function applyStreamEvent(streamEvent: OrchestrationStreamEvent) {
@@ -450,6 +647,7 @@ function App() {
             kind: streamEvent.kind,
             model: streamEvent.model,
             content: "",
+            dependsOn: streamEvent.dependsOn,
           }]);
       return;
     }
@@ -583,14 +781,14 @@ function App() {
   function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    if (!loading && prompt.trim() && !participantShortfall && !budgetShortfall) {
+    if (!loading && prompt.trim() && !participantShortfall && !budgetShortfall && !workflowInvalid) {
       composerRef.current?.requestSubmit();
     }
   }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!prompt.trim() || participantShortfall || budgetShortfall || loading) return;
+    if (!prompt.trim() || participantShortfall || budgetShortfall || workflowInvalid || loading) return;
     const epoch = beginViewOperation();
     setLoading(true);
     setCancelling(false);
@@ -600,6 +798,8 @@ function App() {
     setLiveSteps([]);
     setRunUsage(freshUsage());
     setRateLimit(null);
+    setInspection(null);
+    setInspectorOpen(false);
 
     try {
       const started = await fetch(`${API}/runs`, {
@@ -611,6 +811,8 @@ function App() {
             mode,
             prompt,
             participants,
+            synthesizer: selectedSynthesizer,
+            workflow: mode === "custom" ? activeWorkflow : undefined,
             budget: { maxCalls, maxRounds },
           },
         }),
@@ -674,6 +876,8 @@ function App() {
     setLiveSteps([]);
     setRunUsage(freshUsage());
     setRateLimit(null);
+    setInspection(null);
+    setInspectorOpen(false);
     try {
       const resumed = await fetch(`${API}/runs/${runId}/resume`, { method: "POST" })
         .then(response => readJson<StartRunResponse>(response));
@@ -693,10 +897,36 @@ function App() {
     }
   }
 
+  async function refreshInspector(runId: string, epoch: number, showLoading: boolean) {
+    if (showLoading && isCurrent(epoch)) setInspectorLoading(true);
+    try {
+      const data = await fetch(`${API}/runs/${runId}/inspection`).then(response => readJson<RunInspection>(response));
+      if (!isCurrent(epoch)) return;
+      setInspection(data);
+    } catch (cause) {
+      if (showLoading && isCurrent(epoch)) {
+        setError(cause instanceof Error ? cause.message : "Could not load run inspection");
+      }
+    } finally {
+      if (showLoading && isCurrent(epoch)) setInspectorLoading(false);
+    }
+  }
+
+  function toggleInspector() {
+    if (inspectorOpen) {
+      setInspectorOpen(false);
+      return;
+    }
+    if (!activeRunId) return;
+    setInspection(null);
+    setInspectorOpen(true);
+  }
+
   const displayedSteps = result?.steps ?? liveSteps;
   const tokenText = runUsage.tokenReports > 0
     ? `${runUsage.inputTokens.toLocaleString()} in · ${runUsage.outputTokens.toLocaleString()} out`
     : "token telemetry unavailable";
+  const selectedPreset = workflowPresets.find(item => item.id === selectedPresetId);
 
   return (
     <main className="shell">
@@ -769,6 +999,55 @@ function App() {
         </header>
 
         <div className="content">
+          {mode === "custom" && (
+            <section className="workflow-panel">
+              <div className="workflow-panel-head">
+                <div>
+                  <span className="eyebrow">WORKFLOW GRAPH</span>
+                  <h3>{activeWorkflow?.name ?? "Custom workflow"}</h3>
+                  <p>{activeWorkflow?.description ?? selectedPreset?.description ?? "Build a bounded dependency graph for this run."}</p>
+                </div>
+                <label className="workflow-preset-picker">
+                  <span>Preset</span>
+                  <select value={selectedPresetId} disabled={loading} onChange={event => setPreset(event.target.value)}>
+                    <option value="">Edited / custom</option>
+                    {workflowPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+                  </select>
+                </label>
+                <label className="workflow-preset-picker">
+                  <span>Synthesizer</span>
+                  <select
+                    value={selectedSynthesizer ? synthesizerKey : ""}
+                    disabled={loading || participants.length === 0}
+                    onChange={event => setSynthesizerKey(event.target.value)}
+                  >
+                    <option value="">First selected · default</option>
+                    {participants.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}</option>)}
+                  </select>
+                </label>
+              </div>
+              <div className="workflow-summary">
+                <span>{activeWorkflow?.nodes.length ?? 0} nodes</span>
+                <span>{requiredParticipants} participant slot{requiredParticipants === 1 ? "" : "s"}</span>
+                <span>output · {activeWorkflow?.outputNodeId ?? "—"}</span>
+              </div>
+              <details className="workflow-editor">
+                <summary>Advanced · edit workflow JSON</summary>
+                <textarea
+                  value={workflowText}
+                  disabled={loading}
+                  spellCheck={false}
+                  onChange={event => {
+                    setWorkflowText(event.target.value);
+                    setSelectedPresetId("");
+                  }}
+                />
+                {workflowState.error && <div className="workflow-error">{workflowState.error}</div>}
+                <p>Templates support <code>{"{{prompt}}"}</code>, <code>{"{{dependencies}}"}</code>, and declared <code>{"{{dep.nodeId}}"}</code> references.</p>
+              </details>
+            </section>
+          )}
+
           {priorMessages.length > 0 && (
             <section className="conversation-history" aria-label="Conversation history">
               {priorMessages.map(message => (
@@ -780,7 +1059,7 @@ function App() {
             </section>
           )}
 
-          {!result && !loading && displayedSteps.length === 0 && priorMessages.length === 0 && (
+          {!result && !loading && displayedSteps.length === 0 && priorMessages.length === 0 && mode !== "custom" && (
             <section className="hero">
               <span className="eyebrow">CONVENE THE COUNCIL</span>
               <h3>Ask once. Let different minds work the problem.</h3>
@@ -799,6 +1078,59 @@ function App() {
           )}
           {rateLimit && (
             <div className="rate-limit">Rate limit · {rateLimit.provider}/{rateLimit.model}: {rateLimit.message}</div>
+          )}
+
+          {activeRunId && (
+            <div className="inspector-bar">
+              <button type="button" className="inspector-toggle" onClick={toggleInspector}>
+                {inspectorOpen ? "Hide run inspector" : "Inspect run"}
+              </button>
+              <span>{activeRunId.slice(0, 8)} · {loading ? "active" : result ? "completed" : resumeRunId ? "stopped" : "saved"}</span>
+            </div>
+          )}
+
+          {inspectorOpen && (
+            <section className="run-inspector" aria-label="Run inspector">
+              <div className="run-inspector-head">
+                <div>
+                  <span className="eyebrow">RUN INSPECTOR</span>
+                  <h3>{inspection?.run.request.mode ?? mode}</h3>
+                </div>
+                {inspection && <span className={`run-state state-${inspection.run.status}`}>{inspection.run.status}</span>}
+              </div>
+              {inspectorLoading && <p className="muted">Loading persisted attempts…</p>}
+              {inspection?.attempts.map(attempt => (
+                <details className="attempt-card" key={attempt.attempt} open={attempt.attempt === inspection.run.attempt}>
+                  <summary>
+                    <strong>Attempt {attempt.attempt}</strong>
+                    <span>{attempt.status}</span>
+                    <span>{elapsedLabel(attempt.durationMs)}</span>
+                    <span>{attempt.usage.callsStarted} calls</span>
+                    {attempt.usage.tokenReports > 0 && <span>{attempt.usage.inputTokens} in / {attempt.usage.outputTokens} out</span>}
+                  </summary>
+                  {attempt.error && <div className="attempt-error">{attempt.error}</div>}
+                  {attempt.rateLimit && <div className="attempt-rate-limit">{attempt.rateLimit.provider}/{attempt.rateLimit.model} · {attempt.rateLimit.message}</div>}
+                  <div className="inspection-steps">
+                    {attempt.steps.map(step => (
+                      <div className="inspection-step" key={step.id}>
+                        <div>
+                          <strong>{step.id}</strong>
+                          <span>{step.kind ?? "step"} · {step.model?.label ?? "model pending"}</span>
+                        </div>
+                        <div className="inspection-step-meta">
+                          <span>{step.status}</span>
+                          <span>{elapsedLabel(step.durationMs)}</span>
+                          {(step.inputTokens !== undefined || step.outputTokens !== undefined) && (
+                            <span>{step.inputTokens ?? 0} in / {step.outputTokens ?? 0} out</span>
+                          )}
+                        </div>
+                        {step.dependsOn.length > 0 && <small>after → {step.dependsOn.join(" · ")}</small>}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ))}
+            </section>
           )}
 
           {(displayedSteps.length > 0 || result) && (
@@ -822,6 +1154,7 @@ function App() {
                 {displayedSteps.map(step => (
                   <article className="step-card" key={step.id}>
                     <div className="step-meta"><span>{step.model.label}</span><span>{step.kind}</span></div>
+                    {step.dependsOn && step.dependsOn.length > 0 && <div className="step-lineage">after → {step.dependsOn.join(" · ")}</div>}
                     {step.content
                       ? <Markdown content={step.content} />
                       : <p className="step-placeholder">{loading ? "Waiting for output…" : ""}</p>}
@@ -864,24 +1197,26 @@ function App() {
             value={prompt}
             onChange={event => setPrompt(event.target.value)}
             onKeyDown={handlePromptKeyDown}
-            placeholder={conversation ? "Continue the conversation…" : "Ask the council…"}
+            placeholder={conversation ? "Continue the conversation…" : mode === "custom" ? "Give this workflow a task…" : "Ask the council…"}
             rows={1}
           />
           <div className="composer-footer">
-            <span className="composer-hint">{participantShortfall
-              ? `${requiredParticipants} participants required for ${modes.find(item => item.id === mode)?.label}`
-              : budgetShortfall
-                ? `Increase call budget to at least ${expectedCalls}`
-                : conversation
-                  ? "Persistent conversation · Enter sends · Shift+Enter newline"
-                  : `${participants.length} participant${participants.length === 1 ? "" : "s"} · Enter sends`}</span>
+            <span className="composer-hint">{workflowInvalid
+              ? workflowState.error
+              : participantShortfall
+                ? `${requiredParticipants} participants required for ${modes.find(item => item.id === mode)?.label}`
+                : budgetShortfall
+                  ? `Increase call budget to at least ${expectedCalls}`
+                  : conversation
+                    ? "Persistent conversation · Enter sends · Shift+Enter newline"
+                    : `${participants.length} participant${participants.length === 1 ? "" : "s"} · Enter sends`}</span>
             <div className="composer-actions">
               {loading && (
                 <button className="stop-run" type="button" disabled={cancelling} onClick={() => void cancelActiveRun()}>
                   {cancelling ? "Stopping…" : "Stop"}
                 </button>
               )}
-              <button type="submit" disabled={loading || !prompt.trim() || participantShortfall || budgetShortfall}>
+              <button type="submit" disabled={loading || !prompt.trim() || participantShortfall || budgetShortfall || workflowInvalid}>
                 {loading ? "Running…" : "Convene"}
               </button>
             </div>

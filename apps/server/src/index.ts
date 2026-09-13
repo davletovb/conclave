@@ -16,6 +16,7 @@ import { XaiGrokProvider } from "./providers/xai-grok.js";
 import { Orchestrator } from "./orchestrator.js";
 import { FileStateStore } from "./state/file-store.js";
 import { RunManager } from "./state/run-manager.js";
+import { workflowPresets } from "./workflow-presets.js";
 
 const DEFAULT_MAX_CALLS = 12;
 const ABSOLUTE_MAX_CALLS = 64;
@@ -130,6 +131,8 @@ app.get("/models", async () => {
   ];
 });
 
+app.get("/workflow-presets", async () => workflowPresets);
+
 app.get("/conversations", async () => runManager.listConversations());
 
 app.get<{ Params: { id: string } }>("/conversations/:id", async (request, reply) => {
@@ -152,6 +155,12 @@ app.get<{ Params: { id: string } }>("/runs/:id", async (request, reply) => {
   const run = await runManager.getRun(request.params.id);
   if (!run) return reply.code(404).send({ error: "Run not found" });
   return run;
+});
+
+app.get<{ Params: { id: string } }>("/runs/:id/inspection", async (request, reply) => {
+  const inspection = await runManager.inspect(request.params.id);
+  if (!inspection) return reply.code(404).send({ error: "Run not found" });
+  return inspection;
 });
 
 app.post<{ Params: { id: string } }>("/runs/:id/cancel", async (request, reply) => {

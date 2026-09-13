@@ -11,7 +11,8 @@ export type OrchestrationMode =
   | "red-team"
   | "router"
   | "research-council"
-  | "planner-executor";
+  | "planner-executor"
+  | "custom";
 
 export type ChatRole = "system" | "user" | "assistant";
 
@@ -92,6 +93,38 @@ export interface RunBudget {
   maxRounds?: number;
 }
 
+export type WorkflowModelSelector =
+  | { type: "participant"; index: number }
+  | { type: "synthesizer" };
+
+export interface WorkflowNode {
+  /** Stable, unique node ID used by dependencies and inspection. */
+  id: string;
+  kind: OrchestrationStepKind;
+  model: WorkflowModelSelector;
+  /**
+   * Supports {{prompt}}, {{dependencies}}, and {{dep.<nodeId>}} placeholders.
+   * Only declared dependencies are available to the node.
+   */
+  promptTemplate: string;
+  dependsOn?: string[];
+}
+
+export interface WorkflowGraph {
+  id?: string;
+  name: string;
+  description?: string;
+  nodes: WorkflowNode[];
+  outputNodeId: string;
+}
+
+export interface WorkflowPreset {
+  id: string;
+  name: string;
+  description: string;
+  graph: WorkflowGraph;
+}
+
 export interface RunUsage {
   callsStarted: number;
   callsCompleted: number;
@@ -113,6 +146,8 @@ export interface OrchestrationRequest {
   prompt: string;
   participants: ModelRef[];
   synthesizer?: ModelRef;
+  /** Required when mode is custom. */
+  workflow?: WorkflowGraph;
   /** @deprecated Prefer budget.maxRounds. Retained for compatibility. */
   maxRounds?: number;
   budget?: RunBudget;
@@ -137,6 +172,7 @@ export interface OrchestrationStep {
   kind: OrchestrationStepKind;
   model: ModelRef;
   content: string;
+  dependsOn?: string[];
 }
 
 export interface OrchestrationResult {
@@ -150,7 +186,7 @@ export type OrchestrationStreamEvent =
   | { type: "run_usage"; runId: string; usage: RunUsage; budget?: RunBudget }
   | { type: "run_cancelled"; runId: string; message: string }
   | { type: "rate_limit"; runId: string; notice: RateLimitNotice }
-  | { type: "step_started"; runId: string; stepId: string; kind: OrchestrationStepKind; model: ModelRef }
+  | { type: "step_started"; runId: string; stepId: string; kind: OrchestrationStepKind; model: ModelRef; dependsOn?: string[] }
   | { type: "text_delta"; runId: string; stepId: string; delta: string }
   | { type: "status"; runId: string; stepId: string; message: string }
   | { type: "tool_call"; runId: string; stepId: string; id: string; name: string; input?: unknown }
@@ -212,6 +248,37 @@ export interface RunEventRecord {
   attempt: number;
   at: string;
   event: OrchestrationStreamEvent;
+}
+
+export interface RunStepInspection {
+  id: string;
+  kind?: OrchestrationStepKind;
+  model?: ModelRef;
+  dependsOn: string[];
+  status: "running" | "completed" | "failed" | "cancelled";
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+export interface RunAttemptInspection {
+  attempt: number;
+  status: RunStatus;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  eventCount: number;
+  usage: RunUsage;
+  steps: RunStepInspection[];
+  rateLimit?: RateLimitNotice;
+  error?: string;
+}
+
+export interface RunInspection {
+  run: StoredRun;
+  attempts: RunAttemptInspection[];
 }
 
 export interface StartRunRequest {

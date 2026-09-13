@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ModelRef, ProviderRequest } from "@conclave/core";
+import type { ModelRef, ProviderRequest, WorkflowGraph } from "@conclave/core";
 import { MockProvider } from "../providers/mock.js";
 import { Orchestrator } from "../orchestrator.js";
 import { FileStateStore } from "./file-store.js";
@@ -200,5 +200,25 @@ describe("RunManager", () => {
         budget: { maxCalls: 0, maxRounds: 1 },
       },
     })).rejects.toThrow(/maxCalls/);
+  });
+
+  it("validates malformed custom workflows before persisting a conversation or run", async () => {
+    const { manager } = await makeManager();
+    const malformed = {
+      name: "Malformed",
+      outputNodeId: "bad",
+      nodes: [null],
+    } as unknown as WorkflowGraph;
+
+    await expect(manager.start({
+      request: {
+        mode: "custom",
+        prompt: "Reject before persistence",
+        participants: [participant],
+        workflow: malformed,
+      },
+    })).rejects.toThrow(/node must be an object/i);
+
+    expect(await manager.listConversations()).toEqual([]);
   });
 });

@@ -8,6 +8,7 @@ import type {
 } from "@conclave/core";
 import { Orchestrator } from "../orchestrator.js";
 import { FileStateStore } from "./file-store.js";
+import { inspectRun } from "./run-inspection.js";
 
 type RunListener = (record: RunEventRecord) => void;
 
@@ -42,6 +43,7 @@ export class RunManager {
   async start(input: StartRunRequest): Promise<StartRunResponse> {
     const request = this.normalizeRequest(input.request);
     this.validate(request);
+    this.orchestrator.validateRequest(request);
     const reservedConversationId = input.conversationId;
     if (reservedConversationId) this.reserveConversation(reservedConversationId);
 
@@ -60,6 +62,9 @@ export class RunManager {
   async resume(runId: string): Promise<StartRunResponse> {
     const existing = await this.store.getRun(runId);
     if (!existing) throw new Error(`Run ${runId} was not found`);
+    const request = this.normalizeRequest(existing.request);
+    this.validate(request);
+    this.orchestrator.validateRequest(request);
     this.reserveConversation(existing.conversationId);
 
     try {
@@ -118,6 +123,13 @@ export class RunManager {
 
   async getRun(runId: string) {
     return this.store.getRun(runId);
+  }
+
+  async inspect(runId: string) {
+    await this.flush(runId);
+    const run = await this.store.getRun(runId);
+    if (!run) return null;
+    return inspectRun(this.store, run);
   }
 
   async getConversation(conversationId: string) {
