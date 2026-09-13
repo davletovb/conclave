@@ -1,6 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ModelRef, OrchestrationMode, OrchestrationResult, ProviderId, ProviderStatus } from "@conclave/core";
+import type {
+  ModelRef,
+  OrchestrationMode,
+  OrchestrationResult,
+  OrchestrationStep,
+  OrchestrationStreamEvent,
+  ProviderId,
+  ProviderStatus,
+} from "@conclave/core";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -49,6 +57,7 @@ function App() {
   const [mode, setMode] = useState<OrchestrationMode>("panel");
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<OrchestrationResult | null>(null);
+  const [liveSteps, setLiveSteps] = useState<OrchestrationStep[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -98,27 +107,92 @@ function App() {
     setSelected(current => current.includes(key) ? current.filter(id => id !== key) : [...current, key]);
   }
 
+  function applyStreamEvent(streamEvent: OrchestrationStreamEvent) {
+    if (streamEvent.type === "step_started") {
+      setLiveSteps(current => current.some(step => step.id === streamEvent.stepId)
+        ? current
+        : [...current, {
+            id: streamEvent.stepId,
+            kind: streamEvent.kind,
+            model: streamEvent.model,
+            content: "",
+          }]);
+      return;
+    }
+
+    if (streamEvent.type === "text_delta") {
+      setLiveSteps(current => current.map(step => step.id === streamEvent.stepId
+        ? { ...step, content: step.content + streamEvent.delta }
+        : step));
+      return;
+    }
+
+    if (streamEvent.type === "step_completed") {
+      setLiveSteps(current => current.some(step => step.id === streamEvent.step.id)
+        ? current.map(step => step.id === streamEvent.step.id ? streamEvent.step : step)
+        : [...current, streamEvent.step]);
+      return;
+    }
+
+    if (streamEvent.type === "run_completed") {
+      setResult(streamEvent.result);
+      setLiveSteps(streamEvent.result.steps);
+      return;
+    }
+
+    if (streamEvent.type === "error") {
+      setError(streamEvent.message);
+    }
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!prompt.trim() || participants.length === 0) return;
     setLoading(true);
     setError("");
     setResult(null);
+    setLiveSteps([]);
+
     try {
-      const response = await fetch(`${API}/orchestrate`, {
+      const response = await fetch(`${API}/orchestrate/stream`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ mode, prompt, participants, maxRounds: 1 }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Orchestration failed");
-      setResult(data);
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error ?? "Orchestration failed");
+      }
+      if (!response.body) throw new Error("This browser did not expose the response stream.");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      const consumeLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        applyStreamEvent(JSON.parse(trimmed) as OrchestrationStreamEvent);
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) consumeLine(line);
+        if (done) break;
+      }
+      if (buffer.trim()) consumeLine(buffer);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Orchestration failed");
     } finally {
       setLoading(false);
     }
   }
+
+  const displayedSteps = result?.steps ?? liveSteps;
 
   return (
     <main className="shell">
@@ -161,7 +235,7 @@ function App() {
         </header>
 
         <div className="content">
-          {!result && !loading && (
+          {!result && !loading && displayedSteps.length === 0 && (
             <section className="hero">
               <span className="eyebrow">CONVENE THE COUNCIL</span>
               <h3>Ask once. Let different minds work the problem.</h3>
@@ -169,20 +243,25 @@ function App() {
             </section>
           )}
 
-          {loading && <div className="thinking"><span /> <span /> <span /> Convening {participants.length} model{participants.length === 1 ? "" : "s"}…</div>}
+          {loading && displayedSteps.length === 0 && (
+            <div className="thinking"><span /> <span /> <span /> Convening {participants.length} model{participants.length === 1 ? "" : "s"}…</div>
+          )}
           {error && <div className="error">{error}</div>}
 
-          {result && (
+          {(displayedSteps.length > 0 || result) && (
             <section className="results">
-              <div className="final-card">
-                <span className="eyebrow">FINAL</span>
-                <p>{result.final}</p>
-              </div>
+              {result && (
+                <div className="final-card">
+                  <span className="eyebrow">FINAL</span>
+                  <p>{result.final}</p>
+                </div>
+              )}
+              {loading && <div className="stream-status"><span className="dot" /> Live orchestration</div>}
               <div className="step-grid">
-                {result.steps.map(step => (
+                {displayedSteps.map(step => (
                   <article className="step-card" key={step.id}>
                     <div className="step-meta"><span>{step.model.label}</span><span>{step.kind}</span></div>
-                    <p>{step.content}</p>
+                    <p>{step.content || (loading ? "Waiting for output…" : "")}</p>
                   </article>
                 ))}
               </div>

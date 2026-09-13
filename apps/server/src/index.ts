@@ -1,6 +1,11 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import type { OrchestrationRequest, ProviderAdapter, ProviderStatus } from "@conclave/core";
+import type {
+  OrchestrationRequest,
+  OrchestrationStreamEvent,
+  ProviderAdapter,
+  ProviderStatus,
+} from "@conclave/core";
 import { AnthropicClaudeProvider } from "./providers/anthropic-claude.js";
 import { MockProvider } from "./providers/mock.js";
 import { OpenAICodexProvider } from "./providers/openai-codex.js";
@@ -73,6 +78,31 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate", async (request, reply) 
     return reply.code(400).send({
       error: error instanceof Error ? error.message : "Unknown orchestration error",
     });
+  }
+});
+
+app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, reply) => {
+  reply.hijack();
+  const raw = reply.raw;
+  raw.statusCode = 200;
+  raw.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+  raw.setHeader("cache-control", "no-cache, no-transform");
+  raw.setHeader("connection", "keep-alive");
+  raw.setHeader("access-control-allow-origin", "*");
+  raw.flushHeaders?.();
+
+  const emit = (event: OrchestrationStreamEvent) => {
+    if (!raw.destroyed && !raw.writableEnded) {
+      raw.write(`${JSON.stringify(event)}\n`);
+    }
+  };
+
+  try {
+    await orchestrator.run(request.body, { emit });
+  } catch (error) {
+    request.log.error(error);
+  } finally {
+    if (!raw.destroyed && !raw.writableEnded) raw.end();
   }
 });
 
