@@ -6,7 +6,6 @@ permissions:
   contents: write
 jobs:
   apply:
-    if: github.event.head_commit.message == 'chore: stage research council source fix'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
