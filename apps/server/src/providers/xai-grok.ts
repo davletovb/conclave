@@ -1,6 +1,7 @@
 import type {
   ModelRef,
   ProviderAdapter,
+  ProviderEventSink,
   ProviderRequest,
   ProviderResponse,
   ProviderStatus,
@@ -90,7 +91,7 @@ export class XaiGrokProvider implements ProviderAdapter {
     }
   }
 
-  async generate(request: ProviderRequest): Promise<ProviderResponse> {
+  async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
     const client = this.createClient();
     const startedAt = Date.now();
     let unsubscribe = () => {};
@@ -112,6 +113,7 @@ export class XaiGrokProvider implements ProviderAdapter {
         if (typeof content?.text !== "string") return;
 
         streamedText += content.text;
+        emit?.({ type: "text_delta", delta: content.text });
       });
 
       const session = await client.request<SessionNewResponse>("session/new", {
@@ -128,10 +130,6 @@ export class XaiGrokProvider implements ProviderAdapter {
         prompt: [{ type: "text", text: prompt }],
       }, timeoutMs);
 
-      // session/prompt may resolve before stdout delivers the first
-      // session/update. Give that first chunk a bounded arrival window before
-      // applying the normal two-sample stability check used by xAI's ACP
-      // integration example.
       const firstChunkWaitMs = Number(process.env.CONCLAVE_GROK_FIRST_CHUNK_WAIT_MS ?? 2_000);
       const firstChunkDeadline = Date.now() + firstChunkWaitMs;
       while (!streamedText && Date.now() < firstChunkDeadline) {
