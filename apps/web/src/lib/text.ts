@@ -115,7 +115,32 @@ export function collapsePrompt(content: string) {
   if (lines.length <= COLLAPSED_LINES && content.length <= COLLAPSED_CHARS) return undefined;
 
   const clipped = lines.slice(0, COLLAPSED_LINES).join("\n").slice(0, COLLAPSED_CHARS).trimEnd();
-  // A fence opened inside the excerpt would swallow the rest of the bubble.
-  const fences = clipped.match(/^\s*```/gm)?.length ?? 0;
-  return `${fences % 2 === 1 ? `${clipped}\n\u0060\u0060\u0060` : clipped}…`;
+  const closed = fenceLeftOpen(clipped) ? `${clipped}\n${FENCE}` : clipped;
+
+  // The renderer closes a fence only on a line that is nothing but ```, so the
+  // ellipsis has to stay off any fence line: glued on, it stops the line being
+  // a closer and either leaves the fence open or reopens one that was closed.
+  const lastLine = closed.split("\n").at(-1) ?? "";
+  return FENCE_LINE.test(lastLine) ? `${closed}\n…` : `${closed}…`;
+}
+
+const FENCE = "```";
+/** Any line the renderer could treat as a fence marker. */
+const FENCE_LINE = /^\s*```/;
+/** What the renderer opens a fence on, and what it closes one on. */
+const FENCE_OPEN = /^\s*```([^`]*)$/;
+const FENCE_CLOSE = /^\s*```\s*$/;
+
+/**
+ * Whether an excerpt ends inside a code fence, by the same rules the renderer
+ * uses. Counting backticks is not the same question: a closer is only a closer
+ * on a line of its own.
+ */
+function fenceLeftOpen(text: string) {
+  let open = false;
+  for (const line of text.split("\n")) {
+    if (open) open = !FENCE_CLOSE.test(line);
+    else if (FENCE_OPEN.test(line)) open = true;
+  }
+  return open;
 }

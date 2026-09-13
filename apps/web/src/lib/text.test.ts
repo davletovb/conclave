@@ -1,4 +1,6 @@
+import React from "react";
 import { describe, expect, it } from "vitest";
+import { Markdown } from "../ui/markdown";
 import { collapsePrompt, formatDuration, formatWindow, highlight, previewLine, recencyBucket, relativeTime, searchTerms } from "./text";
 
 describe("searchTerms", () => {
@@ -100,9 +102,50 @@ describe("collapsePrompt", () => {
     expect(collapsed).toContain("sixth");
   });
 
-  it("closes a code fence it had to cut through", () => {
-    const fenced = "before\n```js\nconst a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\n```";
-    const collapsed = collapsePrompt(fenced)!;
-    expect((collapsed.match(/```/g) ?? []).length % 2).toBe(0);
+  it("leaves the excerpt with no fence open, as the renderer parses it", () => {
+    // Backtick parity is not the invariant: the renderer closes a fence only on
+    // a line that is nothing but ```, so an ellipsis glued to that line leaves
+    // the fence open. Assert through the renderer's own rules instead.
+    const cases = [
+      // the cut lands inside an open fence
+      `before\n${FENCE}js\nconst a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\n${FENCE}`,
+      // the last kept line is itself the closer, which must stay a closer
+      `a\nb\nc\n${FENCE}js\ncode here\n${FENCE}\ntrailing`,
+      // no fences at all
+      Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"),
+    ];
+
+    for (const input of cases) {
+      const collapsed = collapsePrompt(input)!;
+      expect(fenceLeftOpen(collapsed)).toBe(false);
+      expect(collapsed).toContain("…");
+      // and the renderer agrees: whatever it produced, no code block swallowed
+      // the ellipsis that marks the excerpt.
+      expect(renderedText(collapsed).trimEnd().endsWith("…")).toBe(true);
+    }
   });
 });
+
+const FENCE = "```";
+
+/** The renderer's fence state machine, mirrored from ui/markdown.tsx. */
+function fenceLeftOpen(text: string) {
+  let open = false;
+  for (const line of text.split("\n")) {
+    if (open) open = !/^\s*```\s*$/.test(line);
+    else if (/^\s*```([^`]*)$/.test(line)) open = true;
+  }
+  return open;
+}
+
+/** Visible text of the excerpt once Markdown has actually rendered it. */
+function renderedText(content: string): string {
+  const walk = (node: React.ReactNode): string => {
+    if (node === null || node === undefined || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(walk).join("");
+    if (React.isValidElement(node)) return walk((node.props as { children?: React.ReactNode }).children);
+    return "";
+  };
+  return walk(Markdown({ content }));
+}
