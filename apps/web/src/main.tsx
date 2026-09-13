@@ -21,6 +21,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { Markdown } from "./markdown";
+import { CouncilWork, RunConfigSummary, RunSetup } from "./reasoning-surface";
 import "./styles.css";
 
 const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
@@ -272,6 +273,7 @@ function App() {
   const [synthesizerKey, setSynthesizerKey] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [mode, setMode] = useState<OrchestrationMode>("panel");
+  const [setupOpen, setSetupOpen] = useState(true);
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<OrchestrationResult | null>(null);
@@ -332,7 +334,9 @@ function App() {
   }, [inspectorOpen, activeRunId, loading]);
 
   const participants = useMemo(
-    () => models.filter(model => selected.includes(modelKey(model))),
+    () => selected
+      .map(key => models.find(model => modelKey(model) === key))
+      .filter((model): model is ModelRef => Boolean(model)),
     [models, selected],
   );
   const selectedSynthesizer = synthesizerKey
@@ -474,6 +478,7 @@ function App() {
     const data = await fetch(`${API}/conversations/${id}`).then(response => readJson<Conversation>(response));
     if (!isCurrent(epoch)) return;
     setConversation(data);
+    setSetupOpen(false);
     localStorage.setItem("conclave.conversationId", id);
 
     if (data.lastRunId) {
@@ -519,6 +524,7 @@ function App() {
       const thread = await fetch(`${API}/conversations/${run.conversationId}`).then(response => readJson<Conversation>(response));
       if (!isCurrent(epoch)) return;
       setConversation(thread);
+      setSetupOpen(false);
 
       if (run.status === "completed" && run.result) {
         setError("");
@@ -562,6 +568,7 @@ function App() {
   function newConversation() {
     beginViewOperation();
     setConversation(null);
+    setSetupOpen(true);
     setActiveRunId(null);
     setResumeRunId(null);
     setResult(null);
@@ -819,6 +826,7 @@ function App() {
       }).then(response => readJson<StartRunResponse>(response));
       if (!isCurrent(epoch)) return;
 
+      setSetupOpen(false);
       setActiveRunId(started.runId);
       localStorage.setItem("conclave.activeRunId", started.runId);
       localStorage.setItem("conclave.conversationId", started.conversationId);
@@ -937,14 +945,6 @@ function App() {
           <p className="muted">Many models. One reasoning space.</p>
         </div>
         <button className="new-chat" onClick={newConversation}>+ New conversation</button>
-        <nav className="mode-list" aria-label="Orchestration mode">
-          {modes.map(item => (
-            <button key={item.id} className={mode === item.id ? "mode active" : "mode"} onClick={() => selectMode(item.id)}>
-              <strong>{item.label}</strong>
-              <span>{item.description}</span>
-            </button>
-          ))}
-        </nav>
         {conversations.length > 0 && (
           <div className="conversation-list">
             <span className="eyebrow">RECENT</span>
@@ -962,44 +962,43 @@ function App() {
           </div>
         )}
         {quotaSummary && <div className="quota" title={quotaTitle}>{quotaSummary}</div>}
-        <div className="status" title={runtimeTitle}><span className="dot" /> {runtimeLabel}</div>
+        <div className="sidebar-footer">
+          <button
+            className="theme-toggle"
+            type="button"
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+            onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? "☀" : "☾"}
+          </button>
+          <div className="status" title={runtimeTitle}><span className="dot" /> {runtimeLabel}</div>
+        </div>
       </aside>
 
       <section className="workspace">
-        <header className="topbar">
-          <div className="mode-heading">
-            <span className="eyebrow">ORCHESTRATION MODE</span>
-            <h2>{modes.find(item => item.id === mode)?.label}</h2>
-          </div>
-          <label className="mobile-mode-picker">
-            <span className="eyebrow">MODE</span>
-            <select value={mode} onChange={event => selectMode(event.target.value as OrchestrationMode)}>
-              {modes.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
-            </select>
-          </label>
-          <div className="topbar-actions">
-            <div className="model-picker">
-              <button className="chip mobile-new-chat" onClick={newConversation}>New</button>
-              {models.map(model => (
-                <button key={modelKey(model)} onClick={() => toggleModel(model)} className={selected.includes(modelKey(model)) ? "chip selected" : "chip"}>
-                  {model.label}
-                </button>
-              ))}
-            </div>
-            <button
-              className="theme-toggle"
-              type="button"
-              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-              title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-              onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
-            >
-              {theme === "dark" ? "☀" : "☾"}
-            </button>
-          </div>
-        </header>
 
         <div className="content">
-          {mode === "custom" && (
+          {setupOpen && (
+            <RunSetup
+              mode={mode}
+              modes={modes}
+              onModeChange={selectMode}
+              models={models}
+              selectedKeys={selected}
+              participants={participants}
+              onToggleModel={toggleModel}
+              synthesizerKey={synthesizerKey}
+              onSynthesizerChange={setSynthesizerKey}
+              maxCalls={maxCalls}
+              onMaxCallsChange={setMaxCalls}
+              maxRounds={maxRounds}
+              onMaxRoundsChange={setMaxRounds}
+              expectedCalls={expectedCalls}
+              loading={loading}
+            />
+          )}
+          {setupOpen && mode === "custom" && (
             <section className="workflow-panel">
               <div className="workflow-panel-head">
                 <div>
@@ -1012,17 +1011,6 @@ function App() {
                   <select value={selectedPresetId} disabled={loading} onChange={event => setPreset(event.target.value)}>
                     <option value="">Edited / custom</option>
                     {workflowPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
-                  </select>
-                </label>
-                <label className="workflow-preset-picker">
-                  <span>Synthesizer</span>
-                  <select
-                    value={selectedSynthesizer ? synthesizerKey : ""}
-                    disabled={loading || participants.length === 0}
-                    onChange={event => setSynthesizerKey(event.target.value)}
-                  >
-                    <option value="">First selected · default</option>
-                    {participants.map(model => <option key={modelKey(model)} value={modelKey(model)}>{model.label}</option>)}
                   </select>
                 </label>
               </div>
@@ -1059,7 +1047,7 @@ function App() {
             </section>
           )}
 
-          {!result && !loading && displayedSteps.length === 0 && priorMessages.length === 0 && mode !== "custom" && (
+          {!result && !loading && displayedSteps.length === 0 && priorMessages.length === 0 && mode !== "custom" && !setupOpen && (
             <section className="hero">
               <span className="eyebrow">CONVENE THE COUNCIL</span>
               <h3>Ask once. Let different minds work the problem.</h3>
@@ -1080,15 +1068,6 @@ function App() {
             <div className="rate-limit">Rate limit · {rateLimit.provider}/{rateLimit.model}: {rateLimit.message}</div>
           )}
 
-          {activeRunId && (
-            <div className="inspector-bar">
-              <button type="button" className="inspector-toggle" onClick={toggleInspector}>
-                {inspectorOpen ? "Hide run inspector" : "Inspect run"}
-              </button>
-              <span>{activeRunId.slice(0, 8)} · {loading ? "active" : result ? "completed" : resumeRunId ? "stopped" : "saved"}</span>
-            </div>
-          )}
-
           {inspectorOpen && (
             <section className="run-inspector" aria-label="Run inspector">
               <div className="run-inspector-head">
@@ -1096,7 +1075,10 @@ function App() {
                   <span className="eyebrow">RUN INSPECTOR</span>
                   <h3>{inspection?.run.request.mode ?? mode}</h3>
                 </div>
-                {inspection && <span className={`run-state state-${inspection.run.status}`}>{inspection.run.status}</span>}
+                <div className="inspector-head-actions">
+                  {inspection && <span className={`run-state state-${inspection.run.status}`}>{inspection.run.status}</span>}
+                  <button type="button" className="drawer-close" aria-label="Close run details" onClick={() => setInspectorOpen(false)}>×</button>
+                </div>
               </div>
               {inspectorLoading && <p className="muted">Loading persisted attempts…</p>}
               {inspection?.attempts.map(attempt => (
@@ -1150,48 +1132,26 @@ function App() {
               {!loading && resumeRunId && displayedSteps.length > 0 && (
                 <div className="stream-status">Partial output · previous attempt</div>
               )}
-              <div className="step-grid">
-                {displayedSteps.map(step => (
-                  <article className="step-card" key={step.id}>
-                    <div className="step-meta"><span>{step.model.label}</span><span>{step.kind}</span></div>
-                    {step.dependsOn && step.dependsOn.length > 0 && <div className="step-lineage">after → {step.dependsOn.join(" · ")}</div>}
-                    {step.content
-                      ? <Markdown content={step.content} />
-                      : <p className="step-placeholder">{loading ? "Waiting for output…" : ""}</p>}
-                  </article>
-                ))}
-              </div>
+              <CouncilWork
+                steps={displayedSteps}
+                loading={loading}
+                inspection={inspection}
+                onInspect={toggleInspector}
+              />
             </section>
           )}
         </div>
 
         <form className="composer" ref={composerRef} onSubmit={submit}>
-          <div className="run-controls">
-            <label>
-              <span>Call budget</span>
-              <input
-                type="number"
-                min={1}
-                max={64}
-                value={maxCalls}
-                disabled={loading}
-                onChange={event => setMaxCalls(Math.max(1, Math.min(64, Number(event.target.value) || 1)))}
-              />
-            </label>
-            {mode === "debate" && (
-              <label>
-                <span>Rounds</span>
-                <select value={maxRounds} disabled={loading} onChange={event => setMaxRounds(Number(event.target.value))}>
-                  <option value={1}>1</option>
-                  <option value={2}>2</option>
-                  <option value={3}>3</option>
-                </select>
-              </label>
-            )}
-            <span className={budgetShortfall ? "budget-estimate warning" : "budget-estimate"}>
-              {expectedCalls} planned call{expectedCalls === 1 ? "" : "s"}
-            </span>
-          </div>
+          <RunConfigSummary
+            mode={mode}
+            modes={modes}
+            participants={participants}
+            synthesizer={selectedSynthesizer}
+            onConfigure={() => setSetupOpen(current => !current)}
+            onInspect={toggleInspector}
+            canInspect={Boolean(activeRunId)}
+          />
           <textarea
             ref={promptRef}
             value={prompt}
