@@ -2,15 +2,21 @@
 
 Conclave is a personal multi-model reasoning environment: one interface where GPT, Claude, Grok, and future providers can answer independently or work together through explicit orchestration workflows.
 
-## Initial modes
+## Orchestration modes
 
 - **Single** — one model, one answer
 - **Compare** — independent answers side by side
 - **Panel** — independent answers, then synthesis
 - **Debate** — independent positions, bounded critique rounds, then judgment
 - **Critic → Revise** — one model drafts, another critiques, the author revises
+- **Consensus** — independent answers, a proposed consensus, then a separate consensus audit so disagreement is not silently erased
+- **Judge** — independent candidate answers followed by one adjudication pass
+- **Red Team** — one draft is attacked by the other selected models, then hardened by the original author
+- **Router** — the first selected model routes the task to exactly one selected specialist instead of fanning out to everyone
+- **Research Council** — selected models examine evidence, alternatives, implementation risks, and skepticism before synthesis; it does not pretend external browsing occurred
+- **Planner → Executors** — the first model plans, the remaining selected models execute in parallel, and a reviewer produces the final answer
 
-The architecture is deliberately provider-agnostic so subscription-backed runtimes can be added behind adapters without changing the UI or orchestration engine.
+The architecture is deliberately provider-agnostic so subscription-backed runtimes can be added behind adapters without changing the UI or orchestration engine. Multi-stage modes have explicit bounded stages; Debate additionally clamps rounds to 1–3. Per-run budget and cancellation controls are the next roadmap item.
 
 ## Repository structure
 
@@ -156,5 +162,5 @@ GitHub Actions runs the same checks on pull requests.
 3. ✅ xAI adapter via Grok Build ACP runtime
 4. ✅ Normalized streaming event protocol for partial output and future tool events
 5. ✅ Persistent conversations and resumable orchestration runs
-6. Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
+6. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
 7. Per-run budgets, round limits, cancellation, and usage/rate-limit visibility

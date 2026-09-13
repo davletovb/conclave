@@ -5,7 +5,13 @@ export type OrchestrationMode =
   | "compare"
   | "panel"
   | "debate"
-  | "critic-revise";
+  | "critic-revise"
+  | "consensus"
+  | "judge"
+  | "red-team"
+  | "router"
+  | "research-council"
+  | "planner-executor";
 
 export type ChatRole = "system" | "user" | "assistant";
 
@@ -72,7 +78,17 @@ export interface OrchestrationRequest {
   history?: ChatMessage[];
 }
 
-export type OrchestrationStepKind = "answer" | "critique" | "revision" | "synthesis";
+export type OrchestrationStepKind =
+  | "answer"
+  | "critique"
+  | "revision"
+  | "synthesis"
+  | "judgment"
+  | "route"
+  | "research"
+  | "plan"
+  | "execution"
+  | "review";
 
 export interface OrchestrationStep {
   id: string;

@@ -69,6 +69,96 @@ describe("Orchestrator", () => {
     expect(result.steps.map(step => step.kind)).toEqual(["answer", "critique", "revision"]);
   });
 
+  it("builds and audits consensus instead of treating synthesis as automatic agreement", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+    const result = await countingOrchestrator.run({
+      mode: "consensus",
+      prompt: "Choose the safest migration strategy",
+      participants,
+    });
+
+    expect(countingProvider.calls).toBe(5);
+    expect(result.steps.map(step => step.kind)).toEqual([
+      "answer",
+      "answer",
+      "answer",
+      "synthesis",
+      "review",
+    ]);
+    expect(result.final).toBe(result.steps.at(-1)?.content);
+  });
+
+  it("judges independent candidates with one bounded adjudication call", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+    const result = await countingOrchestrator.run({
+      mode: "judge",
+      prompt: "Which design is strongest?",
+      participants,
+    });
+
+    expect(countingProvider.calls).toBe(4);
+    expect(result.steps.at(-1)?.kind).toBe("judgment");
+  });
+
+  it("red-teams one draft and returns a hardened revision", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+    const result = await countingOrchestrator.run({
+      mode: "red-team",
+      prompt: "Propose a rollout plan",
+      participants,
+    });
+
+    expect(countingProvider.calls).toBe(4);
+    expect(result.steps.map(step => step.kind)).toEqual(["answer", "critique", "critique", "revision"]);
+  });
+
+  it("routes to one specialist instead of fanning the question out", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+    const result = await countingOrchestrator.run({
+      mode: "router",
+      prompt: "Who should solve this?",
+      participants,
+    });
+
+    expect(countingProvider.calls).toBe(2);
+    expect(result.steps.map(step => step.kind)).toEqual(["route", "answer"]);
+    // Mock output has no ROUTE marker, so the fail-safe route is the first
+    // non-router participant rather than another fanout.
+    expect(result.steps[1]?.model.model).toBe("mock-claude");
+  });
+
+  it("runs every research-council angle before synthesis", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+    const result = await countingOrchestrator.run({
+      mode: "research-council",
+      prompt: "Assess the evidence",
+      participants,
+    });
+
+    expect(countingProvider.calls).toBe(5);
+    expect(result.steps.filter(step => step.kind === "research")).toHaveLength(4);
+    expect(result.steps.at(-1)?.kind).toBe("synthesis");
+  });
+
+  it("runs planner, executors, then reviewer with bounded stages", async () => {
+    const countingProvider = new CountingMockProvider();
+    const countingOrchestrator = new Orchestrator(new Map([[countingProvider.id, countingProvider]]));
+    const result = await countingOrchestrator.run({
+      mode: "planner-executor",
+      prompt: "Design an implementation",
+      participants,
+    });
+
+    expect(countingProvider.calls).toBe(4);
+    expect(result.steps.map(step => step.kind)).toEqual(["plan", "execution", "execution", "review"]);
+    expect(result.final).toBe(result.steps.at(-1)?.content);
+  });
+
   it("emits a complete normalized lifecycle for non-streaming providers", async () => {
     const events: OrchestrationStreamEvent[] = [];
     await orchestrator.run({
