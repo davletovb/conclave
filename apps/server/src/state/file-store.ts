@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, truncate, writeFile, appendFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -51,6 +60,10 @@ function cleanRequest(request: OrchestrationRequest): OrchestrationRequest {
   return rest;
 }
 
+function laterTimestamp(a: string, b: string) {
+  return a.localeCompare(b) >= 0 ? a : b;
+}
+
 export class FileStateStore {
   readonly dataDir: string;
   private readonly statePath: string;
@@ -68,26 +81,53 @@ export class FileStateStore {
   async init() {
     if (this.initialized) return;
     await this.enqueue(async () => {
-      await mkdir(this.runsDir, { recursive: true });
+      await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
+      await chmod(this.dataDir, 0o700);
+      await mkdir(this.runsDir, { recursive: true, mode: 0o700 });
+      await chmod(this.runsDir, 0o700);
+
       try {
         const raw = await readFile(this.statePath, "utf8");
         const parsed = JSON.parse(raw) as PersistedState;
         if (parsed.version !== 1) throw new Error(`Unsupported Conclave state version: ${parsed.version}`);
         this.state = parsed;
+        await chmod(this.statePath, 0o600);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         await this.persistState();
       }
 
+      await this.tightenEventPermissions();
+
       let changed = false;
       const timestamp = now();
       for (const run of Object.values(this.state.runs)) {
-        if (run.status === "queued" || run.status === "running") {
-          run.status = "interrupted";
-          run.updatedAt = timestamp;
-          run.error = "Conclave stopped before this run completed. Resume it to start a new attempt.";
+        if (run.status !== "queued" && run.status !== "running") continue;
+
+        const records = await this.readRunEventFile(run.id);
+        const terminal = [...records]
+          .reverse()
+          .find(record => record.attempt === run.attempt
+            && (record.event.type === "run_completed" || record.event.type === "error"));
+
+        if (terminal?.event.type === "run_completed") {
+          this.applyCompletion(run, terminal.event.result, terminal.at);
           changed = true;
+          continue;
         }
+
+        if (terminal?.event.type === "error") {
+          run.status = "failed";
+          run.updatedAt = terminal.at;
+          run.error = terminal.event.message;
+          changed = true;
+          continue;
+        }
+
+        run.status = "interrupted";
+        run.updatedAt = timestamp;
+        run.error = "Conclave stopped before this run completed. Resume it to start a new attempt.";
+        changed = true;
       }
       if (changed) await this.persistState();
       this.initialized = true;
@@ -212,34 +252,7 @@ export class FileStateStore {
     return this.enqueue(async () => {
       const run = this.state.runs[runId];
       if (!run) throw new Error(`Run ${runId} was not found`);
-      const conversation = this.state.conversations[run.conversationId];
-      if (!conversation) throw new Error(`Conversation ${run.conversationId} was not found`);
-      const timestamp = now();
-
-      const existing = conversation.messages.find(message => message.runId === runId && message.role === "assistant");
-      if (existing) {
-        existing.content = result.final;
-        existing.createdAt = timestamp;
-      } else {
-        const assistantMessage = {
-          id: randomUUID(),
-          role: "assistant" as const,
-          content: result.final,
-          createdAt: timestamp,
-          runId,
-        };
-        const userIndex = conversation.messages.findIndex(message => message.id === run.userMessageId);
-        if (userIndex >= 0) {
-          conversation.messages.splice(userIndex + 1, 0, assistantMessage);
-        } else {
-          conversation.messages.push(assistantMessage);
-        }
-      }
-      conversation.updatedAt = timestamp;
-      run.status = "completed";
-      run.result = result;
-      delete run.error;
-      run.updatedAt = timestamp;
+      this.applyCompletion(run, result, now());
       await this.persistState();
       return clone(run);
     });
@@ -267,32 +280,85 @@ export class FileStateStore {
   async appendRunEvent(record: RunEventRecord) {
     await this.ready();
     return this.enqueue(async () => {
-      await appendFile(this.eventsPath(record.event.runId), `${JSON.stringify(record)}\n`, "utf8");
+      const path = this.eventsPath(record.event.runId);
+      await appendFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+      await chmod(path, 0o600);
     });
   }
 
   async readRunEvents(runId: string, after = 0): Promise<RunEventRecord[]> {
     await this.ready();
     await this.queue.catch(() => undefined);
+    const records = await this.readRunEventFile(runId);
+    return records.filter(record => record.seq > after);
+  }
+
+  private applyCompletion(run: StoredRun, result: OrchestrationResult, timestamp: string) {
+    const conversation = this.state.conversations[run.conversationId];
+    if (!conversation) throw new Error(`Conversation ${run.conversationId} was not found`);
+
+    const existing = conversation.messages.find(message => message.runId === run.id && message.role === "assistant");
+    if (existing) {
+      existing.content = result.final;
+      existing.createdAt = timestamp;
+    } else {
+      const assistantMessage = {
+        id: randomUUID(),
+        role: "assistant" as const,
+        content: result.final,
+        createdAt: timestamp,
+        runId: run.id,
+      };
+      const userIndex = conversation.messages.findIndex(message => message.id === run.userMessageId);
+      if (userIndex >= 0) {
+        conversation.messages.splice(userIndex + 1, 0, assistantMessage);
+      } else {
+        conversation.messages.push(assistantMessage);
+      }
+    }
+
+    conversation.updatedAt = laterTimestamp(conversation.updatedAt, timestamp);
+    run.status = "completed";
+    run.result = result;
+    delete run.error;
+    run.updatedAt = timestamp;
+  }
+
+  private async readRunEventFile(runId: string): Promise<RunEventRecord[]> {
     try {
       const raw = await readFile(this.eventsPath(runId), "utf8");
-      return raw.split(/\r?\n/)
-        .filter(Boolean)
-        .map(line => JSON.parse(line) as RunEventRecord)
-        .filter(record => record.seq > after);
+      const records: RunEventRecord[] = [];
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          records.push(JSON.parse(line) as RunEventRecord);
+        } catch {
+          // A process can stop in the middle of its final append. Ignore only
+          // that malformed record; earlier complete lines remain replayable.
+        }
+      }
+      return records;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
   }
 
+  private async tightenEventPermissions() {
+    const entries = await readdir(this.runsDir, { withFileTypes: true });
+    await Promise.all(entries
+      .filter(entry => entry.isFile() && entry.name.endsWith(".ndjson"))
+      .map(entry => chmod(join(this.runsDir, entry.name), 0o600)));
+  }
+
   private async clearRunEvents(runId: string) {
     const path = this.eventsPath(runId);
     try {
       await truncate(path, 0);
+      await chmod(path, 0o600);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        await writeFile(path, "", "utf8");
+        await writeFile(path, "", { encoding: "utf8", mode: 0o600 });
         return;
       }
       throw error;
@@ -316,7 +382,12 @@ export class FileStateStore {
 
   private async persistState() {
     const temp = `${this.statePath}.${process.pid}.tmp`;
-    await writeFile(temp, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+    await writeFile(temp, `${JSON.stringify(this.state, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await chmod(temp, 0o600);
     await rename(temp, this.statePath);
+    await chmod(this.statePath, 0o600);
   }
 }
