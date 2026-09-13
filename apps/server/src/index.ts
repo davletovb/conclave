@@ -17,6 +17,9 @@ import { Orchestrator } from "./orchestrator.js";
 import { FileStateStore } from "./state/file-store.js";
 import { RunManager } from "./state/run-manager.js";
 
+const DEFAULT_MAX_CALLS = 12;
+const ABSOLUTE_MAX_CALLS = 64;
+
 const allowedOrigins = (process.env.CONCLAVE_WEB_ORIGIN
   ? process.env.CONCLAVE_WEB_ORIGIN.split(",")
   : ["http://localhost:5173", "http://127.0.0.1:5173"])
@@ -30,6 +33,21 @@ function applyStreamCors(raw: import("node:http").ServerResponse, origin?: strin
   if (!origin || !allowedOrigins.includes(origin)) return;
   raw.setHeader("access-control-allow-origin", origin);
   raw.setHeader("vary", "origin");
+}
+
+function controlledRequest(request: OrchestrationRequest): OrchestrationRequest {
+  const maxCalls = request.budget?.maxCalls ?? DEFAULT_MAX_CALLS;
+  const maxRounds = request.budget?.maxRounds ?? request.maxRounds ?? 1;
+  if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > ABSOLUTE_MAX_CALLS) {
+    throw new Error(`maxCalls must be an integer between 1 and ${ABSOLUTE_MAX_CALLS}`);
+  }
+  if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 3) {
+    throw new Error("maxRounds must be an integer between 1 and 3");
+  }
+  return {
+    ...request,
+    budget: { maxCalls, maxRounds },
+  };
 }
 
 const mock = new MockProvider();
@@ -219,7 +237,7 @@ app.get<{
 
 app.post<{ Body: OrchestrationRequest }>("/orchestrate", async (request, reply) => {
   try {
-    return await orchestrator.run(request.body);
+    return await orchestrator.run(controlledRequest(request.body));
   } catch (error) {
     request.log.error(error);
     return reply.code(400).send({
@@ -230,6 +248,15 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate", async (request, reply) 
 
 // Compatibility endpoint for clients that have not moved to persistent runs yet.
 app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, reply) => {
+  let controlled: OrchestrationRequest;
+  try {
+    controlled = controlledRequest(request.body);
+  } catch (error) {
+    return reply.code(400).send({
+      error: error instanceof Error ? error.message : "Invalid orchestration budget",
+    });
+  }
+
   reply.hijack();
   const raw = reply.raw;
   raw.statusCode = 200;
@@ -246,7 +273,7 @@ app.post<{ Body: OrchestrationRequest }>("/orchestrate/stream", async (request, 
   };
 
   try {
-    await orchestrator.run(request.body, { emit });
+    await orchestrator.run(controlled, { emit });
   } catch (error) {
     request.log.error(error);
   } finally {
