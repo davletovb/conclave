@@ -74,6 +74,21 @@ describe("conversation search", () => {
     expect(snippet.endsWith("…")).toBe(true);
     expect(conversationSnippet(conversation, [])).toBeUndefined();
   });
+
+  it("gives a title-only hit the opening of the conversation for context", () => {
+    const conversation = {
+      id: "c1",
+      title: "Watchdog tuning",
+      createdAt: "x",
+      updatedAt: "x",
+      messages: [{ id: "m1", role: "user" as const, content: "How long should a stalled step wait?", createdAt: "x" }],
+    };
+
+    // The term is only in the title, but the row still has to say what the
+    // conversation is about.
+    expect(conversationSnippet(conversation, searchTerms("tuning"))).toBe("How long should a stalled step wait?");
+    expect(conversationSnippet({ ...conversation, messages: [] }, searchTerms("tuning"))).toBeUndefined();
+  });
 });
 
 describe("FileStateStore conversation management", () => {
@@ -85,6 +100,7 @@ describe("FileStateStore conversation management", () => {
     const all = await store.listConversations();
     expect(all).toHaveLength(2);
     expect(all.every(item => item.snippet === undefined)).toBe(true);
+
 
     const hits = await store.listConversations({ query: "watchdog" });
     expect(hits).toHaveLength(1);
@@ -169,14 +185,45 @@ describe("FileStateStore conversation management", () => {
     expect(await store.exportConversation("missing")).toBeNull();
   });
 
-  it("keeps runs that never produced an answer in the export", async () => {
+  it("keeps runs that never produced an answer in the export, with the work they did finish", async () => {
     const { store } = await tempStore();
-    const created = await store.createRun({ mode: "single", prompt: "Doomed run", participants: [participant] });
+    const created = await store.createRun({
+      mode: "panel",
+      prompt: "Doomed run",
+      participants: [participant, critic],
+    });
+
+    // One model finished before the run failed. That output only exists in the
+    // event log, and an export is supposed to keep the evidence.
+    await store.appendRunEvent({
+      seq: 1,
+      attempt: 1,
+      at: new Date().toISOString(),
+      event: {
+        type: "step_completed",
+        runId: created.run.id,
+        step: { id: "answer-1", kind: "answer", model: participant, content: "Partial but real analysis" },
+      },
+    });
+    await store.appendRunEvent({
+      seq: 2,
+      attempt: 1,
+      at: new Date().toISOString(),
+      event: {
+        type: "step_failed",
+        runId: created.run.id,
+        failure: { stepId: "answer-2", kind: "answer", model: critic, message: "provider offline", retryable: false, attempts: 1 },
+      },
+    });
     await store.updateRun(created.run.id, { status: "failed", error: "provider offline" });
 
-    const markdown = exportToMarkdown((await store.exportConversation(created.conversation.id))!);
+    const data = (await store.exportConversation(created.conversation.id))!;
+    expect(data.runs[0].steps.map(step => step.id)).toEqual(["answer-1"]);
+
+    const markdown = exportToMarkdown(data);
     expect(markdown).toContain("## Runs without a final answer");
     expect(markdown).toContain("provider offline");
+    expect(markdown).toContain("Partial but real analysis");
   });
 
   it("escapes fenced code so an exported answer stays parseable", () => {

@@ -48,11 +48,17 @@ export function conversationSnippet(conversation: Conversation, terms: string[])
         .filter(entry => entry.at >= 0)
         .sort((a, b) => a.at - b.at)[0].term,
     );
-    const start = Math.max(0, compactIndex - SNIPPET_RADIUS);
-    const end = Math.min(compact.length, compactIndex + SNIPPET_RADIUS * 2);
-    const excerpt = compact.slice(start, end);
-    return `${start > 0 ? "…" : ""}${excerpt}${end < compact.length ? "…" : ""}`;
+    return excerptAround(compact, compactIndex);
   }
 
-  return undefined;
+  // The match was in the title. Lead with the opening of the conversation so a
+  // title-only hit still says what it is about.
+  const opening = conversation.messages[0]?.content.replace(/\s+/g, " ").trim();
+  return opening ? excerptAround(opening, 0) : undefined;
+}
+
+function excerptAround(text: string, index: number) {
+  const start = Math.max(0, index - SNIPPET_RADIUS);
+  const end = Math.min(text.length, index + SNIPPET_RADIUS * 2);
+  return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }

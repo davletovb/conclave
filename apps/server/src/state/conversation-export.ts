@@ -28,6 +28,23 @@ function runHeading(run: ConversationExportRun) {
   return lines.join("\n");
 }
 
+function stepSections(run: ConversationExportRun) {
+  const out: string[] = [];
+  for (const step of run.steps) {
+    const after = step.dependsOn && step.dependsOn.length > 0 ? ` · after ${step.dependsOn.join(", ")}` : "";
+    const marks = fence(step.content);
+    out.push(
+      "",
+      `### ${step.id} · ${step.kind} · ${modelLine(step.model)}${after}`,
+      "",
+      `${marks}markdown`,
+      step.content.trim() || "(no output recorded)",
+      marks,
+    );
+  }
+  return out;
+}
+
 /**
  * Render a conversation and the reasoning behind it as one self-contained
  * Markdown document. Council work is included so an export keeps the evidence,
@@ -54,20 +71,7 @@ export function exportToMarkdown(data: ConversationExport) {
     const run = message.runId ? runsById.get(message.runId) : undefined;
     if (!run) continue;
 
-    out.push("", "<details>", "<summary>Council work</summary>", "", runHeading(run));
-    for (const step of run.steps) {
-      const after = step.dependsOn && step.dependsOn.length > 0 ? ` · after ${step.dependsOn.join(", ")}` : "";
-      const marks = fence(step.content);
-      out.push(
-        "",
-        `### ${step.id} · ${step.kind} · ${modelLine(step.model)}${after}`,
-        "",
-        `${marks}markdown`,
-        step.content.trim() || "(no output recorded)",
-        marks,
-      );
-    }
-    out.push("", "</details>");
+    out.push("", "<details>", "<summary>Council work</summary>", "", runHeading(run), ...stepSections(run), "", "</details>");
   }
 
   // Runs that never produced an assistant message (failed, cancelled, still
@@ -81,7 +85,9 @@ export function exportToMarkdown(data: ConversationExport) {
   if (unanswered.length > 0) {
     out.push("", "---", "", "## Runs without a final answer", "");
     for (const run of unanswered) {
-      out.push(`### Run ${run.id}`, "", runHeading(run), "");
+      // Whatever these runs did finish is still evidence, so it travels with
+      // them rather than leaving only the metadata behind.
+      out.push(`### Run ${run.id}`, "", runHeading(run), ...stepSections(run), "");
     }
   }
 

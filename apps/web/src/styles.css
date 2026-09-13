@@ -389,7 +389,9 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
   text-align: left;
 }
 .menu button:hover { background: var(--raised); color: var(--ink); }
-.menu button.destructive:hover { background: var(--danger-soft); color: var(--danger); }
+.menu button.destructive:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.menu button:disabled { opacity: .42; }
+.menu button:disabled:hover { background: none; color: var(--ink-2); }
 .menu hr { margin: 5px 2px; border: 0; border-top: 1px solid var(--line-soft); }
 
 /* rail footer */
@@ -839,6 +841,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
   font: 550 12px/1 var(--font-mono);
 }
 .wf-node-id:hover { border-color: var(--line); }
+.wf-node-id[aria-invalid="true"] { border-color: color-mix(in srgb, var(--danger) 55%, transparent); color: var(--danger); }
 .wf-node-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; }
 .wf-node-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 9px; }
 .wf-deps { display: flex; flex-wrap: wrap; gap: 5px; }

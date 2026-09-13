@@ -5,6 +5,7 @@ import {
   canDependOn,
   emptyWorkflow,
   graphLayers,
+  isValidNodeId,
   removeNode,
   renameNode,
   requiredParticipants,
@@ -30,18 +31,29 @@ type EditorProps = {
   onTextChange: (text: string) => void;
 };
 
-function NodeIdField({ id, index, disabled, onCommit }: {
+function NodeIdField({ id, index, disabled, taken, onCommit }: {
   id: string;
   index: number;
   disabled: boolean;
+  taken: string[];
   onCommit: (next: string) => void;
 }) {
   const [draft, setDraft] = useState(id);
   useEffect(() => setDraft(id), [id]);
 
+  const next = draft.trim();
+  const problem = next === id
+    ? ""
+    : !isValidNodeId(next)
+      ? "Use a letter first, then letters, digits, - or _."
+      : taken.includes(next)
+        ? `Node '${next}' already exists.`
+        : "";
+
+  // Committing a malformed or duplicate ID would only produce a graph the
+  // error banner then has to explain, so refuse it and restore the draft.
   const commit = () => {
-    const next = draft.trim();
-    if (!next || next === id) {
+    if (problem || !next || next === id) {
       setDraft(id);
       return;
     }
@@ -55,6 +67,8 @@ function NodeIdField({ id, index, disabled, onCommit }: {
       disabled={disabled}
       spellCheck={false}
       aria-label={`Node ${index + 1} ID`}
+      aria-invalid={problem ? true : undefined}
+      title={problem || undefined}
       onChange={event => setDraft(event.target.value)}
       onBlur={commit}
       onKeyDown={event => {
@@ -152,6 +166,7 @@ export function WorkflowEditor(props: EditorProps) {
                       id={node.id}
                       index={index}
                       disabled={disabled}
+                      taken={graph.nodes.map(other => other.id)}
                       onCommit={next => onGraphChange(renameNode(graph, node.id, next))}
                     />
                     {assigned

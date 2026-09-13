@@ -136,6 +136,15 @@ export function validateWorkflow(graph: WorkflowGraph): ParsedWorkflow {
   return { graph, draft, error: "" };
 }
 
+function dropDependencyReference(template: string, nodeId: string) {
+  return template.split(`{{dep.${nodeId}}}`).join("").replace(/\n{3,}/g, "\n\n");
+}
+
+/** A node ID the editor and the server will both accept. */
+export function isValidNodeId(id: string) {
+  return NODE_ID.test(id);
+}
+
 export function explicitDependencyRefs(template: string) {
   return [...template.matchAll(/\{\{dep\.([A-Za-z][A-Za-z0-9_-]{0,63})\}\}/g)].map(match => match[1]);
 }
@@ -258,11 +267,15 @@ export function addNode(graph: WorkflowGraph, kind: OrchestrationStepKind = "ans
 }
 
 export function removeNode(graph: WorkflowGraph, nodeId: string): WorkflowGraph {
+  // A surviving {{dep.<removed>}} reference is an undeclared dependency, which
+  // invalidates the graph the moment the node disappears.
   const nodes = graph.nodes
     .filter(node => node.id !== nodeId)
-    .map(node => (node.dependsOn?.includes(nodeId)
-      ? { ...node, dependsOn: node.dependsOn.filter(dependency => dependency !== nodeId) }
-      : node));
+    .map(node => ({
+      ...node,
+      dependsOn: node.dependsOn?.filter(dependency => dependency !== nodeId),
+      promptTemplate: dropDependencyReference(node.promptTemplate, nodeId),
+    }));
   const outputNodeId = graph.outputNodeId === nodeId ? (nodes.at(-1)?.id ?? "") : graph.outputNodeId;
   return { ...graph, nodes, outputNodeId };
 }
@@ -298,7 +311,7 @@ export function toggleDependency(graph: WorkflowGraph, nodeId: string, dependenc
   if (current.includes(dependencyId)) {
     const dependsOn = current.filter(dependency => dependency !== dependencyId);
     // A template reference without its declaration is invalid, so drop both.
-    const promptTemplate = node.promptTemplate.split(`{{dep.${dependencyId}}}`).join("").replace(/\n{3,}/g, "\n\n");
+    const promptTemplate = dropDependencyReference(node.promptTemplate, dependencyId);
     return updateNode(graph, nodeId, { dependsOn, promptTemplate });
   }
   if (!canDependOn(graph, nodeId, dependencyId)) return graph;

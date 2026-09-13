@@ -200,7 +200,14 @@ function Thread({
                 <Icon name="download" size={14} /> Export JSON
               </button>
               <hr />
-              <button type="button" role="menuitem" className="destructive" onClick={() => setConfirming(true)}>
+              <button
+                type="button"
+                role="menuitem"
+                className="destructive"
+                disabled={running}
+                title={running ? "Stop this conversation's run before deleting it" : undefined}
+                onClick={() => setConfirming(true)}
+              >
                 <Icon name="trash" size={14} /> Delete…
               </button>
             </>

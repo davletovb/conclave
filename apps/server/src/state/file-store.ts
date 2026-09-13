@@ -20,6 +20,7 @@ import type {
   ConversationSummary,
   OrchestrationRequest,
   OrchestrationResult,
+  OrchestrationStep,
   RateLimitNotice,
   RunEventRecord,
   RunStatus,
@@ -223,10 +224,13 @@ export class FileStateStore {
     const conversation = this.state.conversations[id];
     if (!conversation) return null;
 
-    const runs: ConversationExportRun[] = Object.values(this.state.runs)
+    const stored = Object.values(this.state.runs)
       .filter(run => run.conversationId === id)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .map(run => ({
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    const runs: ConversationExportRun[] = [];
+    for (const run of stored) {
+      runs.push({
         id: run.id,
         attempt: run.attempt,
         status: run.status,
@@ -237,9 +241,13 @@ export class FileStateStore {
         usage: run.usage ?? emptyRunUsage(),
         createdAt: run.createdAt,
         updatedAt: run.updatedAt,
-        steps: run.result?.steps ?? [],
+        // A failed or cancelled run has no result, but the work its models did
+        // finish is in the event log. An export keeps the evidence, so recover
+        // it rather than exporting metadata alone.
+        steps: run.result?.steps ?? await this.completedStepsFromEvents(run.id, run.attempt),
         error: run.error,
-      }));
+      });
+    }
 
     return clone({
       version: 1 as const,
@@ -247,6 +255,17 @@ export class FileStateStore {
       conversation,
       runs,
     });
+  }
+
+  private async completedStepsFromEvents(runId: string, attempt: number) {
+    const records = await this.readRunEventFile(runId);
+    const steps = new Map<string, OrchestrationStep>();
+    for (const record of records) {
+      if (record.attempt !== attempt) continue;
+      if (record.event.type === "step_completed") steps.set(record.event.step.id, record.event.step);
+      else if (record.event.type === "step_failed") steps.delete(record.event.failure.stepId);
+    }
+    return [...steps.values()];
   }
 
   async getConversation(id: string) {

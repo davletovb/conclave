@@ -5,6 +5,7 @@ import {
   canDependOn,
   emptyWorkflow,
   graphLayers,
+  isValidNodeId,
   parseWorkflow,
   removeNode,
   renameNode,
@@ -126,13 +127,28 @@ describe("graph editing", () => {
     expect(good.graph).toBe(good.draft);
   });
 
-  it("removes a node from dependencies and reassigns the output", () => {
+  it("removes a node from dependencies, templates and the output", () => {
     const removed = removeNode(graph(), "b");
+    const final = removed.nodes.find(node => node.id === "final")!;
     expect(removed.nodes.map(node => node.id)).toEqual(["a", "final"]);
-    expect(removed.nodes.find(node => node.id === "final")?.dependsOn).toEqual(["a"]);
+    expect(final.dependsOn).toEqual(["a"]);
+
+    // A surviving {{dep.b}} would be an undeclared dependency, so removing a
+    // node others referenced must leave a graph that still validates.
+    expect(final.promptTemplate).not.toContain("{{dep.b}}");
+    expect(validateWorkflow(removed).error).toBe("");
 
     const withoutOutput = removeNode(graph(), "final");
     expect(withoutOutput.outputNodeId).toBe("b");
+  });
+
+  it("recognises the node IDs the server will accept", () => {
+    expect(isValidNodeId("analysis-a")).toBe(true);
+    expect(isValidNodeId("Step_2")).toBe(true);
+    expect(isValidNodeId("1bad")).toBe(false);
+    expect(isValidNodeId("has space")).toBe(false);
+    expect(isValidNodeId("")).toBe(false);
+    expect(isValidNodeId("a".repeat(65))).toBe(false);
   });
 
   it("rewrites dependencies, templates and the output when a node is renamed", () => {
