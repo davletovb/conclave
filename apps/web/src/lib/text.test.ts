@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDuration, formatWindow, highlight, previewLine, recencyBucket, relativeTime, searchTerms } from "./text";
+import { collapsePrompt, formatDuration, formatWindow, highlight, previewLine, recencyBucket, relativeTime, searchTerms } from "./text";
 
 describe("searchTerms", () => {
   it("keeps quoted phrases whole and drops empty input", () => {
@@ -70,5 +70,39 @@ describe("formatting", () => {
     expect(recencyBucket("2026-03-06T08:00:00.000Z", now)).toBe("This week");
     expect(recencyBucket("2026-02-20T08:00:00.000Z", now)).toBe("This month");
     expect(recencyBucket("2025-11-01T08:00:00.000Z", now)).toBe("Earlier");
+  });
+});
+
+describe("collapsePrompt", () => {
+  it("leaves a short prompt whole", () => {
+    expect(collapsePrompt("What is the best council system?")).toBeUndefined();
+    expect(collapsePrompt("a\nb\nc\nd\ne\nf")).toBeUndefined();
+  });
+
+  it("shortens a prompt that is too many lines or too long", () => {
+    const many = Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n");
+    const collapsed = collapsePrompt(many)!;
+    expect(collapsed.split("\n")).toHaveLength(6);
+    expect(collapsed.endsWith("…")).toBe(true);
+    expect(collapsed).not.toContain("line 6");
+
+    const wide = collapsePrompt("x".repeat(2000))!;
+    expect(wide.length).toBeLessThan(400);
+    expect(wide.endsWith("…")).toBe(true);
+  });
+
+  it("truncates rather than hiding, so nothing stays behind the fold", () => {
+    // A clipped element keeps its contents in the DOM, where a link would still
+    // take focus. The excerpt must not contain the part it drops.
+    const withLink = `intro\nsecond\nthird\nfourth\nfifth\nsixth\n[hidden](https://example.com)`;
+    const collapsed = collapsePrompt(withLink)!;
+    expect(collapsed).not.toContain("example.com");
+    expect(collapsed).toContain("sixth");
+  });
+
+  it("closes a code fence it had to cut through", () => {
+    const fenced = "before\n```js\nconst a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\n```";
+    const collapsed = collapsePrompt(fenced)!;
+    expect((collapsed.match(/```/g) ?? []).length % 2).toBe(0);
   });
 });

@@ -22,6 +22,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
+import { collapsePrompt } from "./lib/text";
 import { isEditableTarget, matchShortcut } from "./lib/shortcuts";
 import { formatDuration } from "./lib/text";
 import { parseWorkflow, requiredParticipants, serializeWorkflow } from "./lib/workflow-model";
@@ -113,39 +114,24 @@ function freshUsage(): RunUsage {
 
 /**
  * One conversation turn. A pasted prompt can run to hundreds of lines, which
- * would bury the answer it belongs to, so a long one is clamped until asked for.
+ * would bury the answer it belongs to, so a long one is shortened until asked
+ * for. It is truncated rather than visually clipped: anything hidden behind a
+ * clip is still in the DOM, so a link inside it stays focusable and tabbing
+ * lands on something nobody can see.
  */
 function Turn({ role, content }: { role: "user" | "assistant"; content: string }) {
-  const bodyRef = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [overflows, setOverflows] = useState(false);
-  const clampable = role === "user";
-
-  useEffect(() => {
-    // Only a collapsed body can report whether it had to hide anything.
-    if (!clampable || expanded) return;
-    const element = bodyRef.current;
-    if (!element) return;
-    const measure = () => setOverflows(element.scrollHeight - element.clientHeight > 4);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [clampable, expanded, content]);
+  const preview = role === "user" ? collapsePrompt(content) : undefined;
+  const shown = preview && !expanded ? preview : content;
 
   return (
     <article className={`turn ${role === "user" ? "turn-you" : "turn-them"}`}>
       {role === "assistant" && <span className="eyebrow turn-label">Conclave</span>}
       <div className="bubble">
-        <div
-          className="bubble-body"
-          ref={bodyRef}
-          data-clamped={clampable && !expanded ? true : undefined}
-          data-overflow={clampable && !expanded && overflows ? true : undefined}
-        >
-          <Markdown content={content} />
+        <div className="bubble-body">
+          <Markdown content={shown} />
         </div>
-        {clampable && (overflows || expanded) && (
+        {preview && (
           <button type="button" className="bubble-more" onClick={() => setExpanded(value => !value)}>
             {expanded ? "Show less" : "Show full prompt"}
           </button>

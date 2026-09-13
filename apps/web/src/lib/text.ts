@@ -100,3 +100,22 @@ export function recencyBucket(iso: string, now = Date.now()) {
   if (days < 30) return "This month";
   return "Earlier";
 }
+
+const COLLAPSED_LINES = 6;
+const COLLAPSED_CHARS = 360;
+
+/**
+ * A shortened prompt for the collapsed state, or undefined when the prompt is
+ * already short enough to show whole. The result is real text rather than a
+ * visual clip, so nothing stays in the DOM behind the fold where a link could
+ * still take focus.
+ */
+export function collapsePrompt(content: string) {
+  const lines = content.split("\n");
+  if (lines.length <= COLLAPSED_LINES && content.length <= COLLAPSED_CHARS) return undefined;
+
+  const clipped = lines.slice(0, COLLAPSED_LINES).join("\n").slice(0, COLLAPSED_CHARS).trimEnd();
+  // A fence opened inside the excerpt would swallow the rest of the bubble.
+  const fences = clipped.match(/^\s*```/gm)?.length ?? 0;
+  return `${fences % 2 === 1 ? `${clipped}\n\u0060\u0060\u0060` : clipped}…`;
+}
