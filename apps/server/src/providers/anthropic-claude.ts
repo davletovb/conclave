@@ -23,7 +23,12 @@ type RunResult = {
 };
 
 export interface ClaudeCliRunner {
-  run(args: string[], timeoutMs?: number, onStdoutLine?: (line: string) => void): Promise<RunResult>;
+  run(
+    args: string[],
+    timeoutMs?: number,
+    onStdoutLine?: (line: string) => void,
+    signal?: AbortSignal,
+  ): Promise<RunResult>;
 }
 
 const CLAUDE_MODELS: ModelRef[] = [
@@ -66,24 +71,54 @@ function subscriptionOnlyEnv() {
   return env;
 }
 
-function partialTextDelta(rawLine: string) {
-  const line = rawLine.trim();
-  if (!line) return "";
+function cancelledError() {
+  const error = new Error("Claude Code turn cancelled");
+  error.name = "AbortError";
+  return error;
+}
 
+function parseJsonLine(rawLine: string) {
+  const line = rawLine.trim();
+  if (!line) return undefined;
   try {
-    const outer = JSON.parse(line) as Record<string, unknown>;
-    if (outer.type !== "stream_event") return "";
-    const event = outer.event as Record<string, unknown> | undefined;
-    if (event?.type !== "content_block_delta") return "";
-    const delta = event.delta as Record<string, unknown> | undefined;
-    return delta?.type === "text_delta" && typeof delta.text === "string" ? delta.text : "";
+    return JSON.parse(line) as Record<string, unknown>;
   } catch {
-    return "";
+    return undefined;
   }
 }
 
+function partialTextDelta(rawLine: string) {
+  const outer = parseJsonLine(rawLine);
+  if (outer?.type !== "stream_event") return "";
+  const event = outer.event as Record<string, unknown> | undefined;
+  if (event?.type !== "content_block_delta") return "";
+  const delta = event.delta as Record<string, unknown> | undefined;
+  return delta?.type === "text_delta" && typeof delta.text === "string" ? delta.text : "";
+}
+
+function usageFromLine(rawLine: string) {
+  const event = parseJsonLine(rawLine);
+  if (!event) return undefined;
+  const message = event.message as Record<string, unknown> | undefined;
+  const usage = (event.usage ?? message?.usage) as Record<string, unknown> | undefined;
+  if (!usage) return undefined;
+  const input = usage.input_tokens ?? usage.inputTokens;
+  const output = usage.output_tokens ?? usage.outputTokens;
+  const inputTokens = typeof input === "number" ? input : undefined;
+  const outputTokens = typeof output === "number" ? output : undefined;
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  return { inputTokens, outputTokens };
+}
+
 export class NativeClaudeCliRunner implements ClaudeCliRunner {
-  run(args: string[], timeoutMs = 180_000, onStdoutLine?: (line: string) => void): Promise<RunResult> {
+  run(
+    args: string[],
+    timeoutMs = 180_000,
+    onStdoutLine?: (line: string) => void,
+    signal?: AbortSignal,
+  ): Promise<RunResult> {
+    if (signal?.aborted) return Promise.reject(cancelledError());
+
     return new Promise((resolve, reject) => {
       const child = spawn("claude", args, {
         env: subscriptionOnlyEnv(),
@@ -95,11 +130,20 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
       let lineBuffer = "";
       let settled = false;
 
-      const timer = setTimeout(() => {
+      const finishReject = (error: Error) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         child.kill("SIGTERM");
-        reject(new Error("Claude CLI timed out"));
+        reject(error);
+      };
+
+      const onAbort = () => finishReject(cancelledError());
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      const timer = setTimeout(() => {
+        finishReject(new Error("Claude CLI timed out"));
       }, timeoutMs);
 
       child.stdout.setEncoding("utf8");
@@ -116,17 +160,13 @@ export class NativeClaudeCliRunner implements ClaudeCliRunner {
       });
       child.stderr.on("data", chunk => { stderr += chunk; });
 
-      child.once("error", error => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(error);
-      });
+      child.once("error", error => finishReject(error));
 
       child.once("close", code => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         if (onStdoutLine && lineBuffer) onStdoutLine(lineBuffer);
         resolve({ stdout, stderr, code: code ?? 1 });
       });
@@ -190,6 +230,7 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
   }
 
   async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
+    if (request.signal?.aborted) throw cancelledError();
     await this.requireSubscriptionAccount();
     const startedAt = Date.now();
     const prompt = this.buildPrompt(request);
@@ -213,8 +254,11 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
     ], timeoutMs, line => {
       const delta = partialTextDelta(line);
       if (delta) emit?.({ type: "text_delta", delta });
-    });
+      const usage = usageFromLine(line);
+      if (usage) emit?.({ type: "usage", ...usage });
+    }, request.signal);
 
+    if (request.signal?.aborted) throw cancelledError();
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
       throw new Error(`Claude Code failed: ${detail}`);
@@ -273,15 +317,8 @@ export class AnthropicClaudeProvider implements ProviderAdapter {
     let resultFallback = "";
 
     for (const rawLine of stdout.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line) continue;
-
-      let event: Record<string, unknown>;
-      try {
-        event = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
+      const event = parseJsonLine(rawLine);
+      if (!event) continue;
 
       if (event.type === "assistant") {
         const message = event.message as Record<string, unknown> | undefined;
