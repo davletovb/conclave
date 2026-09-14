@@ -162,6 +162,24 @@ describe("GoogleGeminiProvider", () => {
     expect(created).toBe(2);
   });
 
+  it("does not mistake a credential 'not found' error for a missing Gemini executable", async () => {
+    const provider = new GoogleGeminiProvider(() => {
+      const client = new FakeGeminiClient();
+      client.sessionNewError = new Error("OAuth credentials not found");
+      return client;
+    });
+
+    const status = await provider.status();
+
+    expect(status).toMatchObject({
+      id: "google",
+      available: true,
+      connected: false,
+      authMode: "oauth",
+    });
+    expect(status.message).toMatch(/sign in with google/i);
+  });
+
   it("refuses a Gemini CLI build that does not expose Google-account OAuth", async () => {
     const provider = new GoogleGeminiProvider(() => {
       const client = new FakeGeminiClient();
