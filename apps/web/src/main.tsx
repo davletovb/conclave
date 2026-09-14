@@ -199,6 +199,7 @@ function App() {
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const answerRef = useRef<HTMLElement | null>(null);
 
   /* ------------------------------------------------------------ derived */
   const participants = useMemo(
@@ -307,13 +308,32 @@ function App() {
     return () => window.clearInterval(timer);
   }, [loading, runStartedAt]);
 
+  /**
+   * How far the live output is from where the reader is looking.
+   *
+   * The answer is written *above* council work, so during a run the newest text
+   * is not at the bottom of the surface: following the bottom would pin the
+   * reader below the answer and it would stream out of sight behind a council
+   * list taller than the viewport. While there is an answer, the thing to
+   * follow is its tail; otherwise it is the end of the surface.
+   *
+   * Both the auto-follow and the check for whether the reader has scrolled away
+   * read this, so they cannot disagree about what "latest" means.
+   */
+  const distanceFromLatest = useCallback((surface: HTMLDivElement) => {
+    const answer = answerRef.current;
+    if (answer) return answer.getBoundingClientRect().bottom + 24 - surface.getBoundingClientRect().bottom;
+    return surface.scrollHeight - surface.scrollTop - surface.clientHeight;
+  }, []);
+
   // Long runs keep the newest output in view unless the reader scrolls away.
   useEffect(() => {
     if (!stuckToBottom || !loading) return;
     const surface = streamRef.current;
     if (!surface) return;
-    surface.scrollTop = surface.scrollHeight;
-  }, [liveSteps, result, stuckToBottom, loading]);
+    const target = surface.scrollTop + distanceFromLatest(surface);
+    surface.scrollTop = Math.max(0, Math.min(target, surface.scrollHeight - surface.clientHeight));
+  }, [liveSteps, result, stuckToBottom, loading, distanceFromLatest]);
 
   useEffect(() => {
     if (!copied) return;
@@ -1110,10 +1130,8 @@ function App() {
   );
 
   const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
-    const element = event.currentTarget;
-    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-    setStuckToBottom(distance < 80);
-  }, []);
+    setStuckToBottom(Math.abs(distanceFromLatest(event.currentTarget)) < 80);
+  }, [distanceFromLatest]);
 
   /* ------------------------------------------------------------ render */
   const composerHint = workflowInvalid
@@ -1322,9 +1340,11 @@ function App() {
             )}
 
             {(result || finalStep) && (
-              <section className="answer" aria-label="Final answer">
+              <section className="answer" aria-label="Final answer" ref={answerRef}>
                 <div className="answer-head">
-                  <span className="eyebrow">Final answer</span>
+                  <span className="eyebrow">
+                    {result || loading ? "Final answer" : "Final answer · partial"}
+                  </span>
                   <span className="spacer" />
                   {result
                     ? (
@@ -1335,14 +1355,19 @@ function App() {
                         </button>
                       </>
                     )
-                    : (
-                      // Who is writing belongs in the head: the body is busy
-                      // streaming, and the reader should not lose the byline to it.
-                      <span className="working" aria-live="polite">
-                        <span className="pips"><i /><i /><i /></span>
-                        {finalStep!.model.label} is writing…
-                      </span>
-                    )}
+                    : loading
+                      ? (
+                        // Who is writing belongs in the head: the body is busy
+                        // streaming, and the reader should not lose the byline to it.
+                        <span className="working" aria-live="polite">
+                          <span className="pips"><i /><i /><i /></span>
+                          {finalStep!.model.label} is writing…
+                        </span>
+                      )
+                      // Stopped or interrupted mid-write: what is on screen is
+                      // as far as the model got, and saying otherwise would be
+                      // a lie that never resolves.
+                      : <span className="copy-state">{finalStep!.model.label} stopped before finishing</span>}
                 </div>
                 <div className="answer-body">
                   <Markdown content={result ? result.final : finalStep!.content} />
@@ -1385,7 +1410,9 @@ function App() {
             onClick={() => {
               setStuckToBottom(true);
               const surface = streamRef.current;
-              if (surface) surface.scrollTop = surface.scrollHeight;
+              if (!surface) return;
+              const target = surface.scrollTop + distanceFromLatest(surface);
+              surface.scrollTop = Math.max(0, Math.min(target, surface.scrollHeight - surface.clientHeight));
             }}
           >
             <Icon name="down" size={13} /> Jump to latest
