@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +24,24 @@ export interface AntigravityCliRunner {
   ): Promise<AntigravityRunResult>;
 }
 
+export const CONCLAVE_ANTIGRAVITY_AGENT = "conclave-text";
+
+const CONCLAVE_AGENT_DEFINITION = `---
+name: conclave-text
+description: Text-only Conclave responder with no local or external tools.
+tools: []
+mainAgent: true
+subagent: false
+inheritMcp: false
+commandExecutionPolicy: "off"
+mcpServers: []
+skills: []
+plugins: []
+---
+# System Prompt
+Return a direct text answer only. Do not use tools, subagents, files, commands, browsers, MCP servers, skills, plugins, or external side effects.
+`;
+
 const BLOCKED_BILLING_ENV = [
   "ANTIGRAVITY_API_KEY",
   "GEMINI_API_KEY",
@@ -40,13 +58,29 @@ const BLOCKED_BILLING_ENV = [
   "GOOGLE_GEMINI_BASE_URL",
 ] as const;
 
+const ISOLATED_RUNTIME_ENV = [
+  /^ANTIGRAVITY_CONVERSATION_ID$/,
+  /^ANTIGRAVITY_SOURCE_METADATA$/,
+  /^ANTIGRAVITY_.*(?:BROWSER|SIDECAR).*$/,
+  /^AGY_(?:BROWSER|SIDECAR)_.*$/,
+] as const;
+
 export function buildAntigravityChildEnv(source: NodeJS.ProcessEnv = process.env) {
   const env = { ...source };
 
-  // Antigravity can be configured to use direct Gemini API credentials. Conclave's
-  // Google adapter is subscription-only, so shadow (rather than delete) those
-  // variables: inherited environment/config loading cannot repopulate them.
-  for (const name of BLOCKED_BILLING_ENV) env[name] = "";
+  // Antigravity's documented direct Gemini API route reads GEMINI_API_KEY only
+  // from the process environment and does not load .env files. Remove billing
+  // credentials entirely so account/keyring auth remains the only usable route.
+  // If the user's settings.json still selects modelProvider="gemini", agy fails
+  // closed and the provider explains how to revert to account authentication.
+  for (const name of BLOCKED_BILLING_ENV) delete env[name];
+
+  // A parent agy session exports conversation/browser/sidecar plumbing to child
+  // processes. Conclave starts independent one-shot sessions, so never inherit
+  // that state from the shell that happened to launch pnpm dev.
+  for (const name of Object.keys(env)) {
+    if (ISOLATED_RUNTIME_ENV.some(pattern => pattern.test(name))) delete env[name];
+  }
 
   // Conclave owns provider lifecycle; avoid a background self-updater racing a run.
   env.AGY_CLI_DISABLE_AUTO_UPDATE = "true";
@@ -95,10 +129,16 @@ function terminateProcess(child: ChildProcessWithoutNullStreams, signal: NodeJS.
   }
 }
 
-function createPrivateWorkspace() {
+export function createAntigravityWorkspace() {
   const workspaceDir = mkdtempSync(join(tmpdir(), "conclave-agy-"));
   try {
     chmodSync(workspaceDir, 0o700);
+    const agentDir = join(workspaceDir, ".agents", "agents", CONCLAVE_ANTIGRAVITY_AGENT);
+    mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(agentDir, "agent.md"), CONCLAVE_AGENT_DEFINITION, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     return workspaceDir;
   } catch (error) {
     rmSync(workspaceDir, { recursive: true, force: true });
@@ -106,7 +146,16 @@ function createPrivateWorkspace() {
   }
 }
 
+export type NativeAntigravityCliRunnerOptions = {
+  command?: string;
+  prefixArgs?: string[];
+  createWorkspace?: () => string;
+  cleanupWorkspace?: (workspaceDir: string) => void;
+};
+
 export class NativeAntigravityCliRunner implements AntigravityCliRunner {
+  constructor(private readonly options: NativeAntigravityCliRunnerOptions = {}) {}
+
   run(
     args: string[],
     timeoutMs = 180_000,
@@ -118,24 +167,41 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
 
     let workspaceDir: string;
     try {
-      workspaceDir = createPrivateWorkspace();
+      workspaceDir = (this.options.createWorkspace ?? createAntigravityWorkspace)();
     } catch (error) {
       return Promise.reject(error);
     }
 
+    const cleanup = () => {
+      if (this.options.cleanupWorkspace) {
+        this.options.cleanupWorkspace(workspaceDir);
+        return;
+      }
+      try {
+        rmSync(workspaceDir, { recursive: true, force: true });
+      } catch {
+        // Best effort after the process has exited. Startup reconciliation can
+        // safely ignore an old empty conclave-agy-* directory if the OS refuses.
+      }
+    };
+
     return new Promise((resolve, reject) => {
       let child: ChildProcessWithoutNullStreams;
       try {
-        child = spawn("agy", args, {
-          cwd: workspaceDir,
-          env: buildAntigravityChildEnv(),
-          stdio: ["pipe", "pipe", "pipe"],
-          detached: process.platform !== "win32",
-        });
+        child = spawn(
+          this.options.command ?? "agy",
+          [...(this.options.prefixArgs ?? []), ...args],
+          {
+            cwd: workspaceDir,
+            env: buildAntigravityChildEnv(),
+            stdio: ["pipe", "pipe", "pipe"],
+            detached: process.platform !== "win32",
+          },
+        );
         child.stdin.on("error", () => {});
         child.stdin.end(stdinText ?? "");
       } catch (error) {
-        rmSync(workspaceDir, { recursive: true, force: true });
+        cleanup();
         reject(error);
         return;
       }
@@ -147,14 +213,6 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
       let timeout: NodeJS.Timeout | undefined;
       let killTimer: NodeJS.Timeout | undefined;
 
-      const cleanupWorkspace = () => {
-        try {
-          rmSync(workspaceDir, { recursive: true, force: true });
-        } catch {
-          // Best effort on Windows while a just-terminated child still owns cwd.
-        }
-      };
-
       const removeLifecycleListeners = () => {
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
@@ -163,8 +221,9 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
       const stopChild = () => {
         terminateProcess(child, "SIGTERM");
         if (child.exitCode !== null || killTimer) return;
+        // Keep this timer referenced: teardown must finish even when the caller
+        // has already rejected or the server is otherwise idle.
         killTimer = setTimeout(() => terminateProcess(child, "SIGKILL"), 1_000);
-        killTimer.unref();
       };
 
       const finishReject = (error: Error) => {
@@ -172,7 +231,8 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
         settled = true;
         removeLifecycleListeners();
         stopChild();
-        cleanupWorkspace();
+        // Do not remove the child's cwd while agy/the sandbox can still be using
+        // it. The close handler owns workspace cleanup after process exit.
         reject(error);
       };
 
@@ -198,12 +258,16 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
       });
       child.stderr.on("data", chunk => { stderr += String(chunk); });
 
-      child.once("error", error => finishReject(error));
+      child.once("error", error => {
+        const neverStarted = !child.pid;
+        finishReject(error);
+        if (neverStarted) cleanup();
+      });
 
       child.once("close", code => {
         if (killTimer) clearTimeout(killTimer);
         killTimer = undefined;
-        cleanupWorkspace();
+        cleanup();
         if (settled) return;
         settled = true;
         removeLifecycleListeners();
