@@ -115,6 +115,44 @@ describe("RunManager", () => {
     expect(await store.readRunEvents(started.runId)).toEqual([]);
   });
 
+  it("restores a live run reservation when delete preflight reading fails", async () => {
+    const provider = new CancellableMockProvider();
+    const { manager, store } = await makeManager(provider);
+    const started = await manager.start({
+      request: {
+        mode: "single",
+        prompt: "Keep running while delete preflight fails",
+        participants: [participant],
+      },
+    });
+    await waitForCalls(manager, started.runId);
+
+    const originalGetRun = store.getRun.bind(store);
+    let failNextRunRead = true;
+    store.getRun = async runId => {
+      if (failNextRunRead && runId === started.runId) {
+        failNextRunRead = false;
+        throw new Error("simulated state read failure");
+      }
+      return originalGetRun(runId);
+    };
+
+    await expect(manager.deleteConversation(started.conversationId)).rejects.toThrow(/simulated state read failure/i);
+
+    // The failed delete must restore the live run's reservation rather than
+    // leaving a process-lifetime "delete" claim or dropping protection.
+    await expect(manager.deleteConversation(started.conversationId)).rejects.toThrow(/already has an active run/i);
+    await expect(manager.start({
+      conversationId: started.conversationId,
+      request: { mode: "single", prompt: "Must still be blocked", participants: [participant] },
+    })).rejects.toThrow(/already has an active run/i);
+
+    await manager.cancel(started.runId);
+    await waitForTerminal(manager, started.runId);
+    await manager.deleteConversation(started.conversationId);
+    expect(await manager.getConversation(started.conversationId)).toBeNull();
+  });
+
   it("waits for terminal cancellation cleanup before deleting the conversation", async () => {
     const provider = new CancellableMockProvider();
     const { manager, store } = await makeManager(provider);
