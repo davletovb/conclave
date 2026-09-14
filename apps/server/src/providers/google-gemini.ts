@@ -7,6 +7,7 @@ import type {
   ProviderStatus,
 } from "@conclave/core";
 import {
+  CONCLAVE_ANTIGRAVITY_AGENT,
   NativeAntigravityCliRunner,
   parseAntigravityModels,
   type AntigravityCliRunner,
@@ -33,18 +34,22 @@ type AntigravityStreamEvent = {
   event?: string;
   init?: {
     permission_mode?: string;
+    agent?: string;
+    tools?: string[];
   };
   step_update?: {
     state?: string;
     step_type?: string;
     tool_name?: string;
     text_delta?: string;
+    tool_info?: unknown;
+    subagent_info?: unknown;
   };
   result?: AntigravityTerminalResult;
 };
 
 const LEGACY_GEMINI_ALIASES = new Set(["auto", "pro", "flash", "flash-lite"]);
-const SAFE_PERMISSION_MODES = new Set(["request-review", "strict"]);
+const SAFE_PERMISSION_MODES = new Set(["request-review", "proceed-in-sandbox", "strict"]);
 
 const TEXT_ONLY_INSTRUCTIONS = [
   "You are responding inside Conclave, a multi-model reasoning interface.",
@@ -191,8 +196,9 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     const controller = new AbortController();
     let streamedText = "";
     let terminal: AntigravityTerminalResult | undefined;
+    let initVerified = false;
+    let boundaryViolation = "";
     let toolViolation = "";
-    let permissionViolation = "";
 
     const onAbort = () => controller.abort();
     request.signal?.addEventListener("abort", onAbort, { once: true });
@@ -202,17 +208,20 @@ export class GoogleGeminiProvider implements ProviderAdapter {
       "--output-format", "stream-json",
       "--print-timeout", printTimeout,
       "--sandbox",
-      "--mode=default",
+      "--agent", CONCLAVE_ANTIGRAVITY_AGENT,
     ];
     if (resolvedModel) args.push("--model", resolvedModel);
     const stdinText = `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`;
 
     const safetyError = () => {
-      if (permissionViolation) {
-        return new Error(`Antigravity permission mode ${permissionViolation} is not safe for Conclave's text-only Google provider. Use request-review or strict mode.`);
+      if (boundaryViolation) {
+        return new Error(`Antigravity did not preserve Conclave's tool-free boundary: ${boundaryViolation}`);
       }
       if (toolViolation) {
-        return new Error(`Antigravity attempted a tool step (${toolViolation}); Conclave's Google provider is text-only.`);
+        return new Error(`Antigravity attempted a tool/subagent step (${toolViolation}) despite Conclave's tool-free agent.`);
+      }
+      if (!initVerified) {
+        return new Error("Antigravity completed without a verifiable tool-free init event");
       }
       return undefined;
     };
@@ -223,11 +232,27 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         if (!event) return;
 
         if (event.event === "init") {
-          const mode = event.init?.permission_mode ?? "unknown";
-          if (!SAFE_PERMISSION_MODES.has(mode)) {
-            permissionViolation = mode;
+          const mode = event.init?.permission_mode;
+          const agent = event.init?.agent;
+          const tools = event.init?.tools;
+
+          if (!mode || !SAFE_PERMISSION_MODES.has(mode)) {
+            boundaryViolation = `permission mode ${mode ?? "missing"} is not one of request-review, proceed-in-sandbox, or strict`;
             controller.abort();
+            return;
           }
+          if (agent !== CONCLAVE_ANTIGRAVITY_AGENT) {
+            boundaryViolation = `expected agent ${CONCLAVE_ANTIGRAVITY_AGENT}, got ${agent ?? "missing"}`;
+            controller.abort();
+            return;
+          }
+          if (!Array.isArray(tools) || tools.length !== 0) {
+            boundaryViolation = `expected zero available tools, got ${Array.isArray(tools) ? tools.join(", ") || "none" : "an unreadable tool list"}`;
+            controller.abort();
+            return;
+          }
+
+          initVerified = true;
           return;
         }
 
@@ -235,8 +260,19 @@ export class GoogleGeminiProvider implements ProviderAdapter {
           const update = event.step_update;
           if (!update) return;
 
-          if (update.step_type === "tool") {
-            toolViolation = update.tool_name || "unknown tool";
+          if (!initVerified) {
+            boundaryViolation = "received a step before the tool-free init boundary was verified";
+            controller.abort();
+            return;
+          }
+
+          if (update.step_type === "tool" || update.tool_info !== undefined) {
+            toolViolation = update.tool_name || "unexpected tool activity";
+            controller.abort();
+            return;
+          }
+          if (update.subagent_info !== undefined || update.step_type === "subagent") {
+            toolViolation = "subagent activity";
             controller.abort();
             return;
           }
