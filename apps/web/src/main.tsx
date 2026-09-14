@@ -96,6 +96,7 @@ function initialSelection(models: ModelRef[]) {
     { provider: "openai", mockModel: "mock-gpt" },
     { provider: "anthropic", mockModel: "mock-claude" },
     { provider: "xai", mockModel: "mock-grok" },
+    { provider: "google", mockModel: "mock-gemini" },
   ];
 
   return slots

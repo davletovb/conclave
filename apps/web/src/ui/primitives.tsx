@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ModelRef, OrchestrationMode, ProviderId } from "@conclave/core";
 import { highlight } from "../lib/text";
 import { renderKey } from "../lib/shortcuts";
+import "./google-provider.css";
 
 /* -------------------------------------------------------------------------- */
 /* icons                                                                       */
@@ -89,6 +90,7 @@ const providerName: Record<ProviderId, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
   xai: "xAI",
+  google: "Google Gemini",
   mock: "Mock",
 };
 
@@ -96,6 +98,7 @@ const providerGlyph: Record<ProviderId, string> = {
   openai: "◎",
   anthropic: "A",
   xai: "x",
+  google: "G",
   mock: "M",
 };
 

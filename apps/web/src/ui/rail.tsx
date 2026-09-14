@@ -33,6 +33,7 @@ function runtimeName(status: ProviderStatus) {
   if (status.id === "openai") return `ChatGPT${plan}`;
   if (status.id === "anthropic") return `Claude${plan}`;
   if (status.id === "xai") return `Grok${plan}`;
+  if (status.id === "google") return `Gemini${plan}`;
   return status.label;
 }
 
