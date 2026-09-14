@@ -1326,27 +1326,27 @@ function App() {
                 <div className="answer-head">
                   <span className="eyebrow">Final answer</span>
                   <span className="spacer" />
-                  {result && copied && <span className="copy-state">Copied</span>}
-                  {result && (
-                    <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
-                      <Icon name="copy" size={13} /> Copy
-                    </button>
-                  )}
+                  {result
+                    ? (
+                      <>
+                        {copied && <span className="copy-state">Copied</span>}
+                        <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
+                          <Icon name="copy" size={13} /> Copy
+                        </button>
+                      </>
+                    )
+                    : (
+                      // Who is writing belongs in the head: the body is busy
+                      // streaming, and the reader should not lose the byline to it.
+                      <span className="working" aria-live="polite">
+                        <span className="pips"><i /><i /><i /></span>
+                        {finalStep!.model.label} is writing…
+                      </span>
+                    )}
                 </div>
-                {result
-                  ? (
-                    <div className="answer-body">
-                      <Markdown content={result.final} />
-                    </div>
-                  )
-                  : (
-                    // Half-written markdown reads as noise, so the answer is
-                    // withheld until it is whole rather than assembled on screen.
-                    <div className="working" aria-live="polite">
-                      <span className="pips"><i /><i /><i /></span>
-                      {finalStep!.model.label} is writing the final answer…
-                    </div>
-                  )}
+                <div className="answer-body">
+                  <Markdown content={result ? result.final : finalStep!.content} />
+                </div>
               </section>
             )}
 
