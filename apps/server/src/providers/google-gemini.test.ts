@@ -8,13 +8,18 @@ class FakeGeminiClient implements GeminiAcpClientLike {
   readonly workspaceDir = join(tmpdir(), "conclave-gemini-test-workspace");
   listeners = new Set<(notification: GeminiAcpNotification) => void>();
   requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   authMethods = [
     { id: "oauth-personal" },
     { id: "gemini-api-key" },
     { id: "vertex-ai" },
   ];
+  sessionNewError: Error | null = null;
   promptChunkDelayMs = 0;
+  holdPrompt = false;
+  thoughtChunkCount = 3;
   closed = false;
+  private promptReject: ((error: Error) => void) | null = null;
 
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     this.requests.push({ method, params });
@@ -22,24 +27,30 @@ class FakeGeminiClient implements GeminiAcpClientLike {
     if (method === "initialize") {
       return { authMethods: this.authMethods } as T;
     }
-    if (method === "authenticate") {
-      return {} as T;
-    }
     if (method === "session/new") {
+      if (this.sessionNewError) throw this.sessionNewError;
       return { sessionId: "gemini-session-1" } as T;
     }
     if (method === "session/prompt") {
-      const emitChunks = () => {
-        this.emit({
-          method: "session/update",
-          params: {
-            sessionId: "gemini-session-1",
-            update: {
-              sessionUpdate: "agent_thought_chunk",
-              content: { type: "text", text: "private reasoning" },
-            },
-          },
+      if (this.holdPrompt) {
+        return new Promise<T>((_resolve, reject) => {
+          this.promptReject = reject;
         });
+      }
+
+      const emitChunks = () => {
+        for (let i = 0; i < this.thoughtChunkCount; i += 1) {
+          this.emit({
+            method: "session/update",
+            params: {
+              sessionId: "gemini-session-1",
+              update: {
+                sessionUpdate: "agent_thought_chunk",
+                content: { type: "text", text: `private reasoning ${i}` },
+              },
+            },
+          });
+        }
         this.emit({
           method: "session/update",
           params: {
@@ -77,6 +88,14 @@ class FakeGeminiClient implements GeminiAcpClientLike {
     throw new Error(`Unexpected Gemini ACP request: ${method}`);
   }
 
+  async notify(method: string, params: Record<string, unknown> = {}) {
+    this.notifications.push({ method, params });
+    if (method === "session/cancel") {
+      this.promptReject?.(new Error("Gemini prompt cancelled"));
+      this.promptReject = null;
+    }
+  }
+
   onNotification(listener: (notification: GeminiAcpNotification) => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -84,6 +103,8 @@ class FakeGeminiClient implements GeminiAcpClientLike {
 
   close() {
     this.closed = true;
+    this.promptReject?.(new Error("Gemini ACP client closed"));
+    this.promptReject = null;
   }
 
   private emit(notification: GeminiAcpNotification) {
@@ -91,30 +112,42 @@ class FakeGeminiClient implements GeminiAcpClientLike {
   }
 }
 
+async function waitForRequest(client: FakeGeminiClient, method: string) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (client.requests.some(request => request.method === method)) return;
+    await new Promise(resolve => setTimeout(resolve, 2));
+  }
+  throw new Error(`Timed out waiting for ${method}`);
+}
+
 describe("GoogleGeminiProvider", () => {
-  it("exposes stable Gemini CLI aliases without authenticating just to list models", async () => {
+  it("exposes stable Gemini CLI aliases only after an OAuth-backed session opens", async () => {
     const clients: FakeGeminiClient[] = [];
     const provider = new GoogleGeminiProvider(model => {
       expect(model).toBeUndefined();
       const client = new FakeGeminiClient();
       clients.push(client);
       return client;
-    }, () => true);
+    });
 
     const models = await provider.listModels();
 
     expect(models.map(model => model.model)).toEqual(["auto", "pro", "flash", "flash-lite"]);
     expect(models[0]).toMatchObject({ provider: "google", source: "subscription", isDefault: true });
-    expect(clients.flatMap(client => client.requests).some(request => request.method === "authenticate")).toBe(false);
+    const requests = clients.flatMap(client => client.requests);
+    expect(requests.map(request => request.method)).toEqual(["initialize", "session/new"]);
+    expect(requests.some(request => request.method === "authenticate")).toBe(false);
     expect(clients.every(client => client.closed)).toBe(true);
   });
 
-  it("reports an installed CLI as signed out and withholds real models when no cached Google OAuth exists", async () => {
+  it("reports an installed CLI as signed out when the OAuth-forced session cannot open", async () => {
     let created = 0;
     const provider = new GoogleGeminiProvider(() => {
       created += 1;
-      return new FakeGeminiClient();
-    }, () => false);
+      const client = new FakeGeminiClient();
+      client.sessionNewError = new Error("Authentication required");
+      return client;
+    });
 
     const status = await provider.status();
 
@@ -124,26 +157,24 @@ describe("GoogleGeminiProvider", () => {
       connected: false,
       authMode: "oauth",
     });
-    expect(status.message).toMatch(/run `gemini` once/i);
-    await expect(provider.listModels()).rejects.toThrow(/not signed in with a Google account/i);
-    // status needs one ACP initialize to distinguish "installed" from missing;
-    // model listing stops before spawning another client when signed out.
-    expect(created).toBe(1);
+    expect(status.message).toMatch(/run `gemini` in a terminal/i);
+    await expect(provider.listModels()).rejects.toThrow(/authentication required/i);
+    expect(created).toBe(2);
   });
 
-  it("refuses API-key or Vertex-only ACP auth", async () => {
+  it("refuses a Gemini CLI build that does not expose Google-account OAuth", async () => {
     const provider = new GoogleGeminiProvider(() => {
       const client = new FakeGeminiClient();
       client.authMethods = [{ id: "gemini-api-key" }, { id: "vertex-ai" }];
       return client;
-    }, () => true);
+    });
 
     const status = await provider.status();
     expect(status.connected).toBe(false);
-    await expect(provider.listModels()).rejects.toThrow(/does not expose Google-account OAuth/i);
+    await expect(provider.listModels()).rejects.toThrow(/no Google-account OAuth method/i);
   });
 
-  it("selects oauth-personal, uses the isolated workspace, and streams only answer text", async () => {
+  it("uses the isolated OAuth workspace and streams only answer text", async () => {
     const clients: FakeGeminiClient[] = [];
     const models: Array<string | undefined> = [];
     const provider = new GoogleGeminiProvider(model => {
@@ -151,7 +182,7 @@ describe("GoogleGeminiProvider", () => {
       const client = new FakeGeminiClient();
       clients.push(client);
       return client;
-    }, () => true);
+    });
     const events: Array<{ type: string; [key: string]: unknown }> = [];
 
     const response = await provider.generate({
@@ -167,8 +198,7 @@ describe("GoogleGeminiProvider", () => {
     });
 
     const client = clients[0];
-    const authenticate = client.requests.find(request => request.method === "authenticate");
-    expect(authenticate?.params).toEqual({ methodId: "oauth-personal" });
+    expect(client.requests.some(request => request.method === "authenticate")).toBe(false);
     expect(client.requests.find(request => request.method === "session/new")?.params).toMatchObject({
       cwd: client.workspaceDir,
       mcpServers: [],
@@ -176,28 +206,38 @@ describe("GoogleGeminiProvider", () => {
     expect(events.filter(event => event.type === "text_delta").map(event => event.delta).join(""))
       .toBe("Gemini subscription answer");
     expect(JSON.stringify(events)).not.toContain("private reasoning");
+    expect(events.filter(event => event.type === "status")).toHaveLength(1);
     expect(events).toContainEqual({ type: "usage", inputTokens: 17, outputTokens: 9 });
     expect(client.closed).toBe(true);
   });
 
-  it("fails before ACP authentication when Gemini CLI has not been signed in interactively", async () => {
-    let created = false;
-    const provider = new GoogleGeminiProvider(() => {
-      created = true;
-      return new FakeGeminiClient();
-    }, () => false);
+  it("sends ACP session/cancel before closing an aborted in-flight prompt", async () => {
+    const client = new FakeGeminiClient();
+    client.holdPrompt = true;
+    const provider = new GoogleGeminiProvider(() => client);
+    const controller = new AbortController();
 
-    await expect(provider.generate({
+    const pending = provider.generate({
       model: "auto",
-      messages: [{ role: "user", content: "Hello" }],
-    })).rejects.toThrow(/not signed in with a Google account/i);
-    expect(created).toBe(false);
+      messages: [{ role: "user", content: "Keep thinking." }],
+      signal: controller.signal,
+    });
+
+    await waitForRequest(client, "session/prompt");
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(client.notifications).toContainEqual({
+      method: "session/cancel",
+      params: { sessionId: "gemini-session-1" },
+    });
+    expect(client.closed).toBe(true);
   });
 
   it("waits for ACP text chunks that arrive just after session/prompt resolves", async () => {
     const client = new FakeGeminiClient();
     client.promptChunkDelayMs = 75;
-    const provider = new GoogleGeminiProvider(() => client, () => true);
+    const provider = new GoogleGeminiProvider(() => client);
 
     const response = await provider.generate({
       model: "flash",
