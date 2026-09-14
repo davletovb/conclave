@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GeminiAcpClientLike, GeminiAcpNotification } from "../gemini/acp-client.js";
 import { GoogleGeminiProvider } from "./google-gemini.js";
 
@@ -16,6 +16,8 @@ class FakeGeminiClient implements GeminiAcpClientLike {
   ];
   sessionNewError: Error | null = null;
   promptChunkDelayMs = 0;
+  lateTextChunkIntervalMs = 0;
+  lateTextChunkCount = 0;
   holdPrompt = false;
   thoughtChunkCount = 3;
   closed = false;
@@ -38,6 +40,19 @@ class FakeGeminiClient implements GeminiAcpClientLike {
         });
       }
 
+      const emitText = (text: string) => {
+        this.emit({
+          method: "session/update",
+          params: {
+            sessionId: "gemini-session-1",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text },
+            },
+          },
+        });
+      };
+
       const emitChunks = () => {
         for (let i = 0; i < this.thoughtChunkCount; i += 1) {
           this.emit({
@@ -51,26 +66,14 @@ class FakeGeminiClient implements GeminiAcpClientLike {
             },
           });
         }
-        this.emit({
-          method: "session/update",
-          params: {
-            sessionId: "gemini-session-1",
-            update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: "Gemini subscription " },
-            },
-          },
-        });
-        this.emit({
-          method: "session/update",
-          params: {
-            sessionId: "gemini-session-1",
-            update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: "answer" },
-            },
-          },
-        });
+        emitText("Gemini subscription ");
+        emitText("answer");
+
+        if (this.lateTextChunkIntervalMs > 0 && this.lateTextChunkCount > 0) {
+          for (let i = 1; i <= this.lateTextChunkCount; i += 1) {
+            setTimeout(() => emitText(` late-${i}`), this.lateTextChunkIntervalMs * i);
+          }
+        }
       };
 
       if (this.promptChunkDelayMs > 0) setTimeout(emitChunks, this.promptChunkDelayMs);
@@ -119,6 +122,11 @@ async function waitForRequest(client: FakeGeminiClient, method: string) {
   }
   throw new Error(`Timed out waiting for ${method}`);
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+});
 
 describe("GoogleGeminiProvider", () => {
   it("exposes stable Gemini CLI aliases only after an OAuth-backed session opens", async () => {
@@ -264,5 +272,32 @@ describe("GoogleGeminiProvider", () => {
 
     expect(response.content).toBe("Gemini subscription answer");
     expect(client.closed).toBe(true);
+  });
+
+  it("stops waiting at the settle deadline even if late text chunks keep arriving", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("CONCLAVE_GEMINI_SETTLE_WINDOW_MS", "80");
+
+    const client = new FakeGeminiClient();
+    client.lateTextChunkIntervalMs = 20;
+    client.lateTextChunkCount = 100;
+    const provider = new GoogleGeminiProvider(() => client);
+
+    let resolved = false;
+    const pending = provider.generate({
+      model: "flash",
+      messages: [{ role: "user", content: "Do not wait forever for late chunks." }],
+    }).then(response => {
+      resolved = true;
+      return response;
+    });
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(resolved).toBe(true);
+    const response = await pending;
+    expect(response.content).toContain("Gemini subscription answer");
+    expect(client.closed).toBe(true);
+    vi.clearAllTimers();
   });
 });
