@@ -31,7 +31,7 @@ packages/
   core/      shared provider + orchestration contracts
 ```
 
-The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code, Grok Build ACP, and Gemini CLI ACP.
+The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code, Grok Build ACP, and Antigravity CLI.
 
 ## Current status
 
@@ -40,15 +40,15 @@ All four current providers have subscription-backed local adapters:
 - OpenAI through `codex app-server` and ChatGPT sign-in
 - Anthropic through Claude Code and `claude.ai` sign-in
 - xAI through Grok Build ACP and cached Grok/X OAuth sign-in
-- Google through the official Gemini CLI ACP interface and Google-account OAuth sign-in
+- Google Gemini through the official Antigravity CLI and cached Google-account sign-in
 
 If a runtime is missing or not authenticated, Conclave keeps that provider's mock model available so the rest of the app remains usable.
 
-The adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions, refuses Claude Console/API-key or cloud-provider authentication, removes xAI API-key/custom-endpoint environment routes before launching Grok ACP, and only accepts Gemini CLI's Google-account OAuth route. The Gemini adapter does not call Google model APIs directly, does not read or copy OAuth credential contents, refuses API-key/Vertex routes, and runs Gemini in a text-only ACP boundary with extensions, MCP servers, filesystem/terminal capabilities, inherited Gemini context, and model tools disabled.
+The adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions, refuses Claude Console/API-key or cloud-provider authentication, removes xAI API-key/custom-endpoint environment routes before launching Grok ACP, and uses Antigravity's cached Google-account authentication for Gemini. The Google adapter does not call Gemini model APIs directly and shadows direct Gemini/API/Vertex credential environment routes before launching `agy`.
 
 Claude paid plans can separately enable Anthropic **usage credits**. If usage credits are enabled on the Claude account, Anthropic may use them after included subscription limits are exhausted. That is an account-level Claude setting; Conclave cannot override it.
 
-Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex, Grok ACP, and Gemini ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
+Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex, Grok ACP, and Antigravity CLI expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
 
 Conversations and run state are persisted locally. A run is owned by the server rather than by one browser request, so closing or refreshing the page does not cancel it. The browser reconnects to the run event log and replays anything it missed. If the Conclave server itself stops during a run, startup reconciles any already-persisted terminal event first; only genuinely unfinished work is marked `interrupted` and offered for a new attempt in the same conversation.
 
@@ -63,11 +63,11 @@ Active runs have a **Stop** control. Cancellation propagates into the current lo
 - OpenAI Codex — `turn/interrupt`
 - Claude Code — terminate that call's non-interactive Claude child process
 - Grok Build — close that call's dedicated ACP process
-- Gemini CLI — send ACP `session/cancel`, then terminate the dedicated ACP child if it does not settle
+- Antigravity CLI — terminate the dedicated `agy` process group, with SIGTERM followed by SIGKILL fallback
 
 Cancelled attempts retain their already-persisted partial output and can be resumed as a new attempt.
 
-Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code, Grok Build ACP, and Gemini CLI ACP do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
+Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code, Grok Build ACP, and Antigravity CLI do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
 
 Each provider step also has an inactivity watchdog. By default, a call that produces no provider progress event for **180 seconds** is treated as stalled, its local runtime call is aborted, and the step is eligible for the same single bounded retry used for transient transport failures when call-budget headroom remains. Any provider event resets the watchdog, so long-running calls can continue as long as they are still making observable progress. Set `CONCLAVE_STEP_STALL_TIMEOUT_MS` to a positive integer of at least 10 milliseconds to tune the inactivity window for local testing or unusually slow runtimes.
 
@@ -238,18 +238,26 @@ Restart `pnpm dev` after signing in.
 
 ## Connect your Gemini subscription
 
-Conclave expects the official Gemini CLI on the same machine. Verify the installed CLI, then start it interactively:
+Install the official Google Antigravity CLI:
 
 ```bash
-gemini --version
-gemini
+curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-Choose **Sign in with Google** using the Google account associated with your Gemini access/subscription. Complete that login in Gemini CLI itself, then restart `pnpm dev`. Conclave deliberately does not initiate the Google login flow and does not read, copy, or parse Gemini OAuth credential contents.
+Open a new terminal (or reload your shell), verify the CLI, and start one interactive session:
 
-Conclave talks to Gemini through the official Agent Client Protocol mode (`gemini --acp`). Each call runs in a fresh owner-only temporary workspace whose settings force `oauth-personal`. Conclave does not call ACP `authenticate()`, does not use a Gemini API key or Vertex AI, and blocks API/Vertex credential selectors from being restored by Gemini CLI's home `.env` fallback. Extensions, MCP servers, inherited Gemini context/auto-memory, filesystem and terminal capabilities, and model tools are disabled for this text-only provider boundary.
+```bash
+agy --version
+agy
+```
 
-Gemini CLI occasionally emits benign prose next to ACP JSON-RPC (for example a cached-credentials banner); Conclave tolerates that noise but fails closed if stdout/stderr indicates that interactive authentication is required. The exposed stable CLI aliases are `auto` (default), `pro`, `flash`, and `flash-lite`.
+Complete **Sign in with Google** using the Google account associated with your Gemini access/subscription. Antigravity stores that sign-in in the platform keyring; Conclave reuses the cached login and does not initiate OAuth itself. Restart `pnpm dev` after signing in.
+
+Conclave discovers the signed-in account's current Gemini catalog with `agy models` and exposes only model IDs beginning with `gemini-`. It does not hard-code preview model names, so new or retired Gemini variants follow Antigravity's live catalog automatically. The short-lived aliases `auto`, `pro`, `flash`, and `flash-lite` from the earlier Gemini-CLI adapter are accepted only for resuming persisted runs and are mapped to the closest live Antigravity model.
+
+For generation, Conclave runs Antigravity headlessly with `--input-format stream-json --output-format stream-json`. The prompt is sent over stdin rather than the process command line. Each call uses a fresh owner-only temporary workspace, shadows direct Gemini/API/Vertex credential environment variables, enables Antigravity's terminal sandbox, and never passes `--dangerously-skip-permissions`. Conclave instructs the model not to use tools and aborts the provider call if the event stream reports a tool step.
+
+Antigravity still loads the user's global permission configuration from its normal home directory because that is also where its supported account/keyring integration is rooted. Avoid broad global `allow` rules if you want Conclave's Google provider to remain a text-only reasoning surface; the private workspace and sandbox reduce exposure, but Conclave does not claim to override centrally or globally managed Antigravity permissions.
 
 Restart `pnpm dev` after signing in.
 
@@ -274,7 +282,7 @@ GitHub Actions runs the same checks on pull requests.
 1. ✅ OpenAI adapter via subscription-authenticated Codex runtime
 2. ✅ Anthropic adapter via subscription-authenticated Claude Code runtime
 3. ✅ xAI adapter via Grok Build ACP runtime
-4. ✅ Google Gemini adapter via subscription-authenticated Gemini CLI ACP runtime
+4. ✅ Google Gemini adapter via subscription-authenticated Antigravity CLI runtime
 5. ✅ Normalized streaming event protocol for partial output and future tool events
 6. ✅ Persistent conversations and resumable orchestration runs
 7. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
