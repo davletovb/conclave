@@ -32,11 +32,14 @@ description: Text-only Conclave responder with no local or external tools.
 tools: []
 mainAgent: true
 subagent: false
+inheritCustomizations: false
 inheritMcp: false
 commandExecutionPolicy: "off"
 mcpServers: []
 skills: []
 plugins: []
+rules: []
+agents: []
 ---
 # System Prompt
 Return a direct text answer only. Do not use tools, subagents, files, commands, browsers, MCP servers, skills, plugins, or external side effects.
