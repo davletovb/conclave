@@ -170,6 +170,18 @@ describe("GoogleGeminiProvider", () => {
     expect(created).toBe(2);
   });
 
+  it("turns synchronous client setup failures into an unavailable status payload", async () => {
+    const provider = new GoogleGeminiProvider(() => {
+      throw new Error("ENOSPC: no space left on device, mkdtemp");
+    });
+
+    await expect(provider.status()).resolves.toMatchObject({
+      id: "google",
+      available: false,
+      connected: false,
+    });
+  });
+
   it("does not mistake a credential 'not found' error for a missing Gemini executable", async () => {
     const provider = new GoogleGeminiProvider(() => {
       const client = new FakeGeminiClient();
