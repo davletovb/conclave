@@ -197,6 +197,8 @@ export interface OrchestrationRequest {
   budget?: RunBudget;
   /** Optional server-owned web retrieval performed once before orchestration. */
   webSearch?: WebSearchConfig;
+  /** Server-resolved shared evidence. Clients should not populate this directly. */
+  webSearchEvidence?: WebSearchEvidence;
   /** Server-injected prior conversation context. Clients normally omit this. */
   history?: ChatMessage[];
 }
