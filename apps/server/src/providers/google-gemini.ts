@@ -8,7 +8,6 @@ import type {
 } from "@conclave/core";
 import {
   GeminiAcpClient,
-  hasCachedGeminiOAuth,
   type GeminiAcpClientLike,
   type GeminiAcpNotification,
 } from "../gemini/acp-client.js";
@@ -30,6 +29,7 @@ type PromptResponse = {
   };
 };
 
+const OAUTH_METHOD_ID = "oauth-personal";
 const GEMINI_MODELS: ModelRef[] = [
   {
     provider: "google",
@@ -83,34 +83,19 @@ export class GoogleGeminiProvider implements ProviderAdapter {
 
   constructor(
     private readonly createClient: GeminiAcpClientFactory = model => new GeminiAcpClient(model),
-    private readonly hasCachedOAuth: () => boolean = hasCachedGeminiOAuth,
   ) {}
 
   async status(): Promise<ProviderStatus> {
     const client = this.createClient();
     try {
-      const init = await this.initialize(client);
-      const authMethods = new Set((init.authMethods ?? []).map(method => method.id));
-      if (!authMethods.has("oauth-personal")) {
-        return {
-          id: this.id,
-          label: this.label,
-          available: true,
-          connected: false,
-          message: "Gemini CLI is installed, but this build does not expose Google-account OAuth over ACP.",
-        };
-      }
-
-      const cached = this.hasCachedOAuth();
+      await this.openOAuthSession(client, 8_000);
       return {
         id: this.id,
         label: this.label,
         available: true,
-        connected: cached,
+        connected: true,
         authMode: "oauth",
-        message: cached
-          ? "Using your cached Google-account sign-in through the official Gemini CLI ACP interface"
-          : "Gemini CLI is installed. Run `gemini` once and choose Sign in with Google before using it in Conclave.",
+        message: "Using your existing Google-account sign-in through the official Gemini CLI ACP interface",
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Gemini CLI runtime unavailable";
@@ -120,7 +105,10 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         label: this.label,
         available: !unavailable,
         connected: false,
-        message,
+        authMode: unavailable ? undefined : "oauth",
+        message: unavailable
+          ? message
+          : `Gemini CLI is installed but Google-account OAuth is not ready. Run \`gemini\` in a terminal, choose Sign in with Google, then restart Conclave. ${message}`,
       };
     } finally {
       client.close();
@@ -128,17 +116,9 @@ export class GoogleGeminiProvider implements ProviderAdapter {
   }
 
   async listModels(): Promise<ModelRef[]> {
-    if (!this.hasCachedOAuth()) {
-      throw new Error("Gemini CLI is not signed in with a Google account. Run `gemini` and choose Sign in with Google.");
-    }
-
     const client = this.createClient();
     try {
-      const init = await this.initialize(client);
-      const authMethods = new Set((init.authMethods ?? []).map(method => method.id));
-      if (!authMethods.has("oauth-personal")) {
-        throw new Error("Gemini CLI ACP does not expose Google-account OAuth in this installation.");
-      }
+      await this.openOAuthSession(client, 8_000);
       return GEMINI_MODELS;
     } finally {
       client.close();
@@ -147,21 +127,35 @@ export class GoogleGeminiProvider implements ProviderAdapter {
 
   async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
     if (request.signal?.aborted) throw cancelledError();
-    if (!this.hasCachedOAuth()) {
-      throw new Error("Gemini CLI is not signed in with a Google account. Run `gemini`, choose Sign in with Google, then retry in Conclave.");
-    }
 
     const client = this.createClient(request.model);
     const startedAt = Date.now();
     let unsubscribe = () => {};
-    const onAbort = () => client.close();
+    let sessionId = "";
+    let aborting = false;
+
+    const onAbort = () => {
+      if (aborting) return;
+      aborting = true;
+      if (!sessionId) {
+        client.close();
+        return;
+      }
+
+      // ACP defines session/cancel as a notification. Flush it to Gemini before
+      // closing the stdio transport so an in-flight model request gets a chance
+      // to stop cooperatively; close() still has SIGTERM/SIGKILL fallback.
+      void client.notify("session/cancel", { sessionId })
+        .catch(() => {})
+        .finally(() => client.close());
+    };
     request.signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
-      await this.authenticateSubscription(client);
+      const session = await this.openOAuthSession(client, 30_000);
+      sessionId = session.sessionId;
       if (request.signal?.aborted) throw cancelledError();
 
-      let sessionId = "";
       let streamedText = "";
       let lastReasoningStatusAt = 0;
 
@@ -174,9 +168,9 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         if (!update) return;
 
         if (update.sessionUpdate === "agent_thought_chunk") {
-          // Never expose model chain-of-thought. Emit an occasional generic
-          // progress signal so a long reasoning-only phase still resets the
-          // orchestrator's inactivity watchdog without flooding persisted events.
+          // Never expose model chain-of-thought. Emit at most one generic
+          // heartbeat every five seconds so active long reasoning does not look
+          // stalled without writing one durable event per thought token.
           const now = Date.now();
           if (now - lastReasoningStatusAt >= 5_000) {
             lastReasoningStatusAt = now;
@@ -192,16 +186,6 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         streamedText += content.text;
         emit?.({ type: "text_delta", delta: content.text });
       });
-
-      // Use the exact per-process directory created by the ACP transport. The
-      // deny-all policy file is the only file Conclave places there; no repo or
-      // unrelated OS temp contents become workspace context for Gemini.
-      const session = await client.request<SessionNewResponse>("session/new", {
-        cwd: client.workspaceDir,
-        mcpServers: [],
-      }, 30_000);
-      sessionId = session.sessionId;
-      if (request.signal?.aborted) throw cancelledError();
 
       const prompt = this.buildPrompt(request);
       const timeoutMs = Number(process.env.CONCLAVE_GEMINI_TURN_TIMEOUT_MS ?? 180_000);
@@ -268,26 +252,32 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     return client.request<InitializeResponse>("initialize", {
       protocolVersion: 1,
       clientInfo: { name: "Conclave", version: "1" },
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
+      // Omit fs/terminal capabilities entirely. In Gemini ACP, the presence of
+      // `clientCapabilities.fs` is itself enough to install an ACP filesystem
+      // service even if individual booleans are false.
+      clientCapabilities: {},
     }, 15_000);
   }
 
-  private async authenticateSubscription(client: GeminiAcpClientLike) {
+  private async openOAuthSession(client: GeminiAcpClientLike, timeoutMs: number) {
     const init = await this.initialize(client);
     const authMethods = new Set((init.authMethods ?? []).map(method => method.id));
-    if (!authMethods.has("oauth-personal")) {
+    if (!authMethods.has(OAUTH_METHOD_ID)) {
       if (authMethods.has("gemini-api-key") || authMethods.has("vertex-ai")) {
-        throw new Error("Gemini CLI has no Google-account OAuth method available. Conclave refuses API-key and Vertex billing; sign in to the official Gemini CLI with your Google account.");
+        throw new Error("Gemini CLI has no Google-account OAuth method available. Conclave refuses API-key and Vertex billing; install a Gemini CLI build that exposes Google-account OAuth.");
       }
       throw new Error("Gemini CLI is installed but does not expose a supported Google-account OAuth method over ACP.");
     }
 
-    await client.request("authenticate", {
-      methodId: "oauth-personal",
-    }, 15_000);
+    // The per-process trusted workspace forces security.auth.selectedType to
+    // oauth-personal. session/new therefore validates the CLI's existing Google
+    // sign-in without calling ACP authenticate(), which can start an interactive
+    // OAuth flow. NO_BROWSER plus strict JSON stdout handling make stale/missing
+    // credentials fail closed instead of launching UI from the server process.
+    return client.request<SessionNewResponse>("session/new", {
+      cwd: client.workspaceDir,
+      mcpServers: [],
+    }, timeoutMs);
   }
 
   private buildPrompt(request: ProviderRequest) {
