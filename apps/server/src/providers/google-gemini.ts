@@ -99,7 +99,10 @@ export class GoogleGeminiProvider implements ProviderAdapter {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Gemini CLI runtime unavailable";
-      const unavailable = /ENOENT|not found|spawn gemini/i.test(message);
+      // Node reports a missing executable as `spawn gemini ENOENT`. Do not use a
+      // broad `not found` match here: an installed CLI can legitimately return
+      // auth errors such as "OAuth credentials not found".
+      const unavailable = /spawn gemini\b.*\bENOENT\b/i.test(message);
       return {
         id: this.id,
         label: this.label,
