@@ -22,7 +22,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
-import { finalAnswerStepId } from "./lib/final-step";
+import { answerPhase, finalAnswerStepId, followDistance } from "./lib/final-step";
 import { collapsePrompt } from "./lib/text";
 import { isEditableTarget, matchShortcut } from "./lib/shortcuts";
 import { formatDuration } from "./lib/text";
@@ -188,6 +188,9 @@ function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
   const [stuckToBottom, setStuckToBottom] = useState(true);
+  // The newest output is the answer's tail, which sits above council work — so
+  // "jump to latest" is not always downwards.
+  const [latestAbove, setLatestAbove] = useState(false);
   const [copied, setCopied] = useState(false);
   const [announcement, setAnnouncement] = useState("");
 
@@ -240,6 +243,11 @@ function App() {
     () => displayedSteps.filter(step => step.id !== finalStepId),
     [displayedSteps, finalStepId],
   );
+  const answerShows = answerPhase({
+    hasResult: Boolean(result),
+    loading,
+    finalStepComplete: Boolean(finalStep && completedStepIds.includes(finalStep.id)),
+  });
   const layered = paletteOpen || shortcutsOpen || inspectorOpen;
   const modeLabel = modes.find(item => item.id === mode)?.label ?? mode;
 
@@ -308,23 +316,13 @@ function App() {
     return () => window.clearInterval(timer);
   }, [loading, runStartedAt]);
 
-  /**
-   * How far the live output is from where the reader is looking.
-   *
-   * The answer is written *above* council work, so during a run the newest text
-   * is not at the bottom of the surface: following the bottom would pin the
-   * reader below the answer and it would stream out of sight behind a council
-   * list taller than the viewport. While there is an answer, the thing to
-   * follow is its tail; otherwise it is the end of the surface.
-   *
-   * Both the auto-follow and the check for whether the reader has scrolled away
-   * read this, so they cannot disagree about what "latest" means.
-   */
-  const distanceFromLatest = useCallback((surface: HTMLDivElement) => {
-    const answer = answerRef.current;
-    if (answer) return answer.getBoundingClientRect().bottom + 24 - surface.getBoundingClientRect().bottom;
-    return surface.scrollHeight - surface.scrollTop - surface.clientHeight;
-  }, []);
+  const distanceFromLatest = useCallback((surface: HTMLDivElement) => followDistance({
+    answerBottom: answerRef.current?.getBoundingClientRect().bottom,
+    viewBottom: surface.getBoundingClientRect().bottom,
+    scrollHeight: surface.scrollHeight,
+    scrollTop: surface.scrollTop,
+    clientHeight: surface.clientHeight,
+  }), []);
 
   // Long runs keep the newest output in view unless the reader scrolls away.
   useEffect(() => {
@@ -1130,7 +1128,9 @@ function App() {
   );
 
   const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
-    setStuckToBottom(Math.abs(distanceFromLatest(event.currentTarget)) < 80);
+    const distance = distanceFromLatest(event.currentTarget);
+    setStuckToBottom(Math.abs(distance) < 80);
+    setLatestAbove(distance < 0);
   }, [distanceFromLatest]);
 
   /* ------------------------------------------------------------ render */
@@ -1343,31 +1343,33 @@ function App() {
               <section className="answer" aria-label="Final answer" ref={answerRef}>
                 <div className="answer-head">
                   <span className="eyebrow">
-                    {result || loading ? "Final answer" : "Final answer · partial"}
+                    {answerShows === "stopped" ? "Final answer · partial" : "Final answer"}
                   </span>
                   <span className="spacer" />
-                  {result
-                    ? (
-                      <>
-                        {copied && <span className="copy-state">Copied</span>}
-                        <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
-                          <Icon name="copy" size={13} /> Copy
-                        </button>
-                      </>
-                    )
-                    : loading
-                      ? (
-                        // Who is writing belongs in the head: the body is busy
-                        // streaming, and the reader should not lose the byline to it.
-                        <span className="working" aria-live="polite">
-                          <span className="pips"><i /><i /><i /></span>
-                          {finalStep!.model.label} is writing…
-                        </span>
-                      )
-                      // Stopped or interrupted mid-write: what is on screen is
-                      // as far as the model got, and saying otherwise would be
-                      // a lie that never resolves.
-                      : <span className="copy-state">{finalStep!.model.label} stopped before finishing</span>}
+                  {answerShows === "done" && (
+                    <>
+                      {copied && <span className="copy-state">Copied</span>}
+                      <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
+                        <Icon name="copy" size={13} /> Copy
+                      </button>
+                    </>
+                  )}
+                  {/* Who is writing belongs in the head: the body is busy
+                      streaming, and the reader should not lose the byline to it. */}
+                  {answerShows === "streaming" && (
+                    <span className="working" aria-live="polite">
+                      <span className="pips"><i /><i /><i /></span>
+                      {finalStep!.model.label} is writing…
+                    </span>
+                  )}
+                  {/* Stopped or interrupted mid-write: what is on screen is as
+                      far as the model got, and saying otherwise would be a lie
+                      that never resolves. */}
+                  {answerShows === "stopped" && (
+                    <span className="copy-state">{finalStep!.model.label} stopped before finishing</span>
+                  )}
+                  {/* "written" says nothing: the answer is whole, but the run
+                      has other work in flight and there is no result to copy. */}
                 </div>
                 <div className="answer-body">
                   <Markdown content={result ? result.final : finalStep!.content} />
@@ -1415,7 +1417,8 @@ function App() {
               surface.scrollTop = Math.max(0, Math.min(target, surface.scrollHeight - surface.clientHeight));
             }}
           >
-            <Icon name="down" size={13} /> Jump to latest
+            <Icon name="down" size={13} style={latestAbove ? { transform: "rotate(180deg)" } : undefined} />
+            {latestAbove ? "Jump up to the answer" : "Jump to latest"}
           </button>
         )}
 
