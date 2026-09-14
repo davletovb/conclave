@@ -90,7 +90,7 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
   private closed = false;
 
   constructor(model?: string) {
-    const args = [...GEMINI_ACP_ARGS];
+    const args: string[] = [...GEMINI_ACP_ARGS];
     if (model) args.push("--model", model);
 
     this.child = spawn("gemini", args, {
