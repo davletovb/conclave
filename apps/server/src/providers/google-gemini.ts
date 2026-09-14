@@ -71,6 +71,13 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function durationFromEnv(name: string, fallbackMs: number) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallbackMs;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallbackMs;
+}
+
 function cancelledError() {
   const error = new Error("Gemini ACP turn cancelled");
   error.name = "AbortError";
@@ -198,21 +205,24 @@ export class GoogleGeminiProvider implements ProviderAdapter {
       }, timeoutMs);
       if (request.signal?.aborted) throw cancelledError();
 
-      // Some ACP agents resolve session/prompt before the final notification is
-      // flushed. Give the message stream a short grace period, then require two
-      // stable checks before treating it as complete.
-      const firstChunkWaitMs = Number(process.env.CONCLAVE_GEMINI_FIRST_CHUNK_WAIT_MS ?? 2_000);
+      // Some ACP agents resolve session/prompt before their final notification
+      // has flushed. Wait briefly for a first chunk and then for two stable
+      // samples, but cap the whole settling phase so a chatty/malformed agent
+      // cannot keep generate() alive indefinitely after the RPC already ended.
+      const firstChunkWaitMs = durationFromEnv("CONCLAVE_GEMINI_FIRST_CHUNK_WAIT_MS", 2_000);
       const firstChunkDeadline = Date.now() + firstChunkWaitMs;
       while (!streamedText && Date.now() < firstChunkDeadline) {
         if (request.signal?.aborted) throw cancelledError();
-        await sleep(50);
+        await sleep(Math.min(50, Math.max(1, firstChunkDeadline - Date.now())));
       }
 
-      let lastLength = -1;
+      const settleWindowMs = durationFromEnv("CONCLAVE_GEMINI_SETTLE_WINDOW_MS", 2_000);
+      const settleDeadline = Date.now() + settleWindowMs;
+      let lastLength = streamedText.length;
       let stableChecks = 0;
-      while (stableChecks < 2) {
+      while (stableChecks < 2 && Date.now() < settleDeadline) {
         if (request.signal?.aborted) throw cancelledError();
-        await sleep(150);
+        await sleep(Math.min(150, Math.max(1, settleDeadline - Date.now())));
         if (streamedText.length === lastLength) {
           stableChecks += 1;
         } else {
