@@ -3,6 +3,7 @@ import {
   buildGeminiAcpArgs,
   buildGeminiChildEnv,
   GEMINI_ISOLATED_WORKSPACE_SETTINGS,
+  isGeminiInteractiveAuthOutput,
 } from "./acp-client.js";
 
 describe("Gemini ACP launch policy", () => {
@@ -38,7 +39,7 @@ describe("Gemini ACP launch policy", () => {
     expect(GEMINI_ISOLATED_WORKSPACE_SETTINGS.context.fileName).not.toBe("GEMINI.md");
   });
 
-  it("strips API, Vertex, sandbox, IDE and model selectors while forcing non-browser ACP", () => {
+  it("shadows API, Vertex, sandbox, IDE and model selectors so home .env files cannot restore them", () => {
     const env = buildGeminiChildEnv({
       PATH: "/usr/bin",
       GEMINI_API_KEY: "secret",
@@ -49,6 +50,7 @@ describe("Gemini ACP launch policy", () => {
       GOOGLE_CLOUD_ACCESS_TOKEN: "token",
       GOOGLE_CLOUD_PROJECT: "project",
       GOOGLE_CLOUD_PROJECT_ID: "project-id",
+      GOOGLE_CLOUD_LOCATION: "us-central1",
       GOOGLE_CLOUD_QUOTA_PROJECT: "quota-project",
       CLOUD_ML_PROJECT_ID: "ml-project",
       GOOGLE_GEMINI_BASE_URL: "https://example.invalid",
@@ -67,6 +69,7 @@ describe("Gemini ACP launch policy", () => {
       "GOOGLE_CLOUD_ACCESS_TOKEN",
       "GOOGLE_CLOUD_PROJECT",
       "GOOGLE_CLOUD_PROJECT_ID",
+      "GOOGLE_CLOUD_LOCATION",
       "GOOGLE_CLOUD_QUOTA_PROJECT",
       "CLOUD_ML_PROJECT_ID",
       "GOOGLE_GEMINI_BASE_URL",
@@ -74,10 +77,21 @@ describe("Gemini ACP launch policy", () => {
       "GEMINI_SANDBOX",
       "GEMINI_CLI_IDE_WORKSPACE_PATH",
     ]) {
-      expect(env[name]).toBeUndefined();
+      expect(Object.hasOwn(env, name)).toBe(true);
+      expect(env[name]).toBe("");
     }
     expect(env.NO_BROWSER).toBe("true");
     expect(env.GEMINI_CLI_SURFACE).toBe("conclave");
     expect(env.GEMINI_CLI_TRUST_WORKSPACE).toBe("true");
+  });
+
+  it("allows known ACP stdout banners but recognizes interactive authentication output", () => {
+    expect(isGeminiInteractiveAuthOutput("")).toBe(false);
+    expect(isGeminiInteractiveAuthOutput("Loaded cached credentials.")).toBe(false);
+    expect(isGeminiInteractiveAuthOutput("Planner hook initialized")).toBe(false);
+    expect(isGeminiInteractiveAuthOutput("Code Assist login required")).toBe(true);
+    expect(isGeminiInteractiveAuthOutput("Attempting to open authentication page")).toBe(true);
+    expect(isGeminiInteractiveAuthOutput("Open https://accounts.google.com/o/oauth2/v2/auth?client_id=x")).toBe(true);
+    expect(isGeminiInteractiveAuthOutput("Enter the verification code")).toBe(true);
   });
 });
