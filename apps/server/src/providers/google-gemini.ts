@@ -93,8 +93,9 @@ export class GoogleGeminiProvider implements ProviderAdapter {
   ) {}
 
   async status(): Promise<ProviderStatus> {
-    const client = this.createClient();
+    let client: GeminiAcpClientLike | undefined;
     try {
+      client = this.createClient();
       await this.openOAuthSession(client, 8_000);
       return {
         id: this.id,
@@ -106,10 +107,10 @@ export class GoogleGeminiProvider implements ProviderAdapter {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Gemini CLI runtime unavailable";
-      // Node reports a missing executable as `spawn gemini ENOENT`. Do not use a
-      // broad `not found` match here: an installed CLI can legitimately return
-      // auth errors such as "OAuth credentials not found".
-      const unavailable = /spawn gemini\b.*\bENOENT\b/i.test(message);
+      // If construction itself failed, the runtime could not even be launched
+      // safely (TMPDIR permissions/full disk/etc.). A missing executable is the
+      // normal async spawn failure. Neither should 500 the /providers route.
+      const unavailable = !client || /spawn gemini\b.*\bENOENT\b/i.test(message);
       return {
         id: this.id,
         label: this.label,
@@ -117,21 +118,22 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         connected: false,
         authMode: unavailable ? undefined : "oauth",
         message: unavailable
-          ? message
+          ? `Gemini CLI runtime unavailable. ${message}`
           : `Gemini CLI is installed but Google-account OAuth is not ready. Run \`gemini\` in a terminal, choose Sign in with Google, then restart Conclave. ${message}`,
       };
     } finally {
-      client.close();
+      client?.close();
     }
   }
 
   async listModels(): Promise<ModelRef[]> {
-    const client = this.createClient();
+    let client: GeminiAcpClientLike | undefined;
     try {
+      client = this.createClient();
       await this.openOAuthSession(client, 8_000);
       return GEMINI_MODELS;
     } finally {
-      client.close();
+      client?.close();
     }
   }
 
@@ -285,8 +287,8 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     // The per-process trusted workspace forces security.auth.selectedType to
     // oauth-personal. session/new therefore validates the CLI's existing Google
     // sign-in without calling ACP authenticate(), which can start an interactive
-    // OAuth flow. NO_BROWSER plus strict JSON stdout handling make stale/missing
-    // credentials fail closed instead of launching UI from the server process.
+    // OAuth flow. NO_BROWSER plus stdout/stderr auth-prompt detection make
+    // stale/missing credentials fail closed instead of launching UI.
     return client.request<SessionNewResponse>("session/new", {
       cwd: client.workspaceDir,
       mcpServers: [],
