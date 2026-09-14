@@ -9,6 +9,7 @@ const modelCatalog: ModelRef[] = [
   { provider: "mock", model: "mock-gpt", label: "GPT (mock)", source: "mock", isDefault: true },
   { provider: "mock", model: "mock-claude", label: "Claude (mock)", source: "mock" },
   { provider: "mock", model: "mock-grok", label: "Grok (mock)", source: "mock" },
+  { provider: "mock", model: "mock-gemini", label: "Gemini (mock)", source: "mock" },
 ];
 
 export class MockProvider implements ProviderAdapter {
@@ -32,7 +33,9 @@ export class MockProvider implements ProviderAdapter {
       ? "careful analyst"
       : request.model.includes("grok")
         ? "contrarian reviewer"
-        : "systems thinker";
+        : request.model.includes("gemini")
+          ? "multimodal researcher"
+          : "systems thinker";
 
     return {
       provider: this.id,
