@@ -37,6 +37,7 @@ const BLOCKED_BILLING_ENV = [
   "GOOGLE_CLOUD_QUOTA_PROJECT",
   "GOOGLE_CLOUD_LOCATION",
   "CLOUD_ML_PROJECT_ID",
+  "GOOGLE_GEMINI_BASE_URL",
 ] as const;
 
 export function buildAntigravityChildEnv(source: NodeJS.ProcessEnv = process.env) {
@@ -44,7 +45,7 @@ export function buildAntigravityChildEnv(source: NodeJS.ProcessEnv = process.env
 
   // Antigravity can be configured to use direct Gemini API credentials. Conclave's
   // Google adapter is subscription-only, so shadow (rather than delete) those
-  // variables: inherited dotenv/config loading cannot repopulate them.
+  // variables: inherited environment/config loading cannot repopulate them.
   for (const name of BLOCKED_BILLING_ENV) env[name] = "";
 
   // Conclave owns provider lifecycle; avoid a background self-updater racing a run.
