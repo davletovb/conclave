@@ -43,12 +43,24 @@ priority = 999
 denyMessage = "Conclave runs Gemini in text-only mode."
 `;
 
-const ISOLATED_WORKSPACE_SETTINGS = JSON.stringify({
+export const GEMINI_ISOLATED_WORKSPACE_SETTINGS = {
   security: { auth: { selectedType: "oauth-personal" } },
   hooksConfig: { enabled: false },
   skills: { enabled: false },
   ide: { enabled: false },
-}, null, 2);
+  experimental: { autoMemory: false },
+  context: {
+    // Gemini CLI normally inherits the user's global GEMINI.md-style context.
+    // Point context discovery at a Conclave-only filename that does not exist,
+    // and suppress trees/include-dir memory so normal CLI customization cannot
+    // bleed into multi-model answers.
+    fileName: "__CONCLAVE_DISABLED_CONTEXT_9ec36c5d__.md",
+    includeDirectoryTree: false,
+    loadMemoryFromIncludeDirectories: false,
+  },
+} as const;
+
+const ISOLATED_WORKSPACE_SETTINGS = JSON.stringify(GEMINI_ISOLATED_WORKSPACE_SETTINGS, null, 2);
 
 export function buildGeminiAcpArgs(model: string | undefined, policyPath: string, mcpSentinel: string) {
   const args: string[] = [
@@ -107,6 +119,7 @@ export function buildGeminiChildEnv(source: NodeJS.ProcessEnv = process.env) {
     "GOOGLE_GEMINI_BASE_URL",
     "GEMINI_MODEL",
     "GEMINI_SANDBOX",
+    "GEMINI_CLI_IDE_WORKSPACE_PATH",
   ]) {
     delete env[name];
   }
