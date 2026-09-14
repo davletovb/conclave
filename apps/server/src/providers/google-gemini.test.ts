@@ -1,9 +1,11 @@
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import type { GeminiAcpClientLike, GeminiAcpNotification } from "../gemini/acp-client.js";
 import { GoogleGeminiProvider } from "./google-gemini.js";
 
 class FakeGeminiClient implements GeminiAcpClientLike {
+  readonly workspaceDir = join(tmpdir(), "conclave-gemini-test-workspace");
   listeners = new Set<(notification: GeminiAcpNotification) => void>();
   requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   authMethods = [
@@ -141,7 +143,7 @@ describe("GoogleGeminiProvider", () => {
     await expect(provider.listModels()).rejects.toThrow(/does not expose Google-account OAuth/i);
   });
 
-  it("selects oauth-personal, selects the requested CLI model, and streams only answer text", async () => {
+  it("selects oauth-personal, uses the isolated workspace, and streams only answer text", async () => {
     const clients: FakeGeminiClient[] = [];
     const models: Array<string | undefined> = [];
     const provider = new GoogleGeminiProvider(model => {
@@ -168,7 +170,7 @@ describe("GoogleGeminiProvider", () => {
     const authenticate = client.requests.find(request => request.method === "authenticate");
     expect(authenticate?.params).toEqual({ methodId: "oauth-personal" });
     expect(client.requests.find(request => request.method === "session/new")?.params).toMatchObject({
-      cwd: tmpdir(),
+      cwd: client.workspaceDir,
       mcpServers: [],
     });
     expect(events.filter(event => event.type === "text_delta").map(event => event.delta).join(""))
