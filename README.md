@@ -1,160 +1,266 @@
 # Conclave
 
-Conclave is a personal multi-model reasoning environment: one interface where GPT, Claude, Grok, Gemini, and future providers can answer independently or work together through explicit orchestration workflows.
+**Bring the models to the same table.**
+
+Conclave is a local-first multi-model reasoning environment where GPT, Claude, Grok, Gemini, and future providers can answer independently or work together through explicit orchestration workflows.
+
+It is not primarily a model switcher. The point is to make **comparison, disagreement, critique, synthesis, delegation, and verification** first-class parts of the reasoning process while keeping the underlying model work visible.
+
+Conclave runs locally and is designed around subscription-backed provider runtimes rather than direct model API-key integrations. Optional shared web search can give every participating model the same retrieved evidence before a run starts.
+
+> **Status:** actively developed personal project. The web app, persistent run system, four provider adapters, orchestration modes, custom workflows, and shared web search are implemented.
+
+## Why Conclave
+
+Asking several models the same question is useful, but simply putting four chat windows beside each other leaves the hard part to the user: deciding what matters, where they disagree, and how to turn several answers into one better result.
+
+Conclave makes that process explicit.
+
+- **Independent first passes** preserve different model perspectives before synthesis.
+- **Structured orchestration** defines who answers, critiques, judges, revises, routes, or synthesizes.
+- **Visible council work** keeps intermediate reasoning products inspectable instead of hiding them behind one final answer.
+- **Shared evidence** can ground every model in the same web-search results.
+- **Local persistence** keeps conversations, run history, partial output, and inspection data on the machine running Conclave.
+- **Subscription-first adapters** reuse supported local provider runtimes and their existing account sign-ins.
+
+## What Conclave can do
+
+| Capability | What it means |
+| --- | --- |
+| Multi-model runs | Use OpenAI, Anthropic, xAI, and Google models in one conversation |
+| 12 orchestration modes | Compare, debate, synthesize, critique, judge, route, red-team, plan, and build custom workflows |
+| Shared web evidence | Search once through SearXNG and give every selected model the same evidence packet |
+| Persistent runs | Refresh or close the browser without cancelling work already owned by the local server |
+| Streaming | See model output and final answers arrive incrementally |
+| Partial-failure recovery | Preserve useful sibling results when one provider fails, with bounded retry for transient failures |
+| Run controls | Set call budgets, stop active work, resume interrupted/cancelled attempts, and inspect execution |
+| Custom workflow graphs | Build validated dependency graphs with parallel branches and explicit output nodes |
+| Conversation tools | Search, rename, delete, and export conversations as Markdown or JSON |
+| Local-first interface | Light/dark themes, keyboard controls, accessibility support, and responsive layout |
+
+## Providers
+
+Conclave currently supports four subscription-backed local adapters:
+
+| Provider | Local runtime | Authentication |
+| --- | --- | --- |
+| OpenAI | Codex `app-server` | Sign in with ChatGPT |
+| Anthropic | Claude Code | `claude.ai` account sign-in |
+| xAI | Grok Build ACP | Grok/X OAuth sign-in |
+| Google Gemini | Antigravity CLI | Google account sign-in |
+
+If a provider runtime is missing or not authenticated, Conclave keeps a mock model available so the rest of the application remains usable.
+
+Provider-specific authentication rules, model discovery, process isolation, cancellation behavior, and setup instructions live in **[Provider runtimes](docs/providers.md)**.
 
 ## Orchestration modes
 
-- **Single** — one model, one answer
-- **Compare** — independent answers side by side
-- **Panel** — independent answers, then synthesis
-- **Debate** — independent positions, bounded critique rounds, then judgment
-- **Critic → Revise** — one model drafts, another critiques, the author revises
-- **Consensus** — independent answers, a proposed consensus, then a separate consensus audit so disagreement is not silently erased
-- **Judge** — independent candidate answers followed by one adjudication pass
-- **Red Team** — one draft is attacked by the other selected models, then hardened by the original author
-- **Router** — the first selected model routes the task to exactly one selected specialist instead of fanning out to everyone
-- **Research Council** — selected models examine evidence, alternatives, implementation risks, and skepticism before synthesis; it does not pretend external browsing occurred
-- **Planner → Executors** — the first model plans, the remaining selected models execute in parallel, and a reviewer produces the final answer
-- **Custom Workflow** — run a validated dependency graph from a preset or an edited JSON workflow
+Conclave ships with twelve built-in ways to organize model work:
 
-The architecture is deliberately provider-agnostic so subscription-backed runtimes can be added behind adapters without changing the UI or orchestration engine. Multi-stage modes have explicit bounded stages, and Debate clamps critique rounds to 1–3.
+| Mode | Flow |
+| --- | --- |
+| **Single** | One model → answer |
+| **Compare** | Independent answers shown side by side |
+| **Panel** | Independent answers → synthesis |
+| **Debate** | Independent positions → bounded critique rounds → judgment |
+| **Critic → Revise** | Draft → critique → author revision |
+| **Consensus** | Independent answers → proposed consensus → separate consensus audit |
+| **Judge** | Candidate answers → adjudication |
+| **Red Team** | Draft → attacks from other models → hardened revision |
+| **Router** | Router chooses one selected specialist → specialist answers |
+| **Research Council** | Evidence, alternatives, implementation risks, and skepticism → synthesis |
+| **Planner → Executors** | Planner → parallel executors → reviewer |
+| **Custom Workflow** | Validated dependency graph with user-defined roles and prompts |
+
+Multi-stage modes are bounded before execution. Debate, for example, allows 1–3 critique rounds, and every run is checked against its call budget before provider work begins.
+
+## Shared web evidence
+
+Conclave can perform one provider-independent web search before a persistent run. The retrieved results are normalized into a single evidence packet and injected into every selected model as system context.
+
+That matters for multi-model work: Compare, Debate, Judge, Consensus, Research Council, and custom workflows can reason over the **same retrieved material** instead of each provider seeing a different browsing environment—or none at all.
+
+Search currently uses SearXNG and is deliberately separate from provider-native browsing tools.
+
+See **[Shared web search](docs/web-search.md)** for setup and behavior.
+
+## How it works
+
+```text
+                         optional
+                      ┌───────────┐
+                      │  SearXNG  │
+                      └─────┬─────┘
+                            │ shared evidence
+                            ▼
+┌──────────────┐      ┌───────────────┐      ┌─────────────────────┐
+│ React + Vite │ ───► │ Fastify server│ ───► │ Orchestration engine │
+│     web UI   │      │  + run store  │      └──────────┬──────────┘
+└──────────────┘      └───────────────┘                 │
+                                                        │
+                    ┌───────────────────────────────────┼───────────────┐
+                    ▼                                   ▼               ▼
+              Codex runtime                       Claude Code       Grok / Gemini
+```
+
+The browser never talks directly to provider runtimes. The local server owns provider processes, orchestration, persistence, cancellation, retries, search evidence, and the normalized event stream consumed by the UI.
+
+Conversations and runs are persisted locally. A run belongs to the server rather than to one browser request, so reconnecting clients can replay events they missed.
+
+For the execution model, persistence format, budgets, retries, API surface, and environment variables, see **[Runtime and architecture](docs/runtime.md)**.
+
+## Quick start
+
+### Requirements
+
+- Node.js 22+
+- pnpm 10+
+
+### Install and run
+
+```bash
+git clone https://github.com/davletovb/conclave.git
+cd conclave
+pnpm install
+pnpm dev
+```
+
+Then open:
+
+- Web UI: `http://localhost:5173`
+- Local server: `http://localhost:8787`
+
+Conclave can run with mock providers immediately. Connect any real provider runtime you want to use.
+
+### Connect provider subscriptions
+
+**OpenAI / ChatGPT**
+
+```bash
+codex
+```
+
+Sign in with ChatGPT, then restart `pnpm dev`.
+
+**Anthropic / Claude**
+
+```bash
+claude auth login
+claude auth status
+```
+
+Use the normal `claude.ai` account flow, then restart Conclave.
+
+**xAI / Grok**
+
+```bash
+grok login
+```
+
+Complete the Grok/X OAuth flow, then restart Conclave.
+
+**Google / Gemini**
+
+```bash
+agy
+```
+
+Complete Google sign-in in Antigravity, then restart Conclave.
+
+For installation details and the exact authentication boundary used by each adapter, see **[Provider runtimes](docs/providers.md)**.
+
+### Optional: enable shared web search
+
+Run a SearXNG instance with JSON search enabled, then:
+
+```bash
+export CONCLAVE_SEARXNG_URL=http://127.0.0.1:8080
+pnpm dev
+```
+
+Enable **Shared web search** in Run configuration → Web evidence.
+
+## The interface
+
+Conclave separates the **answer you read** from the **machinery that produced it**.
+
+The final answer uses a reading-focused surface, while model steps, provider identity, budgets, timing, token telemetry, and run controls stay visually distinct. Council work is collapsible, long outputs are bounded until expanded, and active runs expose their current progress without forcing the transcript to stay pinned when you scroll away.
+
+Other interface features include:
+
+- conversation search across titles and message bodies;
+- Markdown and JSON export;
+- command palette (`Ctrl`/`Cmd` + `K`);
+- keyboard-first run, navigation, expand/collapse, theme, and stop controls;
+- structured custom-workflow editing with cycle prevention;
+- run inspection with step status, timing, usage, errors, retries, and dependency lineage;
+- light and dark themes;
+- focus management, live-region announcements, visible focus states, reduced-motion support, and responsive layouts down to mobile widths.
+
+## Custom workflows
+
+Custom Workflow mode turns orchestration into a validated graph instead of a fixed frontend recipe.
+
+A workflow can define:
+
+- stable node IDs;
+- step kind;
+- participant or synthesizer assignment;
+- dependencies;
+- prompt templates;
+- one explicit output node.
+
+Nodes start as soon as their own prerequisites are satisfied, so independent branches can run in parallel.
+
+Prompt templates support:
+
+```text
+{{prompt}}            original user request
+{{dependencies}}      all declared upstream outputs
+{{dep.<nodeId>}}      one declared upstream output
+```
+
+Conclave ships with initial presets including **Triangulate**, **Challenge → Revise**, and **Decision Board**, all of which can be edited in the structured workflow editor or as raw JSON.
+
+## Reliability and run controls
+
+Multi-model orchestration becomes expensive and frustrating if one slow or broken provider can wedge the whole run. Conclave therefore treats run lifecycle as a first-class system concern.
+
+Current behavior includes:
+
+- server-enforced model-call budgets;
+- preflight call-count validation;
+- provider cancellation that reaches the active local runtime process;
+- durable partial output;
+- resume as a new attempt after cancellation, interruption, or failure;
+- one bounded retry for transient/stalled provider steps when budget remains;
+- preservation of successful sibling outputs in supported parallel modes;
+- provider rate-limit/quota errors recorded with the run;
+- inactivity watchdogs for calls that stop producing progress events;
+- deterministic event replay after reconnect.
+
+See **[Runtime and architecture](docs/runtime.md)** for the details.
 
 ## Repository structure
 
 ```text
 apps/
   web/       React + Vite interface
-    src/lib/ pure logic: keyboard model, workflow graph editing, formatting
-    src/ui/  the interface: rail, setup, council work, workflow editor, palette
-  server/    Fastify orchestration/runtime service
+    src/lib/ pure UI/application logic
+    src/ui/  reading surface, rail, setup, workflow editor, palette
+  server/    Fastify runtime, persistence, search, providers, orchestration
 packages/
-  core/      shared provider + orchestration contracts
+  core/      shared provider, workflow, event, and orchestration contracts
+docs/        focused technical documentation
 ```
 
-The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code, Grok Build ACP, and Antigravity CLI.
+The architecture is deliberately provider-agnostic: provider adapters sit behind shared contracts so the orchestration engine and UI do not need provider-specific logic for every workflow.
 
-## Current status
+## Local data and network boundary
 
-All four current providers have subscription-backed local adapters:
+By default the server binds to `127.0.0.1`, and the browser origin allowlist is limited to the local development UI.
 
-- OpenAI through `codex app-server` and ChatGPT sign-in
-- Anthropic through Claude Code and `claude.ai` sign-in
-- xAI through Grok Build ACP and cached Grok/X OAuth sign-in
-- Google Gemini through the official Antigravity CLI and cached Google-account sign-in
-
-If a runtime is missing or not authenticated, Conclave keeps that provider's mock model available so the rest of the app remains usable.
-
-The adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions, refuses Claude Console/API-key or cloud-provider authentication, removes xAI API-key/custom-endpoint environment routes before launching Grok ACP, and uses Antigravity's cached Google-account authentication for Gemini. The Google adapter does not call Gemini model APIs directly; it removes direct Gemini/API/Vertex credential and custom-endpoint environment routes, strips inherited Antigravity conversation/browser/sidecar state, and launches each generation through a private tool-free Antigravity agent.
-
-Claude paid plans can separately enable Anthropic **usage credits**. If usage credits are enabled on the Claude account, Anthropic may use them after included subscription limits are exhausted. That is an account-level Claude setting; Conclave cannot override it.
-
-Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex, Grok ACP, and Antigravity CLI expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
-
-Conversations and run state are persisted locally. A run is owned by the server rather than by one browser request, so closing or refreshing the page does not cancel it. The browser reconnects to the run event log and replays anything it missed. If the Conclave server itself stops during a run, startup reconciles any already-persisted terminal event first; only genuinely unfinished work is marked `interrupted` and offered for a new attempt in the same conversation.
-
-## Run controls and subscription usage
-
-Each persistent run has a server-enforced budget. The default is **12 model calls per attempt**; the UI can choose a lower or higher cap up to the server hard ceiling of **64**. Conclave calculates the complete call count for the chosen orchestration mode before the first provider call and rejects a run that cannot fit within its budget. Debate additionally has a **1–3 round** hard limit.
-
-The web UI shows planned calls before submission and live `calls started / calls completed` telemetry while a run is executing. Token counts are shown when the underlying runtime reports them; token reporting is best-effort because the four subscription runtimes expose different levels of telemetry and an interrupted call may not produce a final token update.
-
-Active runs have a **Stop** control. Cancellation propagates into the current local provider runtime rather than merely disconnecting the browser:
-
-- OpenAI Codex — `turn/interrupt`
-- Claude Code — terminate that call's non-interactive Claude child process
-- Grok Build — close that call's dedicated ACP process
-- Antigravity CLI — terminate the dedicated `agy` process group, with SIGTERM followed by SIGKILL fallback
-
-Cancelled attempts retain their already-persisted partial output and can be resumed as a new attempt.
-
-Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code, Grok Build ACP, and Antigravity CLI do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
-
-Each provider step also has an inactivity watchdog. By default, a call that produces no provider progress event for **180 seconds** is treated as stalled, its local runtime call is aborted, and the step is eligible for the same single bounded retry used for transient transport failures when call-budget headroom remains. Any provider event resets the watchdog, so long-running calls can continue as long as they are still making observable progress. Set `CONCLAVE_STEP_STALL_TIMEOUT_MS` to a positive integer of at least 10 milliseconds to tune the inactivity window for local testing or unusually slow runtimes.
-
-## Custom workflows and run inspection
-
-Custom Workflow mode makes orchestration a first-class graph instead of a frontend shortcut. A workflow contains stable node IDs, a step kind, a participant/synthesizer selector, an optional dependency list, a prompt template, and one explicit output node. The server validates the complete graph before the run is persisted, including participant indexes, dependency references, cycles, supported step kinds, output reachability, and the run's call budget.
-
-Nodes whose prerequisites are satisfied can run concurrently. A dependent starts as soon as its own prerequisites finish rather than waiting for unrelated branches. Every node must contribute to the output node, so disconnected leftovers cannot consume subscription calls. If one workflow branch fails, Conclave records the originating failed step, aborts and settles the remaining in-flight workflow branches, and distinguishes those aborted siblings in the inspector.
-
-Prompt templates support:
-
-- `{{prompt}}` — the user's original task
-- `{{dependencies}}` — all declared upstream outputs for that node
-- `{{dep.<nodeId>}}` — one declared upstream output
-
-Interpolation is single-pass: placeholder-like text contained inside user input or model output remains literal and cannot become new workflow syntax.
-
-Conclave ships with three initial presets: **Triangulate**, **Challenge → Revise**, and **Decision Board**. The web UI can load a preset as a starting point and then edit the graph directly — add and remove nodes, rename them, change step kinds, assign participants or the synthesizer, toggle dependencies, and insert placeholders into prompt templates — with the raw JSON still available underneath. The editor validates every change against the same rules as the server and refuses a dependency that would close a cycle, so an invalid graph is caught before it costs a subscription call.
-
-The **Run Inspector** reconstructs execution from the durable event logs. It shows current and archived attempts, status, duration, calls/tokens where available, errors/rate limits, each step's model/kind/status/timing, and dependency lineage. It refreshes while an active run is executing and ignores stale responses after the user changes conversations.
-
-## The interface
-
-The web app is built around a single idea: the answer is what you read, and the
-machinery is what you operate. Those two registers are visually distinct —
-editorial serif for the final answer, compact sans and tabular figures for
-telemetry — and colour carries exactly one piece of information, which provider
-is speaking, always paired with a glyph and a name so it never carries it alone.
-
-**Conversation management.** The rail lists every conversation grouped by
-recency, with rename, delete (behind an inline confirmation), and Markdown/JSON
-export per conversation. Search runs on the server across message bodies, not
-only titles, and each result shows the excerpt that matched.
-
-**The command palette** (`Ctrl`/`Cmd`+`K`) is one entry point for searching
-conversations, switching orchestration pattern, and running any action that has
-a keyboard binding, so nothing is discoverable only by memorising a shortcut.
-
-**Council work** is a timeline of collapsible steps. Each collapsed step shows a
-live preview of its latest line; each expanded one clamps very long output
-behind a "show full output" control so a single verbose model cannot bury the
-rest of the council. `E` expands everything, `Shift`+`E` collapses it.
-
-**Long runs.** While a run is live, a strip under the header shows the pattern,
-which models are working, calls started/completed against the budget, token
-telemetry where the runtime reports it, elapsed time, and Stop. The transcript
-sticks to the newest output until you scroll away, and then offers "Jump to
-latest" instead of fighting you for the scroll position.
-
-**Workflow authoring.** Custom Workflow mode has a structured node editor: node
-ID, step kind, which participant or the synthesizer runs it, its dependencies as
-toggles, and its prompt template with one-click placeholder insertion. Renaming
-a node rewrites its dependants and their `{{dep.<nodeId>}}` references.
-Dependencies that would close a cycle are refused with an explanation rather
-than failing validation later. The graph is validated on every edit, an
-execution-order map shows which nodes run in parallel, and the raw JSON remains
-editable underneath.
-
-**Keyboard.** Modified chords stay live while typing (`Mod`+`K` palette,
-`Mod`+`Enter` convene, `Mod`+`.` stop); bare keys act only outside text fields
-(`/` prompt, `C` configure, `D` run details, `E`/`Shift`+`E` expand/collapse,
-`N` new conversation, `S` rail, `T` theme, `?` help, `Esc` closes the top layer).
-Press `?` for the full list.
-
-**Accessibility.** A skip link, visible focus rings on every control, dialogs
-and drawers with focus trapping and focus restoration, live-region announcements
-for run progress, labelled controls throughout, and `prefers-reduced-motion`
-honoured. Light and dark themes are both first-class, and the layout works down
-to 390px.
-
-## Run locally
-
-Requirements: Node.js 22+ and pnpm 10+.
-
-```bash
-pnpm install
-pnpm dev
-```
-
-- Web: `http://localhost:5173`
-- Server: `http://localhost:8787`
-
-Override the server URL with `VITE_CONCLAVE_API` when needed.
-
-The server is local-only by default: it binds to `127.0.0.1`, and browser CORS is limited to `http://localhost:5173` and `http://127.0.0.1:5173`. `CONCLAVE_HOST` can override the bind address and `CONCLAVE_WEB_ORIGIN` can provide a comma-separated origin allowlist. Exposing the server beyond the local machine should be treated as an explicit deployment/security decision rather than the default personal-use setup.
-
-By default persistent state is stored under:
+Persistent state is stored under:
 
 ```text
 ~/.conclave/
@@ -162,117 +268,11 @@ By default persistent state is stored under:
   runs/<run-id>.ndjson
 ```
 
-Set `CONCLAVE_DATA_DIR` to use a different local directory. On macOS/Linux, Conclave creates/tightens its data directories to owner-only `0700` and state/event files to owner-only `0600`, including existing persisted files discovered at startup.
+On macOS/Linux, Conclave tightens its data directories and persisted state/event files to owner-only permissions.
 
-The persistent runtime API is:
+Exposing the server beyond the local machine should be treated as an explicit deployment and security decision rather than the default mode of operation.
 
-- `GET /conversations?q=<query>` — recent conversations, optionally full-text filtered across titles and message bodies (quoted `"phrases"` are matched verbatim); each hit carries the excerpt that matched
-- `GET /conversations/:id` — one conversation with messages
-- `PATCH /conversations/:id` — rename a conversation
-- `DELETE /conversations/:id` — delete a conversation with its runs and event logs; refused while that conversation has an active run
-- `GET /conversations/:id/export?format=markdown|json` — export one conversation, including the council work behind each answer
-- `GET /workflow-presets` — built-in reusable custom workflow graphs
-- `POST /runs` — start a background orchestration run
-- `GET /runs/:id` — inspect persisted run state, budget, and usage
-- `GET /runs/:id/inspection` — reconstruct attempt/step timing, usage, status, and dependency lineage
-- `GET /runs/:id/events?after=<seq>&follow=1` — replay and follow the run's NDJSON event log
-- `POST /runs/:id/cancel` — stop an active run/provider call
-- `POST /runs/:id/resume` — restart a failed/interrupted/cancelled run as the next attempt
-- `GET /provider-limits` — available structured subscription-limit snapshots
-
-The earlier `POST /orchestrate` and `POST /orchestrate/stream` endpoints remain available for compatibility, but the web app now uses persistent runs.
-
-## Connect your ChatGPT subscription
-
-Conclave expects the official Codex CLI on the same machine. After installing Codex, run:
-
-```bash
-codex
-```
-
-Choose **Sign in with ChatGPT** and complete the browser login. Restart `pnpm dev` afterward. If Codex is authenticated with an API key, Conclave leaves OpenAI disconnected by design.
-
-## Connect your Claude subscription
-
-Conclave expects the official Claude Code CLI on the same machine. Check it with:
-
-```bash
-claude --version
-```
-
-Then authenticate through your Claude account:
-
-```bash
-claude auth login
-claude auth status
-```
-
-Use the normal **claude.ai** subscription login. Do not use `claude auth login --console`, which selects Console/API usage billing. Restart `pnpm dev` after signing in.
-
-The Claude adapter checks `claude auth status` before every model listing or generation request and only accepts `claude.ai` first-party authentication. It removes API/platform credential environment variables from child processes and runs Claude in safe, tool-free, non-persistent print mode.
-
-Conclave currently exposes the stable Claude Code model aliases `sonnet`, `opus`, and `haiku`. Claude Code resolves those aliases to the models available to the signed-in account.
-
-## Connect your Grok subscription
-
-Install the official Grok Build CLI:
-
-```bash
-curl -fsSL https://x.ai/cli/install.sh | bash
-```
-
-Verify it and sign in:
-
-```bash
-grok version
-grok login
-```
-
-Complete the browser OAuth flow using the Grok/X account associated with your subscription. For a headless or remote machine, `grok login --device-auth` uses device-code authentication.
-
-Conclave talks to Grok through the official Agent Client Protocol transport (`grok agent stdio`). It only accepts the ACP `cached_token` authentication method and deliberately does not use `xai.api_key`. The child process also has `XAI_API_KEY`, legacy API-key variables, and custom model-endpoint environment variables removed.
-
-The current built-in Grok Build catalog exposes **Grok 4.6** as the default and **Grok 4.5** as an additional model. Conclave mirrors those subscription-backed choices.
-
-Restart `pnpm dev` after signing in.
-
-## Connect your Gemini subscription
-
-Download Google's official Antigravity installer first, inspect it if desired, then run it:
-
-```bash
-curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/antigravity-install.sh
-less /tmp/antigravity-install.sh   # press q after inspection
-bash /tmp/antigravity-install.sh
-rm /tmp/antigravity-install.sh
-```
-
-Open a new terminal (or reload your shell), verify the CLI, and start one interactive session:
-
-```bash
-agy --version
-agy
-```
-
-Complete **Sign in with Google** using the Google account associated with your Gemini access/subscription. Antigravity stores that sign-in in the platform keyring; Conclave reuses the cached login and does not initiate OAuth itself. Restart `pnpm dev` after signing in.
-
-Conclave discovers the signed-in account's current Gemini catalog with `agy models` and exposes only model IDs beginning with `gemini-`. It does not hard-code preview model names, so new or retired Gemini variants follow Antigravity's live catalog automatically. The short-lived aliases `auto`, `pro`, `flash`, and `flash-lite` from the earlier Gemini-CLI adapter are accepted only for resuming persisted runs and are mapped to the closest live Antigravity model.
-
-For generation, Conclave runs Antigravity headlessly with `--input-format stream-json --output-format stream-json --sandbox --agent conclave-text`. The prompt is sent over stdin rather than the process command line. Every call gets a fresh owner-only temporary workspace containing a Conclave-owned custom primary agent whose definition has `tools: []`, `subagent: false`, `inheritCustomizations: false`, `inheritMcp: false`, `commandExecutionPolicy: "off"`, and empty MCP/skills/plugins/rules/agents lists. This prevents the agent from inheriting ambient user customizations as well as execution tools. Conclave verifies the stream's `init` event names that exact agent, advertises zero tools, and uses a non-auto-approve permission mode (`request-review`, `proceed-in-sandbox`, or `strict`) before accepting any model output; missing/unknown init, `always-proceed`, any advertised tool, tool activity, or subagent activity fails closed. The provider never passes `--dangerously-skip-permissions` and does not pin the interactive `--mode=default` execution mode.
-
-Before spawning `agy`, Conclave removes direct Gemini/API/Vertex credentials and the custom Gemini base URL, plus inherited Antigravity conversation/source/browser/sidecar variables, while preserving the normal user home so Antigravity can use the supported OS-keyring Google login. Antigravity's documented direct API-key mode requires `GEMINI_API_KEY` from the process environment; if the user's global settings still select `modelProvider: "gemini"`, the run fails closed instead of falling through to API billing. The workspace-local no-tools agent is the primary control boundary; stream checks for tool/subagent activity remain defense in depth.
-
-Cancellation and timeouts terminate the dedicated `agy` process group. Conclave keeps the temporary workspace in place until the child actually closes, then removes it; a referenced SIGKILL fallback handles a process that ignores SIGTERM.
-
-Restart `pnpm dev` after signing in.
-
-You can inspect all local provider states at:
-
-```bash
-curl http://localhost:8787/providers
-```
-
-## Verification
+## Development
 
 ```bash
 pnpm typecheck
@@ -280,20 +280,16 @@ pnpm test
 pnpm build
 ```
 
-GitHub Actions runs the same checks on pull requests.
+GitHub Actions runs the same verification gates on pull requests.
 
-## Near-term roadmap
+## Documentation
 
-1. ✅ OpenAI adapter via subscription-authenticated Codex runtime
-2. ✅ Anthropic adapter via subscription-authenticated Claude Code runtime
-3. ✅ xAI adapter via Grok Build ACP runtime
-4. ✅ Google Gemini adapter via subscription-authenticated Antigravity CLI runtime
-5. ✅ Normalized streaming event protocol for partial output and future tool events
-6. ✅ Persistent conversations and resumable orchestration runs
-7. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
-8. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
-9. ✅ Custom workflow graph/presets and richer run inspection
-10. ✅ Web-first robustness: partial-provider failure handling, step-level retry, stalled-provider recovery, reconnect/reload stress coverage, and stronger lifecycle integration tests
-11. ✅ Web UI/UX: conversation management/search/export, collapsible model outputs, better long-run rendering, richer workflow authoring, keyboard shortcuts, and accessibility
+- **[Provider runtimes](docs/providers.md)** — provider installation, subscription authentication, runtime boundaries, models, cancellation, and quota visibility
+- **[Runtime and architecture](docs/runtime.md)** — persistence, streaming events, budgets, retries, API endpoints, environment configuration, and run lifecycle
+- **[Shared web search](docs/web-search.md)** — SearXNG configuration, shared evidence behavior, and current search scope
 
-Desktop/local-native packaging and an IPC transport remain intentionally deferred. The orchestration/provider core should stay transport-independent so native packaging can be added later without driving current product design.
+## Project direction
+
+Conclave is currently web-first and local-first. Desktop/native packaging is intentionally deferred so the provider and orchestration core can remain transport-independent.
+
+The broader direction is to make multi-model work more useful than simply asking several models the same question: clearer division of roles, better evidence handling, stronger inspection, and workflows where disagreement is preserved long enough to be useful.
