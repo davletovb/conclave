@@ -31,6 +31,9 @@ type AntigravityTerminalResult = {
 
 type AntigravityStreamEvent = {
   event?: string;
+  init?: {
+    permission_mode?: string;
+  };
   step_update?: {
     state?: string;
     step_type?: string;
@@ -41,6 +44,7 @@ type AntigravityStreamEvent = {
 };
 
 const LEGACY_GEMINI_ALIASES = new Set(["auto", "pro", "flash", "flash-lite"]);
+const SAFE_PERMISSION_MODES = new Set(["request-review", "strict"]);
 
 const TEXT_ONLY_INSTRUCTIONS = [
   "You are responding inside Conclave, a multi-model reasoning interface.",
@@ -76,6 +80,10 @@ function isLocalRuntimeFailure(message: string) {
 
 function isAuthFailure(message: string) {
   return /authentication required|not authenticated|not signed in|sign[ -]?in required|login required|credentials? (?:are )?(?:missing|not found)/i.test(message);
+}
+
+function isDirectApiConfiguration(message: string) {
+  return /GEMINI_API_KEY|Gemini API key|modelProvider.{0,40}gemini/i.test(message);
 }
 
 function legacyModelMatch(alias: string, models: AntigravityModel[]) {
@@ -120,6 +128,17 @@ export class GoogleGeminiProvider implements ProviderAdapter {
           message: missing
             ? `Antigravity CLI is not installed. ${message}`
             : `Antigravity CLI could not start on this machine. ${message}`,
+        };
+      }
+
+      if (isDirectApiConfiguration(message)) {
+        return {
+          id: this.id,
+          label: this.label,
+          available: true,
+          connected: false,
+          authMode: "google-account",
+          message: `Antigravity is configured for direct Gemini API-key mode, which Conclave refuses. Remove \`modelProvider: "gemini"\` from Antigravity settings and sign in with your Google account instead. ${message}`,
         };
       }
 
@@ -173,6 +192,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     let streamedText = "";
     let terminal: AntigravityTerminalResult | undefined;
     let toolViolation = "";
+    let permissionViolation = "";
 
     const onAbort = () => controller.abort();
     request.signal?.addEventListener("abort", onAbort, { once: true });
@@ -187,10 +207,29 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     if (resolvedModel) args.push("--model", resolvedModel);
     const stdinText = `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`;
 
+    const safetyError = () => {
+      if (permissionViolation) {
+        return new Error(`Antigravity permission mode ${permissionViolation} is not safe for Conclave's text-only Google provider. Use request-review or strict mode.`);
+      }
+      if (toolViolation) {
+        return new Error(`Antigravity attempted a tool step (${toolViolation}); Conclave's Google provider is text-only.`);
+      }
+      return undefined;
+    };
+
     try {
       const result = await this.runner.run(args, timeoutMs + 5_000, rawLine => {
         const event = parseStreamEvent(rawLine);
         if (!event) return;
+
+        if (event.event === "init") {
+          const mode = event.init?.permission_mode ?? "unknown";
+          if (!SAFE_PERMISSION_MODES.has(mode)) {
+            permissionViolation = mode;
+            controller.abort();
+          }
+          return;
+        }
 
         if (event.event === "step_update") {
           const update = event.step_update;
@@ -212,9 +251,8 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         if (event.event === "result" && event.result) terminal = event.result;
       }, controller.signal, stdinText);
 
-      if (toolViolation) {
-        throw new Error(`Antigravity attempted a tool step (${toolViolation}); Conclave's Google provider is text-only.`);
-      }
+      const unsafe = safetyError();
+      if (unsafe) throw unsafe;
       if (request.signal?.aborted) throw cancelledError();
       if (result.code !== 0) {
         const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
@@ -266,9 +304,8 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         latencyMs: Date.now() - startedAt,
       };
     } catch (error) {
-      if (toolViolation) {
-        throw new Error(`Antigravity attempted a tool step (${toolViolation}); Conclave's Google provider is text-only.`);
-      }
+      const unsafe = safetyError();
+      if (unsafe) throw unsafe;
       if (request.signal?.aborted) throw cancelledError();
       throw error;
     } finally {
