@@ -31,6 +31,15 @@
   --fast: 130ms var(--ease);
   --slow: 220ms var(--ease);
 
+  /* One ladder for everything that is `position: fixed`, so a layer can never
+     drift back under navigation. On a narrow viewport the rail is fixed too,
+     and a dialog opened from the rail has to win against it. */
+  --z-rail-scrim: 44;
+  --z-rail: 45;
+  --z-overlay: 50;
+  --z-layer: 51;
+  --z-skip-link: 100;
+
   color-scheme: dark;
 
   /* ink */
@@ -155,7 +164,7 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
 
 .skip-link {
   position: fixed;
-  z-index: 100;
+  z-index: var(--z-skip-link);
   top: 10px;
   left: 10px;
   padding: 10px 14px;
@@ -958,7 +967,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-overlay);
   background: var(--scrim);
   backdrop-filter: blur(2px);
   animation: fade var(--fast);
@@ -967,7 +976,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 
 .drawer {
   position: fixed;
-  z-index: 41;
+  z-index: var(--z-layer);
   inset: 0 0 0 auto;
   width: min(460px, 100vw);
   display: grid;
@@ -992,7 +1001,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 
 .modal {
   position: fixed;
-  z-index: 41;
+  z-index: var(--z-layer);
   top: 12vh;
   left: 50%;
   transform: translateX(-50%);
@@ -1100,7 +1109,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
   .shell { grid-template-columns: minmax(0, 1fr); }
   .rail {
     position: fixed;
-    z-index: 45;
+    z-index: var(--z-rail);
     inset: 0 auto 0 0;
     width: min(300px, 86vw);
     box-shadow: var(--shadow-3);
@@ -1108,7 +1117,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
   }
   @keyframes rail-in { from { transform: translateX(-14px); opacity: 0; } }
   .shell[data-rail="closed"] .rail { display: none; }
-  .shell[data-rail="open"] .scrim { display: block; position: fixed; inset: 0; z-index: 44; background: var(--scrim); }
+  .shell[data-rail="open"] .scrim { display: block; position: fixed; inset: 0; z-index: var(--z-rail-scrim); background: var(--scrim); }
   .column { padding: 20px 16px 32px; }
   .composer-wrap { padding: 0 16px 14px; }
   .modes { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); }
