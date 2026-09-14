@@ -225,7 +225,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
 
     const completionSafetyError = () => (
       concreteSafetyError()
-      ?? (!initVerified ? new Error("Antigravity completed without a verifiable tool-free init event") : undefined)
+      ?? (!initVerified ? new Error("Antigravity completed without a verifiable Conclave init event") : undefined)
     );
 
     try {
@@ -236,7 +236,6 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         if (event.event === "init") {
           const mode = event.init?.permission_mode;
           const agent = event.init?.agent;
-          const tools = event.init?.tools;
 
           if (!mode || !SAFE_PERMISSION_MODES.has(mode)) {
             boundaryViolation = `permission mode ${mode ?? "missing"} is not one of request-review, proceed-in-sandbox, or strict`;
@@ -248,12 +247,13 @@ export class GoogleGeminiProvider implements ProviderAdapter {
             controller.abort();
             return;
           }
-          if (!Array.isArray(tools) || tools.length !== 0) {
-            boundaryViolation = `expected zero available tools, got ${Array.isArray(tools) ? tools.join(", ") || "none" : "an unreadable tool list"}`;
-            controller.abort();
-            return;
-          }
 
+          // Antigravity's headless init event currently reports the process-wide
+          // tool registry in init.tools even when the selected custom agent has
+          // `tools: []`. It is therefore not an effective-capability list and must
+          // not be used to reject an otherwise verified Conclave agent. The custom
+          // agent definition removes tools up front; observed tool/subagent activity
+          // below remains a fail-closed defense in depth.
           initVerified = true;
           return;
         }
@@ -263,7 +263,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
           if (!update) return;
 
           if (!initVerified) {
-            boundaryViolation = "received a step before the tool-free init boundary was verified";
+            boundaryViolation = "received a step before the Conclave init boundary was verified";
             controller.abort();
             return;
           }
