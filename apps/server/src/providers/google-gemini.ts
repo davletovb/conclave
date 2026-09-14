@@ -129,6 +129,10 @@ export class GoogleGeminiProvider implements ProviderAdapter {
   }
 
   async listModels(): Promise<ModelRef[]> {
+    if (!this.hasCachedOAuth()) {
+      throw new Error("Gemini CLI is not signed in with a Google account. Run `gemini` and choose Sign in with Google.");
+    }
+
     const client = this.createClient();
     try {
       const init = await this.initialize(client);
