@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import readline from "node:readline";
@@ -26,18 +27,50 @@ export type GeminiAcpNotification = {
 };
 
 export interface GeminiAcpClientLike {
+  readonly workspaceDir: string;
   request<T>(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T>;
   onNotification(listener: (notification: GeminiAcpNotification) => void): () => void;
   close(): void;
 }
 
 export const GEMINI_ACP_ARGS = ["--acp"] as const;
-export const GEMINI_OAUTH_CREDENTIAL_PATH = join(homedir(), ".gemini", "oauth_creds.json");
+
+export function geminiOAuthCredentialPath() {
+  // Gemini CLI documents GEMINI_CLI_HOME as a replacement home root and then
+  // creates its .gemini directory below it.
+  const homeRoot = process.env.GEMINI_CLI_HOME || homedir();
+  return join(homeRoot, ".gemini", "oauth_creds.json");
+}
 
 export function hasCachedGeminiOAuth() {
   // Presence only: Conclave never reads, copies, parses, or refreshes Google's
   // OAuth material. The official Gemini CLI owns the credentials end to end.
-  return existsSync(GEMINI_OAUTH_CREDENTIAL_PATH);
+  return existsSync(geminiOAuthCredentialPath());
+}
+
+const DENY_ALL_TOOLS_POLICY = `[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 999
+denyMessage = "Conclave runs Gemini in text-only mode."
+`;
+
+export function buildGeminiAcpArgs(model: string | undefined, policyPath: string, mcpSentinel: string) {
+  const args: string[] = [
+    ...GEMINI_ACP_ARGS,
+    // User extensions can add tools, hooks and MCP servers. Conclave is a
+    // text-only model surface, so do not load any extension at all.
+    "--extensions", "none",
+    // Gemini's ACP session merges its mcpServers with user-configured MCPs.
+    // A non-existent per-process allowlist entry makes every configured server
+    // fail the CLI's allowlist check before a client is connected/spawned.
+    "--allowed-mcp-server-names", mcpSentinel,
+    // Deny every built-in and MCP tool at the policy-engine layer. A global
+    // deny rule also removes those tools from the model's context entirely.
+    "--admin-policy", policyPath,
+  ];
+  if (model) args.push("--model", model);
+  return args;
 }
 
 function permissionDenialResult(params?: Record<string, unknown>) {
@@ -80,6 +113,7 @@ function subscriptionOnlyEnv() {
 }
 
 export class GeminiAcpClient implements GeminiAcpClientLike {
+  readonly workspaceDir: string;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly lineReader: readline.Interface;
   private readonly pending = new Map<number, PendingRequest>();
@@ -88,14 +122,18 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
   private stderrTail = "";
   private terminalError: Error | null = null;
   private closed = false;
+  private cleaned = false;
 
   constructor(model?: string) {
-    const args: string[] = [...GEMINI_ACP_ARGS];
-    if (model) args.push("--model", model);
+    this.workspaceDir = mkdtempSync(join(tmpdir(), "conclave-gemini-"));
+    const policyPath = join(this.workspaceDir, "deny-tools.toml");
+    writeFileSync(policyPath, DENY_ALL_TOOLS_POLICY, { encoding: "utf8", mode: 0o600 });
+    const mcpSentinel = `__conclave_no_mcp_${randomUUID()}__`;
+    const args = buildGeminiAcpArgs(model, policyPath, mcpSentinel);
 
     this.child = spawn("gemini", args, {
       env: subscriptionOnlyEnv(),
-      cwd: tmpdir(),
+      cwd: this.workspaceDir,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -113,6 +151,7 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
       this.failAll(error);
     });
     this.child.once("close", code => {
+      this.cleanupWorkspace();
       if (this.closed) return;
       const suffix = this.stderrTail.trim() ? `: ${this.stderrTail.trim()}` : "";
       const error = new Error(`Gemini ACP exited with code ${code ?? "unknown"}${suffix}`);
@@ -160,6 +199,7 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
     this.lineReader.close();
     this.child.kill("SIGTERM");
     this.failAll(new Error("Gemini ACP client closed"));
+    if (this.child.exitCode !== null) this.cleanupWorkspace();
   }
 
   private handleLine(line: string) {
@@ -177,8 +217,9 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
         return;
       }
 
-      // Conclave is a text-only reasoning surface. It advertises no filesystem
-      // or terminal capability and rejects any permission request defensively.
+      // Conclave is a text-only reasoning surface. The deny-all policy should
+      // prevent permission requests, but reject one defensively if upstream
+      // behavior changes or a centrally-managed policy supersedes ours.
       if (message.method === "session/request_permission") {
         this.writeMessage({
           jsonrpc: "2.0",
@@ -222,5 +263,16 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  private cleanupWorkspace() {
+    if (this.cleaned) return;
+    this.cleaned = true;
+    try {
+      rmSync(this.workspaceDir, { recursive: true, force: true });
+    } catch {
+      // Best effort on Windows if the child still holds its cwd briefly. The OS
+      // temp directory will clean up any leftover zero-sensitive-data files.
+    }
   }
 }
