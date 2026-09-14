@@ -166,6 +166,9 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     const timeoutMs = timeoutMsFromEnv();
     const printTimeout = `${Math.max(1, Math.ceil(timeoutMs / 1_000))}s`;
     const prompt = this.buildPrompt(request);
+    const resolvedModel = await this.resolveModel(request.model, request.signal);
+    if (request.signal?.aborted) throw cancelledError();
+
     const controller = new AbortController();
     let streamedText = "";
     let terminal: AntigravityTerminalResult | undefined;
@@ -174,7 +177,6 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     const onAbort = () => controller.abort();
     request.signal?.addEventListener("abort", onAbort, { once: true });
 
-    const resolvedModel = await this.resolveModel(request.model);
     const args = [
       "--input-format", "stream-json",
       "--output-format", "stream-json",
@@ -275,19 +277,19 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     }
   }
 
-  private async resolveModel(requestedModel: string) {
+  private async resolveModel(requestedModel: string, signal?: AbortSignal) {
     if (requestedModel === "auto") return undefined;
     if (requestedModel.startsWith("gemini-")) return requestedModel;
 
     // PR #22 briefly advertised these aliases. Persisted interrupted runs can be
     // resumed after this runtime migration, so map every old alias to the live
     // Antigravity catalog instead of failing before launch.
-    const models = await this.discoverModels();
+    const models = await this.discoverModels(signal);
     return legacyModelMatch(requestedModel, models)?.id ?? models[0]?.id;
   }
 
-  private async discoverModels() {
-    const result = await this.runner.run(["models"], 15_000);
+  private async discoverModels(signal?: AbortSignal) {
+    const result = await this.runner.run(["models"], 15_000, undefined, signal);
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
       throw new Error(`Antigravity model discovery failed: ${detail}`);
