@@ -12,7 +12,25 @@ function abortError() {
   return error;
 }
 
-function initLine(permissionMode = "request-review", tools: string[] = [], agent = CONCLAVE_ANTIGRAVITY_AGENT) {
+const GLOBAL_TOOL_REGISTRY = [
+  "ask_custom_permission",
+  "ask_permission",
+  "browser_click_element",
+  "browser_subagent",
+  "call_mcp_tool",
+  "finish",
+  "invoke_subagent",
+  "run_command",
+  "search_web",
+  "view_file",
+  "write_to_file",
+];
+
+function initLine(
+  permissionMode = "request-review",
+  tools: string[] = GLOBAL_TOOL_REGISTRY,
+  agent = CONCLAVE_ANTIGRAVITY_AGENT,
+) {
   return JSON.stringify({
     event: "init",
     conversation_id: "agy-1",
@@ -225,7 +243,7 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(input.message.content).toContain("Compare the designs.");
   });
 
-  it("accepts every documented non-auto-approve permission mode when the init tool list is empty", async () => {
+  it("accepts every documented non-auto-approve permission mode with Antigravity's global init tool registry", async () => {
     for (const mode of ["request-review", "proceed-in-sandbox", "strict"]) {
       const runner = new FakeAntigravityRunner();
       runner.generateLines[0] = initLine(mode);
@@ -236,6 +254,25 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
         messages: [{ role: "user", content: "Hello" }],
       })).resolves.toMatchObject({ content: "Gemini subscription answer" });
     }
+  });
+
+  it("does not confuse the init tool registry with the selected agent's effective tool grant", async () => {
+    const runner = new FakeAntigravityRunner();
+    runner.generateLines[0] = initLine("request-review", [
+      "ask_permission",
+      "browser_subagent",
+      "call_mcp_tool",
+      "invoke_subagent",
+      "run_command",
+      "search_web",
+      "write_to_file",
+    ]);
+    const provider = new GoogleGeminiProvider(runner);
+
+    await expect(provider.generate({
+      model: "gemini-3.8-flash-high",
+      messages: [{ role: "user", content: "Just answer." }],
+    })).resolves.toMatchObject({ content: "Gemini subscription answer" });
   });
 
   it("keeps the old auto model id compatible by letting Antigravity choose its default", async () => {
@@ -295,21 +332,10 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(runner.calls[1][runner.calls[1].indexOf("--model") + 1]).toBe("gemini-3.8-flash-high");
   });
 
-  it("fails closed if Antigravity advertises any tools for the Conclave agent", async () => {
-    const runner = new FakeAntigravityRunner();
-    runner.generateLines = [initLine("request-review", ["write_file"] )];
-    const provider = new GoogleGeminiProvider(runner);
-
-    await expect(provider.generate({
-      model: "gemini-3.8-flash-high",
-      messages: [{ role: "user", content: "Just answer." }],
-    })).rejects.toThrow(/expected zero available tools.*write_file/i);
-  });
-
   it("fails closed when the init agent is missing or not Conclave's tool-free agent", async () => {
     for (const agent of ["default", ""]) {
       const runner = new FakeAntigravityRunner();
-      runner.generateLines = [initLine("request-review", [], agent)];
+      runner.generateLines = [initLine("request-review", GLOBAL_TOOL_REGISTRY, agent)];
       const provider = new GoogleGeminiProvider(runner);
 
       await expect(provider.generate({
@@ -330,10 +356,10 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     await expect(provider.generate({
       model: "gemini-3.8-flash-high",
       messages: [{ role: "user", content: "Just answer." }],
-    })).rejects.toThrow(/without a verifiable tool-free init event/i);
+    })).rejects.toThrow(/without a verifiable Conclave init event/i);
   });
 
-  it("fails closed if tool or subagent activity appears after a verified tool-free init", async () => {
+  it("fails closed if tool or subagent activity appears after a verified Conclave init", async () => {
     for (const violatingStep of [
       { step_type: "tool", state: "ACTIVE", tool_name: "run_command", tool_info: {} },
       { step_type: "checkpoint", state: "ACTIVE", subagent_info: { conversation_id: "child" } },
