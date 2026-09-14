@@ -126,9 +126,12 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
         child = spawn("agy", args, {
           cwd: workspaceDir,
           env: buildAntigravityChildEnv(),
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["pipe", "pipe", "pipe"],
           detached: process.platform !== "win32",
         });
+        // `-p` owns the prompt, so Antigravity must never wait for stdin.
+        child.stdin.on("error", () => {});
+        child.stdin.end();
       } catch (error) {
         rmSync(workspaceDir, { recursive: true, force: true });
         reject(error);
@@ -167,6 +170,7 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
         settled = true;
         removeLifecycleListeners();
         stopChild();
+        cleanupWorkspace();
         reject(error);
       };
 
