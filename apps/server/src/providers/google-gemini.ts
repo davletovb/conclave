@@ -10,6 +10,7 @@ import {
   NativeAntigravityCliRunner,
   parseAntigravityModels,
   type AntigravityCliRunner,
+  type AntigravityModel,
 } from "../antigravity/cli.js";
 
 type AntigravityUsage = {
@@ -39,6 +40,8 @@ type AntigravityStreamEvent = {
   result?: AntigravityTerminalResult;
 };
 
+const LEGACY_GEMINI_ALIASES = new Set(["auto", "pro", "flash", "flash-lite"]);
+
 const TEXT_ONLY_INSTRUCTIONS = [
   "You are responding inside Conclave, a multi-model reasoning interface.",
   "Answer the user's request directly as text.",
@@ -67,6 +70,27 @@ function timeoutMsFromEnv() {
   return Number.isFinite(raw) && raw > 0 ? raw : 180_000;
 }
 
+function isLocalRuntimeFailure(message: string) {
+  return /\b(?:ENOENT|EACCES|EPERM|ENOSPC|EROFS)\b|mkdtemp|read-only file system|permission denied/i.test(message);
+}
+
+function isAuthFailure(message: string) {
+  return /authentication required|not authenticated|not signed in|sign[ -]?in required|login required|credentials? (?:are )?(?:missing|not found)/i.test(message);
+}
+
+function legacyModelMatch(alias: string, models: AntigravityModel[]) {
+  if (alias === "pro") {
+    return models.find(model => /(?:^|[-\s])pro(?:$|[-\s])/i.test(`${model.id} ${model.label}`));
+  }
+  if (alias === "flash-lite") {
+    return models.find(model => /flash/i.test(`${model.id} ${model.label}`) && /lite/i.test(`${model.id} ${model.label}`));
+  }
+  if (alias === "flash") {
+    return models.find(model => /flash/i.test(`${model.id} ${model.label}`) && !/lite/i.test(`${model.id} ${model.label}`));
+  }
+  return undefined;
+}
+
 export class GoogleGeminiProvider implements ProviderAdapter {
   readonly id = "google" as const;
   readonly label = "Google Gemini via Antigravity CLI";
@@ -86,16 +110,37 @@ export class GoogleGeminiProvider implements ProviderAdapter {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Antigravity CLI runtime unavailable";
-      const missing = /spawn agy\b.*\bENOENT\b/i.test(message) || /agy.*not found/i.test(message);
+      if (isLocalRuntimeFailure(message)) {
+        const missing = /\bENOENT\b|not found/i.test(message);
+        return {
+          id: this.id,
+          label: this.label,
+          available: false,
+          connected: false,
+          message: missing
+            ? `Antigravity CLI is not installed. ${message}`
+            : `Antigravity CLI could not start on this machine. ${message}`,
+        };
+      }
+
+      if (isAuthFailure(message)) {
+        return {
+          id: this.id,
+          label: this.label,
+          available: true,
+          connected: false,
+          authMode: "google-account",
+          message: `Antigravity CLI is installed but Google-account authentication is not ready. Run \`agy\` in a terminal and sign in with Google, then restart Conclave. ${message}`,
+        };
+      }
+
       return {
         id: this.id,
         label: this.label,
-        available: !missing,
+        available: true,
         connected: false,
-        authMode: missing ? undefined : "google-account",
-        message: missing
-          ? `Antigravity CLI is not installed. ${message}`
-          : `Antigravity CLI is installed but Google-account access is not ready. Run \`agy\` in a terminal and sign in with Google, then restart Conclave. ${message}`,
+        authMode: "google-account",
+        message: `Antigravity CLI could not expose Gemini models for Conclave. ${message}`,
       };
     }
   }
@@ -113,7 +158,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
 
   async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
     if (request.signal?.aborted) throw cancelledError();
-    if (request.model !== "auto" && !request.model.startsWith("gemini-")) {
+    if (!request.model.startsWith("gemini-") && !LEGACY_GEMINI_ALIASES.has(request.model)) {
       throw new Error(`Antigravity Google adapter refuses non-Gemini model: ${request.model}`);
     }
 
@@ -129,14 +174,16 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     const onAbort = () => controller.abort();
     request.signal?.addEventListener("abort", onAbort, { once: true });
 
+    const resolvedModel = await this.resolveModel(request.model);
     const args = [
-      "-p", prompt,
+      "--input-format", "stream-json",
       "--output-format", "stream-json",
       "--print-timeout", printTimeout,
       "--sandbox",
       "--mode=default",
     ];
-    if (request.model !== "auto") args.push("--model", request.model);
+    if (resolvedModel) args.push("--model", resolvedModel);
+    const stdinText = `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`;
 
     try {
       const result = await this.runner.run(args, timeoutMs + 5_000, rawLine => {
@@ -161,7 +208,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         }
 
         if (event.event === "result" && event.result) terminal = event.result;
-      }, controller.signal);
+      }, controller.signal, stdinText);
 
       if (toolViolation) {
         throw new Error(`Antigravity attempted a tool step (${toolViolation}); Conclave's Google provider is text-only.`);
@@ -226,6 +273,17 @@ export class GoogleGeminiProvider implements ProviderAdapter {
       request.signal?.removeEventListener("abort", onAbort);
       controller.abort();
     }
+  }
+
+  private async resolveModel(requestedModel: string) {
+    if (requestedModel === "auto") return undefined;
+    if (requestedModel.startsWith("gemini-")) return requestedModel;
+
+    // PR #22 briefly advertised these aliases. Persisted interrupted runs can be
+    // resumed after this runtime migration, so map every old alias to the live
+    // Antigravity catalog instead of failing before launch.
+    const models = await this.discoverModels();
+    return legacyModelMatch(requestedModel, models)?.id ?? models[0]?.id;
   }
 
   private async discoverModels() {
