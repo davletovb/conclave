@@ -124,7 +124,7 @@ app.get("/provider-limits", async (): Promise<ProviderLimitSnapshot[]> => {
     {
       provider: "google",
       available: false,
-      message: "Gemini CLI ACP does not expose a stable structured Google-account quota snapshot to Conclave.",
+      message: "Antigravity CLI does not expose a stable structured Google-account quota snapshot to Conclave.",
     },
   ];
 });
