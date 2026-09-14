@@ -89,7 +89,7 @@ describe("Antigravity CLI transport", () => {
     expect(env.AGY_CLI_DISABLE_AUTO_UPDATE).toBe("true");
   });
 
-  it("creates a workspace-local primary agent with no tools, MCP, skills, plugins, or subagent capability", () => {
+  it("creates a workspace-local primary agent with no inherited customizations or execution capabilities", () => {
     const workspace = createAntigravityWorkspace();
     try {
       const definition = readFileSync(
@@ -99,11 +99,14 @@ describe("Antigravity CLI transport", () => {
       expect(definition).toContain("tools: []");
       expect(definition).toContain("mainAgent: true");
       expect(definition).toContain("subagent: false");
+      expect(definition).toContain("inheritCustomizations: false");
       expect(definition).toContain("inheritMcp: false");
       expect(definition).toContain('commandExecutionPolicy: "off"');
       expect(definition).toContain("mcpServers: []");
       expect(definition).toContain("skills: []");
       expect(definition).toContain("plugins: []");
+      expect(definition).toContain("rules: []");
+      expect(definition).toContain("agents: []");
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
