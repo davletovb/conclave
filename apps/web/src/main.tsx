@@ -22,6 +22,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
+import { finalAnswerStepId } from "./lib/final-step";
 import { collapsePrompt } from "./lib/text";
 import { isEditableTarget, matchShortcut } from "./lib/shortcuts";
 import { formatDuration } from "./lib/text";
@@ -230,6 +231,14 @@ function App() {
     [conversation, activeRunId],
   );
   const displayedSteps = result?.steps ?? liveSteps;
+  // The step that produces the answer belongs in the answer, not in council
+  // work: showing it in both means watching the same text write itself twice.
+  const finalStepId = finalAnswerStepId(displayedSteps, result?.final);
+  const finalStep = displayedSteps.find(step => step.id === finalStepId);
+  const councilSteps = useMemo(
+    () => displayedSteps.filter(step => step.id !== finalStepId),
+    [displayedSteps, finalStepId],
+  );
   const layered = paletteOpen || shortcutsOpen || inspectorOpen;
   const modeLabel = modes.find(item => item.id === mode)?.label ?? mode;
 
@@ -390,7 +399,7 @@ function App() {
   }
 
   function expandAllSteps() {
-    setOpenSteps(Object.fromEntries(displayedSteps.map(step => [step.id, true])));
+    setOpenSteps(Object.fromEntries(councilSteps.map(step => [step.id, true])));
   }
 
   function setPreset(presetId: string) {
@@ -722,6 +731,7 @@ function App() {
             model: streamEvent.model,
             content: "",
             dependsOn: streamEvent.dependsOn,
+            final: streamEvent.final,
           }]));
       setAnnouncement(`${streamEvent.model.label} started ${streamEvent.kind}`);
       return;
@@ -1067,7 +1077,7 @@ function App() {
       { id: "shortcuts", label: "Keyboard shortcuts", group: "View", icon: "keyboard", keys: ["?"], run: () => setShortcutsOpen(true) },
     ];
 
-    if (displayedSteps.length > 0) {
+    if (councilSteps.length > 0) {
       list.push(
         { id: "expand", label: "Expand every council step", group: "View", icon: "layers", keys: ["E"], run: expandAllSteps },
         { id: "collapse", label: "Collapse every council step", group: "View", icon: "layers", keys: ["Shift", "E"], run: () => setOpenSteps({}) },
@@ -1092,7 +1102,7 @@ function App() {
       );
     }
     return list;
-  }, [setupOpen, theme, railOpen, displayedSteps.length, activeRunId, loading, resumeRunId, result, conversation]);
+  }, [setupOpen, theme, railOpen, councilSteps.length, activeRunId, loading, resumeRunId, result, conversation]);
 
   const searchConversations = useCallback(
     (text: string, signal: AbortSignal) => api.conversations(text, signal),
@@ -1311,19 +1321,32 @@ function App() {
               </div>
             )}
 
-            {result && (
+            {(result || finalStep) && (
               <section className="answer" aria-label="Final answer">
                 <div className="answer-head">
                   <span className="eyebrow">Final answer</span>
                   <span className="spacer" />
-                  {copied && <span className="copy-state">Copied</span>}
-                  <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
-                    <Icon name="copy" size={13} /> Copy
-                  </button>
+                  {result && copied && <span className="copy-state">Copied</span>}
+                  {result && (
+                    <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
+                      <Icon name="copy" size={13} /> Copy
+                    </button>
+                  )}
                 </div>
-                <div className="answer-body">
-                  <Markdown content={result.final} />
-                </div>
+                {result
+                  ? (
+                    <div className="answer-body">
+                      <Markdown content={result.final} />
+                    </div>
+                  )
+                  : (
+                    // Half-written markdown reads as noise, so the answer is
+                    // withheld until it is whole rather than assembled on screen.
+                    <div className="working" aria-live="polite">
+                      <span className="pips"><i /><i /><i /></span>
+                      {finalStep!.model.label} is writing the final answer…
+                    </div>
+                  )}
               </section>
             )}
 
@@ -1342,7 +1365,7 @@ function App() {
             )}
 
             <CouncilWork
-              steps={displayedSteps}
+              steps={councilSteps}
               loading={loading}
               inspection={inspection}
               completedStepIds={completedStepIds}
