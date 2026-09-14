@@ -213,18 +213,20 @@ export class GoogleGeminiProvider implements ProviderAdapter {
     if (resolvedModel) args.push("--model", resolvedModel);
     const stdinText = `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`;
 
-    const safetyError = () => {
+    const concreteSafetyError = () => {
       if (boundaryViolation) {
         return new Error(`Antigravity did not preserve Conclave's tool-free boundary: ${boundaryViolation}`);
       }
       if (toolViolation) {
         return new Error(`Antigravity attempted a tool/subagent step (${toolViolation}) despite Conclave's tool-free agent.`);
       }
-      if (!initVerified) {
-        return new Error("Antigravity completed without a verifiable tool-free init event");
-      }
       return undefined;
     };
+
+    const completionSafetyError = () => (
+      concreteSafetyError()
+      ?? (!initVerified ? new Error("Antigravity completed without a verifiable tool-free init event") : undefined)
+    );
 
     try {
       const result = await this.runner.run(args, timeoutMs + 5_000, rawLine => {
@@ -287,7 +289,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         if (event.event === "result" && event.result) terminal = event.result;
       }, controller.signal, stdinText);
 
-      const unsafe = safetyError();
+      const unsafe = completionSafetyError();
       if (unsafe) throw unsafe;
       if (request.signal?.aborted) throw cancelledError();
       if (result.code !== 0) {
@@ -340,7 +342,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         latencyMs: Date.now() - startedAt,
       };
     } catch (error) {
-      const unsafe = safetyError();
+      const unsafe = concreteSafetyError();
       if (unsafe) throw unsafe;
       if (request.signal?.aborted) throw cancelledError();
       throw error;
