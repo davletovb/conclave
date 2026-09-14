@@ -63,6 +63,9 @@ export function RunSetup(props: SetupProps) {
     maxCalls, onMaxCallsChange, maxRounds, onMaxRoundsChange, expectedCalls, requiredParticipants,
     loading, workflowSlot,
   } = props;
+  const [webSearchEnabled, setWebSearchEnabled] = React.useState(
+    () => localStorage.getItem("conclave.webSearch") === "shared",
+  );
 
   const meta = (id: OrchestrationMode) => modes.find(item => item.id === id)!;
   const fallbackFinalizer = defaultFinalizer(mode, participants, models);
@@ -82,6 +85,13 @@ export function RunSetup(props: SetupProps) {
       <span>{meta(id).description}</span>
     </button>
   );
+
+  const toggleWebSearch = () => {
+    const next = !webSearchEnabled;
+    setWebSearchEnabled(next);
+    if (next) localStorage.setItem("conclave.webSearch", "shared");
+    else localStorage.removeItem("conclave.webSearch");
+  };
 
   return (
     <section className="setup" aria-label="Run configuration">
@@ -186,6 +196,25 @@ export function RunSetup(props: SetupProps) {
             </select>
           </label>
         )}
+      </div>
+
+      <div className="section">
+        <header>
+          <span className="eyebrow">Web evidence</span>
+          <span className="num">{webSearchEnabled ? "ON" : "OFF"}</span>
+        </header>
+        <button
+          type="button"
+          className="mode"
+          aria-pressed={webSearchEnabled}
+          disabled={loading}
+          onClick={toggleWebSearch}
+        >
+          <strong>Shared web search</strong>
+          <span>
+            Search once before the run and give every selected model the same SearXNG evidence packet. Requires CONCLAVE_SEARXNG_URL on the server.
+          </span>
+        </button>
       </div>
 
       <details className="disclosure">

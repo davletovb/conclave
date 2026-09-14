@@ -7,6 +7,7 @@ import type {
   StoredRun,
 } from "@conclave/core";
 import { Orchestrator } from "../orchestrator.js";
+import { formatWebEvidence, SearxngSearchProvider } from "../search/searxng.js";
 import { FileStateStore, type ListOptions } from "./file-store.js";
 import { inspectRun } from "./run-inspection.js";
 
@@ -33,6 +34,7 @@ export class RunManager {
   private readonly activeConversations = new Map<string, "run" | "delete">();
   /** Which active run owns a conversation reservation. */
   private readonly activeRunByConversation = new Map<string, string>();
+  private readonly searchProvider = new SearxngSearchProvider();
 
   constructor(
     private readonly orchestrator: Orchestrator,
@@ -43,14 +45,22 @@ export class RunManager {
     await this.store.init();
   }
 
+  webSearchStatus() {
+    return this.searchProvider.status();
+  }
+
   async start(input: StartRunRequest): Promise<StartRunResponse> {
-    const request = this.normalizeRequest(input.request);
+    let request = this.normalizeRequest(input.request);
     this.validate(request);
     this.orchestrator.validateRequest(request);
     const reservedConversationId = input.conversationId;
     if (reservedConversationId) this.reserveConversation(reservedConversationId);
 
     try {
+      if (request.webSearch && !request.webSearchEvidence) {
+        const evidence = await this.searchProvider.search(request.prompt, request.webSearch);
+        request = { ...request, webSearchEvidence: evidence };
+      }
       const created = await this.store.createRun(request, reservedConversationId);
       this.activeConversations.set(created.run.conversationId, "run");
       this.nextSequence.set(created.run.id, 0);
@@ -267,7 +277,11 @@ export class RunManager {
     }
 
     await this.store.updateRun(run.id, { status: "running", error: undefined });
-    const request: OrchestrationRequest = { ...this.normalizeRequest(run.request), history };
+    const storedRequest = this.normalizeRequest(run.request);
+    const evidenceHistory = storedRequest.webSearchEvidence
+      ? [{ role: "system" as const, content: formatWebEvidence(storedRequest.webSearchEvidence) }, ...history]
+      : history;
+    const request: OrchestrationRequest = { ...storedRequest, history: evidenceHistory };
 
     try {
       const result = await this.orchestrator.run(request, {
@@ -366,6 +380,13 @@ export class RunManager {
     const maxRounds = request.budget?.maxRounds;
     if (!Number.isInteger(maxRounds) || (maxRounds ?? 0) < 1 || (maxRounds ?? 0) > 3) {
       throw new Error("maxRounds must be an integer between 1 and 3");
+    }
+    if (request.webSearch) {
+      if (request.webSearch.mode !== "shared") throw new Error("Only shared web search is supported");
+      if (request.webSearch.maxResults !== undefined
+        && (!Number.isInteger(request.webSearch.maxResults) || request.webSearch.maxResults < 1 || request.webSearch.maxResults > 12)) {
+        throw new Error("webSearch.maxResults must be an integer between 1 and 12");
+      }
     }
   }
 

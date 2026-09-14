@@ -93,6 +93,41 @@ export interface RunBudget {
   maxRounds?: number;
 }
 
+export type WebSearchTimeRange = "day" | "week" | "month" | "year";
+
+export interface WebSearchConfig {
+  /** Shared search runs once before orchestration so every model sees identical evidence. */
+  mode: "shared";
+  /** Number of normalized search results injected into the shared evidence packet. */
+  maxResults?: number;
+  /** Optional SearXNG language code, for example en, uz, or all. */
+  language?: string;
+  /** Optional freshness window supported by the configured SearXNG engines. */
+  timeRange?: WebSearchTimeRange;
+}
+
+export interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  publishedAt?: string;
+  engine?: string;
+}
+
+export interface WebSearchEvidence {
+  provider: "searxng";
+  query: string;
+  searchedAt: string;
+  results: WebSearchResult[];
+}
+
+export interface WebSearchStatus {
+  provider: "searxng";
+  configured: boolean;
+  available: boolean;
+  message?: string;
+}
+
 export type WorkflowModelSelector =
   | { type: "participant"; index: number }
   | { type: "synthesizer" };
@@ -160,6 +195,10 @@ export interface OrchestrationRequest {
   /** @deprecated Prefer budget.maxRounds. Retained for compatibility. */
   maxRounds?: number;
   budget?: RunBudget;
+  /** Optional server-owned web retrieval performed once before orchestration. */
+  webSearch?: WebSearchConfig;
+  /** Server-resolved shared evidence. Clients should not populate this directly. */
+  webSearchEvidence?: WebSearchEvidence;
   /** Server-injected prior conversation context. Clients normally omit this. */
   history?: ChatMessage[];
 }
@@ -204,6 +243,8 @@ export type OrchestrationStreamEvent =
   | { type: "run_started"; runId: string; mode: OrchestrationMode }
   | { type: "run_usage"; runId: string; usage: RunUsage; budget?: RunBudget }
   | { type: "run_cancelled"; runId: string; message: string }
+  | { type: "web_search_started"; runId: string; query: string }
+  | { type: "web_search_completed"; runId: string; evidence: WebSearchEvidence; reused?: boolean }
   | { type: "rate_limit"; runId: string; notice: RateLimitNotice }
   | { type: "step_started"; runId: string; stepId: string; kind: OrchestrationStepKind; model: ModelRef; dependsOn?: string[]; final?: boolean }
   | { type: "step_retrying"; runId: string; stepId: string; attempt: number; message: string }
@@ -258,6 +299,8 @@ export interface ConversationExportRun {
   participants: ModelRef[];
   synthesizer?: ModelRef;
   workflow?: WorkflowGraph;
+  webSearch?: WebSearchConfig;
+  webSearchEvidence?: WebSearchEvidence;
   usage: RunUsage;
   createdAt: string;
   updatedAt: string;
@@ -293,6 +336,7 @@ export interface StoredRun {
   result?: OrchestrationResult;
   error?: string;
   rateLimit?: RateLimitNotice;
+  webSearchEvidence?: WebSearchEvidence;
   cancelRequestedAt?: string;
 }
 

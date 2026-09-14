@@ -29,6 +29,18 @@ function get<T>(path: string, init?: RequestInit) {
   return fetch(`${API}${path}`, init).then(response => readJson<T>(response));
 }
 
+function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
+  const enabled = localStorage.getItem("conclave.webSearch") === "shared";
+  if (!enabled) return body;
+  return {
+    ...body,
+    request: {
+      ...body.request,
+      webSearch: body.request.webSearch ?? { mode: "shared", maxResults: 6 },
+    },
+  };
+}
+
 export const api = {
   models: () => get<ModelRef[]>("/models"),
   providers: () => get<ProviderStatus[]>("/providers"),
@@ -56,7 +68,7 @@ export const api = {
   startRun: (body: StartRunRequest) => get<StartRunResponse>("/runs", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withWebSearchPreference(body)),
   }),
   run: (id: string, signal?: AbortSignal) => get<StoredRun>(`/runs/${id}`, { signal }),
   inspection: (id: string) => get<RunInspection>(`/runs/${id}/inspection`),
