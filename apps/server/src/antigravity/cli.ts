@@ -20,6 +20,7 @@ export interface AntigravityCliRunner {
     timeoutMs?: number,
     onStdoutLine?: (line: string) => void,
     signal?: AbortSignal,
+    stdinText?: string,
   ): Promise<AntigravityRunResult>;
 }
 
@@ -43,7 +44,7 @@ export function buildAntigravityChildEnv(source: NodeJS.ProcessEnv = process.env
 
   // Antigravity can be configured to use direct Gemini API credentials. Conclave's
   // Google adapter is subscription-only, so shadow (rather than delete) those
-  // variables: an inherited shell/profile or dotenv loader cannot repopulate them.
+  // variables: inherited dotenv/config loading cannot repopulate them.
   for (const name of BLOCKED_BILLING_ENV) env[name] = "";
 
   // Conclave owns provider lifecycle; avoid a background self-updater racing a run.
@@ -110,6 +111,7 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
     timeoutMs = 180_000,
     onStdoutLine?: (line: string) => void,
     signal?: AbortSignal,
+    stdinText?: string,
   ): Promise<AntigravityRunResult> {
     if (signal?.aborted) return Promise.reject(cancelledError());
 
@@ -129,9 +131,8 @@ export class NativeAntigravityCliRunner implements AntigravityCliRunner {
           stdio: ["pipe", "pipe", "pipe"],
           detached: process.platform !== "win32",
         });
-        // `-p` owns the prompt, so Antigravity must never wait for stdin.
         child.stdin.on("error", () => {});
-        child.stdin.end();
+        child.stdin.end(stdinText ?? "");
       } catch (error) {
         rmSync(workspaceDir, { recursive: true, force: true });
         reject(error);
