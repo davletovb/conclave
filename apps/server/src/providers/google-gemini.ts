@@ -1,4 +1,3 @@
-import { tmpdir } from "node:os";
 import type {
   ModelRef,
   ProviderAdapter,
@@ -164,6 +163,7 @@ export class GoogleGeminiProvider implements ProviderAdapter {
 
       let sessionId = "";
       let streamedText = "";
+      let lastReasoningStatusAt = 0;
 
       unsubscribe = client.onNotification((notification: GeminiAcpNotification) => {
         if (notification.method !== "session/update") return;
@@ -174,9 +174,14 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         if (!update) return;
 
         if (update.sessionUpdate === "agent_thought_chunk") {
-          // Never expose model chain-of-thought. A generic status signal is
-          // sufficient to keep a long reasoning turn legible in the UI.
-          emit?.({ type: "status", message: "Gemini is reasoning…" });
+          // Never expose model chain-of-thought. Emit an occasional generic
+          // progress signal so a long reasoning-only phase still resets the
+          // orchestrator's inactivity watchdog without flooding persisted events.
+          const now = Date.now();
+          if (now - lastReasoningStatusAt >= 5_000) {
+            lastReasoningStatusAt = now;
+            emit?.({ type: "status", message: "Gemini is reasoning…" });
+          }
           return;
         }
 
@@ -188,11 +193,11 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         emit?.({ type: "text_delta", delta: content.text });
       });
 
-      // Run the ACP session in a neutral temporary directory rather than the
-      // Conclave repository so Gemini cannot accidentally ingest project files
-      // or workspace instructions even if its tool policy changes upstream.
+      // Use the exact per-process directory created by the ACP transport. The
+      // deny-all policy file is the only file Conclave places there; no repo or
+      // unrelated OS temp contents become workspace context for Gemini.
       const session = await client.request<SessionNewResponse>("session/new", {
-        cwd: tmpdir(),
+        cwd: client.workspaceDir,
         mcpServers: [],
       }, 30_000);
       sessionId = session.sessionId;
