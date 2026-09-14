@@ -88,8 +88,8 @@ function permissionDenialResult(params?: Record<string, unknown>) {
   return { outcome: { outcome: "cancelled" } };
 }
 
-function subscriptionOnlyEnv() {
-  const env = { ...process.env };
+export function buildGeminiChildEnv(source: NodeJS.ProcessEnv = process.env) {
+  const env = { ...source };
 
   // Gemini CLI supports several credential routes. Conclave deliberately uses
   // only the Google-account OAuth already established by the official CLI.
@@ -152,7 +152,7 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
     const args = buildGeminiAcpArgs(model, policyPath, mcpSentinel);
 
     this.child = spawn("gemini", args, {
-      env: subscriptionOnlyEnv(),
+      env: buildGeminiChildEnv(),
       cwd: this.workspaceDir,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -171,11 +171,13 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
       if (this.closed) return;
       this.terminalError = error;
       this.failAll(error);
+      this.close();
     });
 
     this.child.once("error", error => {
       this.terminalError = error;
       this.failAll(error);
+      this.cleanupWorkspace();
     });
     this.child.once("close", code => {
       if (this.killTimer) clearTimeout(this.killTimer);
@@ -245,7 +247,9 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
     }
 
     this.killTimer = setTimeout(() => {
-      if (this.child.exitCode === null && !this.child.killed) this.child.kill("SIGKILL");
+      // child.killed only means a signal was sent, not that the process exited.
+      // Check exitCode so a Gemini process that ignores SIGTERM still gets reaped.
+      if (this.child.exitCode === null) this.child.kill("SIGKILL");
     }, 1_000);
     this.killTimer.unref();
   }
@@ -311,7 +315,11 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
     message: Record<string, unknown>,
     callback?: (error?: Error | null) => void,
   ) {
-    this.child.stdin.write(`${JSON.stringify(message)}\n`, error => callback?.(error));
+    try {
+      this.child.stdin.write(`${JSON.stringify(message)}\n`, error => callback?.(error));
+    } catch (error) {
+      callback?.(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   private failAll(error: Error) {
