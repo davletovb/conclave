@@ -1,4 +1,4 @@
-export type ProviderId = "openai" | "anthropic" | "xai" | "mock";
+export type ProviderId = "openai" | "anthropic" | "xai" | "google" | "mock";
 
 export type OrchestrationMode =
   | "single"
