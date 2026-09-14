@@ -18,7 +18,7 @@ describe("Antigravity CLI transport", () => {
     ]);
   });
 
-  it("shadows direct API and Vertex billing routes while preserving normal process env", () => {
+  it("shadows direct API, custom-endpoint and Vertex billing routes while preserving normal process env", () => {
     const env = buildAntigravityChildEnv({
       PATH: "/usr/bin",
       HOME: "/Users/example",
@@ -34,6 +34,7 @@ describe("Antigravity CLI transport", () => {
       GOOGLE_CLOUD_QUOTA_PROJECT: "quota",
       GOOGLE_CLOUD_LOCATION: "global",
       CLOUD_ML_PROJECT_ID: "ml-project",
+      GOOGLE_GEMINI_BASE_URL: "https://example.invalid",
     });
 
     expect(env.PATH).toBe("/usr/bin");
@@ -51,6 +52,7 @@ describe("Antigravity CLI transport", () => {
       "GOOGLE_CLOUD_QUOTA_PROJECT",
       "GOOGLE_CLOUD_LOCATION",
       "CLOUD_ML_PROJECT_ID",
+      "GOOGLE_GEMINI_BASE_URL",
     ]) {
       expect(env[name]).toBe("");
     }
