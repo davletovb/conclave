@@ -1,0 +1,11 @@
+:root {
+  --google: #8ab4f8;
+}
+
+:root[data-theme="light"] {
+  --google: #1a73e8;
+}
+
+.p-google {
+  --provider: var(--google);
+}
