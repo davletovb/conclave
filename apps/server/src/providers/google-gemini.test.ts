@@ -10,6 +10,7 @@ function abortError() {
 
 class FakeAntigravityRunner implements AntigravityCliRunner {
   calls: string[][] = [];
+  stdinTexts: Array<string | undefined> = [];
   modelsResult: AntigravityRunResult = {
     code: 0,
     stderr: "",
@@ -42,8 +43,10 @@ class FakeAntigravityRunner implements AntigravityCliRunner {
     _timeoutMs?: number,
     onStdoutLine?: (line: string) => void,
     signal?: AbortSignal,
+    stdinText?: string,
   ): Promise<AntigravityRunResult> {
     this.calls.push(args);
+    this.stdinTexts.push(stdinText);
     if (args[0] === "models") return this.modelsResult;
 
     if (this.holdGenerate) {
@@ -124,20 +127,26 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(status.message).toMatch(/run `agy`/i);
   });
 
-  it("reports a missing agy executable as unavailable", async () => {
-    const runner: AntigravityCliRunner = {
-      run: async () => { throw new Error("spawn agy ENOENT"); },
-    };
-    const provider = new GoogleGeminiProvider(runner);
+  it("reports missing or locally unusable Antigravity runtimes as unavailable", async () => {
+    for (const failure of [
+      "spawn agy ENOENT",
+      "spawn agy EACCES",
+      "ENOSPC: no space left on device, mkdtemp",
+    ]) {
+      const runner: AntigravityCliRunner = {
+        run: async () => { throw new Error(failure); },
+      };
+      const provider = new GoogleGeminiProvider(runner);
 
-    await expect(provider.status()).resolves.toMatchObject({
-      id: "google",
-      available: false,
-      connected: false,
-    });
+      await expect(provider.status()).resolves.toMatchObject({
+        id: "google",
+        available: false,
+        connected: false,
+      });
+    }
   });
 
-  it("streams Antigravity answer deltas and maps terminal token usage", async () => {
+  it("streams Antigravity answer deltas and sends the prompt over stdin", async () => {
     const runner = new FakeAntigravityRunner();
     const provider = new GoogleGeminiProvider(runner);
     const events: Array<{ type: string; [key: string]: unknown }> = [];
@@ -157,14 +166,24 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(events).toContainEqual({ type: "usage", inputTokens: 17, outputTokens: 9 });
 
     const args = runner.calls[0];
+    expect(args).toContain("--input-format");
     expect(args).toContain("--output-format");
     expect(args).toContain("stream-json");
     expect(args).toContain("--sandbox");
     expect(args).toContain("--mode=default");
     expect(args).toContain("--model");
     expect(args).toContain("gemini-3.8-flash-high");
+    expect(args).not.toContain("-p");
     expect(args).not.toContain("--dangerously-skip-permissions");
-    expect(args[args.indexOf("-p") + 1]).toMatch(/Do not use tools/i);
+    expect(args.join(" ")).not.toContain("Compare the designs.");
+
+    const input = JSON.parse(runner.stdinTexts[0]!.trim()) as {
+      event: string;
+      message: { content: string };
+    };
+    expect(input.event).toBe("user");
+    expect(input.message.content).toMatch(/Do not use tools/i);
+    expect(input.message.content).toContain("Compare the designs.");
   });
 
   it("keeps the old auto model id compatible by letting Antigravity choose its default", async () => {
@@ -177,6 +196,51 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     });
 
     expect(runner.calls[0]).not.toContain("--model");
+  });
+
+  it("maps every previously advertised Gemini alias onto the live Antigravity catalog", async () => {
+    const catalog = [
+      "gemini-3.8-pro-high\tGemini 3.8 Pro (High)",
+      "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+      "gemini-3.8-flash-lite\tGemini 3.8 Flash Lite",
+    ].join("\n");
+    const expected = new Map([
+      ["pro", "gemini-3.8-pro-high"],
+      ["flash", "gemini-3.8-flash-high"],
+      ["flash-lite", "gemini-3.8-flash-lite"],
+    ]);
+
+    for (const [legacy, resolved] of expected) {
+      const runner = new FakeAntigravityRunner();
+      runner.modelsResult = { code: 0, stdout: catalog, stderr: "" };
+      const provider = new GoogleGeminiProvider(runner);
+
+      await provider.generate({
+        model: legacy,
+        messages: [{ role: "user", content: "Resume the old run." }],
+      });
+
+      expect(runner.calls[0]).toEqual(["models"]);
+      const generationArgs = runner.calls[1];
+      expect(generationArgs[generationArgs.indexOf("--model") + 1]).toBe(resolved);
+    }
+  });
+
+  it("falls back to the live default when an old alias has no direct equivalent", async () => {
+    const runner = new FakeAntigravityRunner();
+    runner.modelsResult = {
+      code: 0,
+      stderr: "",
+      stdout: "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+    };
+    const provider = new GoogleGeminiProvider(runner);
+
+    await provider.generate({
+      model: "pro",
+      messages: [{ role: "user", content: "Resume safely." }],
+    });
+
+    expect(runner.calls[1][runner.calls[1].indexOf("--model") + 1]).toBe("gemini-3.8-flash-high");
   });
 
   it("fails closed if Antigravity attempts a tool step", async () => {
