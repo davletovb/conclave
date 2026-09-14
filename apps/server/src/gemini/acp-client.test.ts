@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildGeminiAcpArgs, buildGeminiChildEnv } from "./acp-client.js";
+import {
+  buildGeminiAcpArgs,
+  buildGeminiChildEnv,
+  GEMINI_ISOLATED_WORKSPACE_SETTINGS,
+} from "./acp-client.js";
 
 describe("Gemini ACP launch policy", () => {
   it("starts ACP with extensions disabled, MCP restricted, and a deny-all admin policy", () => {
@@ -19,7 +23,22 @@ describe("Gemini ACP launch policy", () => {
     expect(args).not.toContain("--model");
   });
 
-  it("strips API, Vertex, sandbox and model selectors while forcing non-browser ACP", () => {
+  it("forces an OAuth-only workspace without inherited memory or directory context", () => {
+    expect(GEMINI_ISOLATED_WORKSPACE_SETTINGS).toMatchObject({
+      security: { auth: { selectedType: "oauth-personal" } },
+      hooksConfig: { enabled: false },
+      skills: { enabled: false },
+      ide: { enabled: false },
+      experimental: { autoMemory: false },
+      context: {
+        includeDirectoryTree: false,
+        loadMemoryFromIncludeDirectories: false,
+      },
+    });
+    expect(GEMINI_ISOLATED_WORKSPACE_SETTINGS.context.fileName).not.toBe("GEMINI.md");
+  });
+
+  it("strips API, Vertex, sandbox, IDE and model selectors while forcing non-browser ACP", () => {
     const env = buildGeminiChildEnv({
       PATH: "/usr/bin",
       GEMINI_API_KEY: "secret",
@@ -35,6 +54,7 @@ describe("Gemini ACP launch policy", () => {
       GOOGLE_GEMINI_BASE_URL: "https://example.invalid",
       GEMINI_MODEL: "forced-model",
       GEMINI_SANDBOX: "docker",
+      GEMINI_CLI_IDE_WORKSPACE_PATH: "/private/repo",
     });
 
     expect(env.PATH).toBe("/usr/bin");
@@ -52,6 +72,7 @@ describe("Gemini ACP launch policy", () => {
       "GOOGLE_GEMINI_BASE_URL",
       "GEMINI_MODEL",
       "GEMINI_SANDBOX",
+      "GEMINI_CLI_IDE_WORKSPACE_PATH",
     ]) {
       expect(env[name]).toBeUndefined();
     }
