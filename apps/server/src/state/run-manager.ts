@@ -31,6 +31,8 @@ export class RunManager {
   private readonly activeControllers = new Map<string, AbortController>();
   /** Which conversations are claimed, and by what, so the guard can say so. */
   private readonly activeConversations = new Map<string, "run" | "delete">();
+  /** Which active run owns a conversation reservation. */
+  private readonly activeRunByConversation = new Map<string, string>();
 
   constructor(
     private readonly orchestrator: Orchestrator,
@@ -146,16 +148,45 @@ export class RunManager {
   }
 
   async deleteConversation(conversationId: string) {
-    // A run owns provider processes and an append-only event log. Removing its
-    // conversation underneath it would leave both orphaned, so the delete takes
-    // the same reservation a run does: checking and releasing around the store
-    // call means start() and delete() can never interleave, which would
-    // otherwise launch a run against state that is being wiped.
-    this.reserveConversation(conversationId, "delete");
+    // Claim delete synchronously before the first await so start() cannot slip
+    // between a terminal run releasing its reservation and the store deletion.
+    // If the holder is a genuinely live run, restore its reservation and reject.
+    const existing = this.activeConversations.get(conversationId);
+    if (existing === "delete") {
+      throw new Error("This conversation is being deleted.");
+    }
+
+    if (existing === "run") {
+      const runId = this.activeRunByConversation.get(conversationId);
+      if (!runId) {
+        throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
+      }
+
+      this.activeConversations.set(conversationId, "delete");
+      const run = await this.store.getRun(runId);
+      if (run && isTerminal(run.status)) {
+        // The terminal status can be visible before execute() finishes its last
+        // writes. Keep the delete claim while that exact task settles.
+        await this.active.get(runId)?.catch(() => undefined);
+      } else if (this.activeRunByConversation.get(conversationId) === runId) {
+        // Still genuinely live: give the reservation back to the run and keep
+        // the longstanding guard behavior.
+        this.activeConversations.set(conversationId, "run");
+        throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
+      }
+      // If the task finished while getRun() was in flight, its finally already
+      // removed the run owner. The delete claim remains ours, so it is safe to
+      // continue without reopening a start/delete gap.
+    } else {
+      this.activeConversations.set(conversationId, "delete");
+    }
+
     try {
       await this.store.deleteConversation(conversationId);
     } finally {
-      this.activeConversations.delete(conversationId);
+      if (this.activeConversations.get(conversationId) === "delete") {
+        this.activeConversations.delete(conversationId);
+      }
     }
     return { id: conversationId, deleted: true as const };
   }
@@ -198,12 +229,18 @@ export class RunManager {
     if (this.active.has(run.id)) return;
     const controller = new AbortController();
     this.activeControllers.set(run.id, controller);
+    this.activeRunByConversation.set(run.conversationId, run.id);
     const task = this.execute(run, history ?? [], controller.signal)
       .catch(() => undefined)
       .finally(() => {
         this.active.delete(run.id);
         this.activeControllers.delete(run.id);
-        this.activeConversations.delete(run.conversationId);
+        if (this.activeRunByConversation.get(run.conversationId) === run.id) {
+          this.activeRunByConversation.delete(run.conversationId);
+          if (this.activeConversations.get(run.conversationId) === "run") {
+            this.activeConversations.delete(run.conversationId);
+          }
+        }
       });
     this.active.set(run.id, task);
   }
