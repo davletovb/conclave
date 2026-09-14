@@ -21,6 +21,12 @@ type PendingRequest = {
   timer: NodeJS.Timeout;
 };
 
+type GeminiWorkspace = {
+  workspaceDir: string;
+  policyPath: string;
+  mcpSentinel: string;
+};
+
 export type GeminiAcpNotification = {
   method: string;
   params?: Record<string, unknown>;
@@ -62,6 +68,24 @@ export const GEMINI_ISOLATED_WORKSPACE_SETTINGS = {
 
 const ISOLATED_WORKSPACE_SETTINGS = JSON.stringify(GEMINI_ISOLATED_WORKSPACE_SETTINGS, null, 2);
 
+const BLOCKED_GEMINI_ENV = [
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_GENAI_USE_VERTEXAI",
+  "GOOGLE_GENAI_USE_GCA",
+  "GOOGLE_CLOUD_ACCESS_TOKEN",
+  "GOOGLE_CLOUD_PROJECT",
+  "GOOGLE_CLOUD_PROJECT_ID",
+  "GOOGLE_CLOUD_LOCATION",
+  "GOOGLE_CLOUD_QUOTA_PROJECT",
+  "CLOUD_ML_PROJECT_ID",
+  "GOOGLE_GEMINI_BASE_URL",
+  "GEMINI_MODEL",
+  "GEMINI_SANDBOX",
+  "GEMINI_CLI_IDE_WORKSPACE_PATH",
+] as const;
+
 export function buildGeminiAcpArgs(model: string | undefined, policyPath: string, mcpSentinel: string) {
   const args: string[] = [
     ...GEMINI_ACP_ARGS,
@@ -100,39 +124,66 @@ function permissionDenialResult(params?: Record<string, unknown>) {
   return { outcome: { outcome: "cancelled" } };
 }
 
+export function isGeminiInteractiveAuthOutput(text: string) {
+  const value = text.trim();
+  if (!value) return false;
+  return [
+    /\bcode assist login required\b/i,
+    /\battempting to open (?:the )?authentication page\b/i,
+    /\b(?:login|authentication) (?:is )?required\b/i,
+    /\b(?:visit|open)\b[^\n]*https?:\/\//i,
+    /https?:\/\/\S*(?:accounts\.google\.com|oauth|signin)/i,
+    /\benter (?:the )?(?:authorization|verification|device) code\b/i,
+  ].some(pattern => pattern.test(value));
+}
+
 export function buildGeminiChildEnv(source: NodeJS.ProcessEnv = process.env) {
   const env = { ...source };
 
-  // Gemini CLI supports several credential routes. Conclave deliberately uses
-  // only the Google-account OAuth already established by the official CLI.
-  for (const name of [
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "GOOGLE_GENAI_USE_GCA",
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_CLOUD_PROJECT_ID",
-    "GOOGLE_CLOUD_QUOTA_PROJECT",
-    "CLOUD_ML_PROJECT_ID",
-    "GOOGLE_GEMINI_BASE_URL",
-    "GEMINI_MODEL",
-    "GEMINI_SANDBOX",
-    "GEMINI_CLI_IDE_WORKSPACE_PATH",
-  ]) {
-    delete env[name];
-  }
+  // Gemini CLI's environment loader falls back to ~/.gemini/.env and ~/.env
+  // after process launch, and only fills keys that are absent from process.env.
+  // Keep blocked credential/billing selectors present but empty so those files
+  // cannot silently repopulate an API-key or Vertex route after we spawn.
+  for (const name of BLOCKED_GEMINI_ENV) env[name] = "";
 
-  // OAuth fallback must never open a browser from the Conclave server. ACP is
-  // considered interactive by Gemini CLI, so stale credentials may still try
-  // terminal user-code auth; non-JSON stdout below treats that as protocol
-  // escape and fails closed.
+  // OAuth fallback must never open a browser from the Conclave server.
   env.NO_BROWSER = "true";
   env.GEMINI_CLI_SURFACE = "conclave";
   env.GEMINI_CLI_TRUST_WORKSPACE = "true";
 
   return env;
+}
+
+function createGeminiWorkspace(): GeminiWorkspace {
+  let workspaceDir: string | undefined;
+  try {
+    workspaceDir = mkdtempSync(join(tmpdir(), "conclave-gemini-"));
+    chmodSync(workspaceDir, 0o700);
+
+    const geminiDir = join(workspaceDir, ".gemini");
+    mkdirSync(geminiDir, { mode: 0o700 });
+    writeFileSync(join(geminiDir, "settings.json"), ISOLATED_WORKSPACE_SETTINGS, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+
+    const policyPath = join(workspaceDir, "deny-tools.toml");
+    writeFileSync(policyPath, DENY_ALL_TOOLS_POLICY, { encoding: "utf8", mode: 0o600 });
+    return {
+      workspaceDir,
+      policyPath,
+      mcpSentinel: `__conclave_no_mcp_${randomUUID()}__`,
+    };
+  } catch (error) {
+    if (workspaceDir) {
+      try {
+        rmSync(workspaceDir, { recursive: true, force: true });
+      } catch {
+        // Best effort: preserve the original setup error.
+      }
+    }
+    throw error;
+  }
 }
 
 export class GeminiAcpClient implements GeminiAcpClientLike {
@@ -149,26 +200,26 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
   private killTimer: NodeJS.Timeout | null = null;
 
   constructor(model?: string) {
-    this.workspaceDir = mkdtempSync(join(tmpdir(), "conclave-gemini-"));
-    chmodSync(this.workspaceDir, 0o700);
+    const workspace = createGeminiWorkspace();
+    this.workspaceDir = workspace.workspaceDir;
+    const args = buildGeminiAcpArgs(model, workspace.policyPath, workspace.mcpSentinel);
 
-    const geminiDir = join(this.workspaceDir, ".gemini");
-    mkdirSync(geminiDir, { mode: 0o700 });
-    writeFileSync(join(geminiDir, "settings.json"), ISOLATED_WORKSPACE_SETTINGS, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-
-    const policyPath = join(this.workspaceDir, "deny-tools.toml");
-    writeFileSync(policyPath, DENY_ALL_TOOLS_POLICY, { encoding: "utf8", mode: 0o600 });
-    const mcpSentinel = `__conclave_no_mcp_${randomUUID()}__`;
-    const args = buildGeminiAcpArgs(model, policyPath, mcpSentinel);
-
-    this.child = spawn("gemini", args, {
-      env: buildGeminiChildEnv(),
-      cwd: this.workspaceDir,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn("gemini", args, {
+        env: buildGeminiChildEnv(),
+        cwd: this.workspaceDir,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      try {
+        rmSync(this.workspaceDir, { recursive: true, force: true });
+      } catch {
+        // Best effort: preserve the spawn error.
+      }
+      throw error;
+    }
+    this.child = child;
 
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
@@ -176,7 +227,10 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
 
     this.lineReader.on("line", line => this.handleLine(line));
     this.child.stderr.on("data", chunk => {
-      this.stderrTail = `${this.stderrTail}${String(chunk)}`.slice(-8000);
+      this.appendDiagnostic(String(chunk));
+      if (isGeminiInteractiveAuthOutput(this.stderrTail)) {
+        this.failInteractiveAuth();
+      }
     });
     this.child.stdin.on("error", error => {
       // An early process exit commonly surfaces as EPIPE on stdin. Without an
@@ -268,19 +322,26 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
   }
 
   private handleLine(line: string) {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
     let message: JsonRpcMessage;
     try {
-      message = JSON.parse(line) as JsonRpcMessage;
+      message = JSON.parse(trimmed) as JsonRpcMessage;
     } catch {
-      // stdout is the ACP JSON-RPC transport. Human auth prompts, TUI control
-      // sequences, or other prose here mean the CLI escaped the protocol. Kill
-      // it rather than letting server-side OAuth become interactive.
-      const error = new Error(
-        "Gemini ACP emitted non-JSON output. Interactive authentication is disabled in Conclave; run `gemini` in a terminal and sign in with Google first.",
-      );
-      this.terminalError = error;
-      this.failAll(error);
-      this.close();
+      // Current Gemini CLI builds can print benign banners such as
+      // "Loaded cached credentials." on ACP stdout. Ignore ordinary prose so
+      // valid JSON-RPC that follows can continue, but still fail closed on
+      // interactive-auth output or malformed JSON-shaped transport frames.
+      this.appendDiagnostic(trimmed);
+      if (isGeminiInteractiveAuthOutput(trimmed)) {
+        this.failInteractiveAuth();
+      } else if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        const error = new Error("Gemini ACP emitted malformed JSON-RPC output");
+        this.terminalError = error;
+        this.failAll(error);
+        this.close();
+      }
       return;
     }
 
@@ -322,6 +383,20 @@ export class GeminiAcpClient implements GeminiAcpClientLike {
     } else {
       pending.resolve(message.result ?? {});
     }
+  }
+
+  private appendDiagnostic(text: string) {
+    this.stderrTail = `${this.stderrTail}${text}`.slice(-8000);
+  }
+
+  private failInteractiveAuth() {
+    if (this.closed || this.terminalError) return;
+    const error = new Error(
+      "Gemini CLI requires interactive authentication. Run `gemini` in a terminal and sign in with Google first.",
+    );
+    this.terminalError = error;
+    this.failAll(error);
+    this.close();
   }
 
   private writeMessage(
