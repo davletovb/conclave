@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import type { GeminiAcpClientLike, GeminiAcpNotification } from "../gemini/acp-client.js";
 import { GoogleGeminiProvider } from "./google-gemini.js";
@@ -106,8 +107,12 @@ describe("GoogleGeminiProvider", () => {
     expect(clients.every(client => client.closed)).toBe(true);
   });
 
-  it("reports an installed CLI as signed out when no cached Google OAuth exists", async () => {
-    const provider = new GoogleGeminiProvider(() => new FakeGeminiClient(), () => false);
+  it("reports an installed CLI as signed out and withholds real models when no cached Google OAuth exists", async () => {
+    let created = 0;
+    const provider = new GoogleGeminiProvider(() => {
+      created += 1;
+      return new FakeGeminiClient();
+    }, () => false);
 
     const status = await provider.status();
 
@@ -118,6 +123,10 @@ describe("GoogleGeminiProvider", () => {
       authMode: "oauth",
     });
     expect(status.message).toMatch(/run `gemini` once/i);
+    await expect(provider.listModels()).rejects.toThrow(/not signed in with a Google account/i);
+    // status needs one ACP initialize to distinguish "installed" from missing;
+    // model listing stops before spawning another client when signed out.
+    expect(created).toBe(1);
   });
 
   it("refuses API-key or Vertex-only ACP auth", async () => {
@@ -158,7 +167,10 @@ describe("GoogleGeminiProvider", () => {
     const client = clients[0];
     const authenticate = client.requests.find(request => request.method === "authenticate");
     expect(authenticate?.params).toEqual({ methodId: "oauth-personal" });
-    expect(client.requests.find(request => request.method === "session/new")?.params).toMatchObject({ mcpServers: [] });
+    expect(client.requests.find(request => request.method === "session/new")?.params).toMatchObject({
+      cwd: tmpdir(),
+      mcpServers: [],
+    });
     expect(events.filter(event => event.type === "text_delta").map(event => event.delta).join(""))
       .toBe("Gemini subscription answer");
     expect(JSON.stringify(events)).not.toContain("private reasoning");
