@@ -497,6 +497,14 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
   margin: 0 auto;
   padding: 26px 24px 40px;
   display: grid;
+  /* An `auto` track is floored at its items' min-content width, so one
+     unbreakable line — a long import, a URL, a JSON blob in a code block —
+     grows the track past this box and stretches every sibling with it: the
+     answer, the prompt bubble and the Copy button all slide right while the
+     composer stays put, and the column stops looking centred. An explicit
+     shrinkable track lets the code block scroll inside itself instead.
+     Every grid down the content path needs it, or the next one blows out. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 22px;
   align-content: start;
 }
@@ -683,8 +691,8 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
    conversation transcript
    ========================================================================== */
 
-.turns { display: grid; gap: 16px; }
-.turn { display: grid; gap: 6px; }
+.turns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.turn { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .turn-you { justify-items: end; }
 .turn-you .bubble {
   max-width: 88%;
@@ -699,7 +707,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 .turn-them .bubble { font-size: var(--step-1); }
 .turn-label { display: flex; align-items: center; gap: 7px; }
 
-.answer { display: grid; gap: 10px; }
+.answer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .answer-head { display: flex; align-items: center; gap: 10px; }
 .answer-head .spacer { flex: 1; }
 .answer-body {
@@ -743,7 +751,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
    council work
    ========================================================================== */
 
-.council { display: grid; gap: 2px; }
+.council { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .council-head { display: flex; align-items: center; gap: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
 .council-head .spacer { flex: 1; }
 
