@@ -22,6 +22,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
+import { answerPhase, finalAnswerStepId, followDistance } from "./lib/final-step";
 import { collapsePrompt } from "./lib/text";
 import { isEditableTarget, matchShortcut } from "./lib/shortcuts";
 import { formatDuration } from "./lib/text";
@@ -187,6 +188,9 @@ function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
   const [stuckToBottom, setStuckToBottom] = useState(true);
+  // The newest output is the answer's tail, which sits above council work — so
+  // "jump to latest" is not always downwards.
+  const [latestAbove, setLatestAbove] = useState(false);
   const [copied, setCopied] = useState(false);
   const [announcement, setAnnouncement] = useState("");
 
@@ -198,6 +202,7 @@ function App() {
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const answerRef = useRef<HTMLElement | null>(null);
 
   /* ------------------------------------------------------------ derived */
   const participants = useMemo(
@@ -230,6 +235,19 @@ function App() {
     [conversation, activeRunId],
   );
   const displayedSteps = result?.steps ?? liveSteps;
+  // The step that produces the answer belongs in the answer, not in council
+  // work: showing it in both means watching the same text write itself twice.
+  const finalStepId = finalAnswerStepId(displayedSteps, result?.final);
+  const finalStep = displayedSteps.find(step => step.id === finalStepId);
+  const councilSteps = useMemo(
+    () => displayedSteps.filter(step => step.id !== finalStepId),
+    [displayedSteps, finalStepId],
+  );
+  const answerShows = answerPhase({
+    hasResult: Boolean(result),
+    loading,
+    finalStepComplete: Boolean(finalStep && completedStepIds.includes(finalStep.id)),
+  });
   const layered = paletteOpen || shortcutsOpen || inspectorOpen;
   const modeLabel = modes.find(item => item.id === mode)?.label ?? mode;
 
@@ -298,13 +316,22 @@ function App() {
     return () => window.clearInterval(timer);
   }, [loading, runStartedAt]);
 
+  const distanceFromLatest = useCallback((surface: HTMLDivElement) => followDistance({
+    answerBottom: answerRef.current?.getBoundingClientRect().bottom,
+    viewBottom: surface.getBoundingClientRect().bottom,
+    scrollHeight: surface.scrollHeight,
+    scrollTop: surface.scrollTop,
+    clientHeight: surface.clientHeight,
+  }), []);
+
   // Long runs keep the newest output in view unless the reader scrolls away.
   useEffect(() => {
     if (!stuckToBottom || !loading) return;
     const surface = streamRef.current;
     if (!surface) return;
-    surface.scrollTop = surface.scrollHeight;
-  }, [liveSteps, result, stuckToBottom, loading]);
+    const target = surface.scrollTop + distanceFromLatest(surface);
+    surface.scrollTop = Math.max(0, Math.min(target, surface.scrollHeight - surface.clientHeight));
+  }, [liveSteps, result, stuckToBottom, loading, distanceFromLatest]);
 
   useEffect(() => {
     if (!copied) return;
@@ -390,7 +417,7 @@ function App() {
   }
 
   function expandAllSteps() {
-    setOpenSteps(Object.fromEntries(displayedSteps.map(step => [step.id, true])));
+    setOpenSteps(Object.fromEntries(councilSteps.map(step => [step.id, true])));
   }
 
   function setPreset(presetId: string) {
@@ -722,6 +749,7 @@ function App() {
             model: streamEvent.model,
             content: "",
             dependsOn: streamEvent.dependsOn,
+            final: streamEvent.final,
           }]));
       setAnnouncement(`${streamEvent.model.label} started ${streamEvent.kind}`);
       return;
@@ -1067,7 +1095,7 @@ function App() {
       { id: "shortcuts", label: "Keyboard shortcuts", group: "View", icon: "keyboard", keys: ["?"], run: () => setShortcutsOpen(true) },
     ];
 
-    if (displayedSteps.length > 0) {
+    if (councilSteps.length > 0) {
       list.push(
         { id: "expand", label: "Expand every council step", group: "View", icon: "layers", keys: ["E"], run: expandAllSteps },
         { id: "collapse", label: "Collapse every council step", group: "View", icon: "layers", keys: ["Shift", "E"], run: () => setOpenSteps({}) },
@@ -1092,7 +1120,7 @@ function App() {
       );
     }
     return list;
-  }, [setupOpen, theme, railOpen, displayedSteps.length, activeRunId, loading, resumeRunId, result, conversation]);
+  }, [setupOpen, theme, railOpen, councilSteps.length, activeRunId, loading, resumeRunId, result, conversation]);
 
   const searchConversations = useCallback(
     (text: string, signal: AbortSignal) => api.conversations(text, signal),
@@ -1100,10 +1128,10 @@ function App() {
   );
 
   const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
-    const element = event.currentTarget;
-    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-    setStuckToBottom(distance < 80);
-  }, []);
+    const distance = distanceFromLatest(event.currentTarget);
+    setStuckToBottom(Math.abs(distance) < 80);
+    setLatestAbove(distance < 0);
+  }, [distanceFromLatest]);
 
   /* ------------------------------------------------------------ render */
   const composerHint = workflowInvalid
@@ -1311,18 +1339,40 @@ function App() {
               </div>
             )}
 
-            {result && (
-              <section className="answer" aria-label="Final answer">
+            {(result || finalStep) && (
+              <section className="answer" aria-label="Final answer" ref={answerRef}>
                 <div className="answer-head">
-                  <span className="eyebrow">Final answer</span>
+                  <span className="eyebrow">
+                    {answerShows === "stopped" ? "Final answer · partial" : "Final answer"}
+                  </span>
                   <span className="spacer" />
-                  {copied && <span className="copy-state">Copied</span>}
-                  <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
-                    <Icon name="copy" size={13} /> Copy
-                  </button>
+                  {answerShows === "done" && (
+                    <>
+                      {copied && <span className="copy-state">Copied</span>}
+                      <button type="button" className="btn btn-ghost" onClick={() => void copyFinalAnswer()}>
+                        <Icon name="copy" size={13} /> Copy
+                      </button>
+                    </>
+                  )}
+                  {/* Who is writing belongs in the head: the body is busy
+                      streaming, and the reader should not lose the byline to it. */}
+                  {answerShows === "streaming" && (
+                    <span className="working" aria-live="polite">
+                      <span className="pips"><i /><i /><i /></span>
+                      {finalStep!.model.label} is writing…
+                    </span>
+                  )}
+                  {/* Stopped or interrupted mid-write: what is on screen is as
+                      far as the model got, and saying otherwise would be a lie
+                      that never resolves. */}
+                  {answerShows === "stopped" && (
+                    <span className="copy-state">{finalStep!.model.label} stopped before finishing</span>
+                  )}
+                  {/* "written" says nothing: the answer is whole, but the run
+                      has other work in flight and there is no result to copy. */}
                 </div>
                 <div className="answer-body">
-                  <Markdown content={result.final} />
+                  <Markdown content={result ? result.final : finalStep!.content} />
                 </div>
               </section>
             )}
@@ -1342,7 +1392,7 @@ function App() {
             )}
 
             <CouncilWork
-              steps={displayedSteps}
+              steps={councilSteps}
               loading={loading}
               inspection={inspection}
               completedStepIds={completedStepIds}
@@ -1362,10 +1412,13 @@ function App() {
             onClick={() => {
               setStuckToBottom(true);
               const surface = streamRef.current;
-              if (surface) surface.scrollTop = surface.scrollHeight;
+              if (!surface) return;
+              const target = surface.scrollTop + distanceFromLatest(surface);
+              surface.scrollTop = Math.max(0, Math.min(target, surface.scrollHeight - surface.clientHeight));
             }}
           >
-            <Icon name="down" size={13} /> Jump to latest
+            <Icon name="down" size={13} style={latestAbove ? { transform: "rotate(180deg)" } : undefined} />
+            {latestAbove ? "Jump up to the answer" : "Jump to latest"}
           </button>
         )}
 

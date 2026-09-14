@@ -37,6 +37,8 @@ type StepSpec = {
   prompt: string;
   history?: ChatMessage[];
   dependsOn?: string[];
+  /** This step is the one the mode finalizes with; its output is the answer. */
+  final?: boolean;
 };
 
 type RunContext = {
@@ -606,6 +608,7 @@ export class Orchestrator {
             kind: spec.kind,
             model: spec.model,
             dependsOn: spec.dependsOn,
+            final: spec.final,
           });
         }
         const failure: StepFailure = {
@@ -639,6 +642,7 @@ export class Orchestrator {
           kind: spec.kind,
           model: spec.model,
           dependsOn: spec.dependsOn,
+          final: spec.final,
         });
       }
 
@@ -671,6 +675,7 @@ export class Orchestrator {
           model: spec.model,
           content: response.content,
           dependsOn: spec.dependsOn,
+          final: spec.final,
         };
         context.emit?.({ type: "step_completed", runId: context.runId, step });
         return step;
@@ -987,6 +992,7 @@ ${transcript(steps)}`;
             prompt: this.workflowPrompt(node, request, completed),
             history: request.history,
             dependsOn: node.dependsOn,
+            final: node.id === graph.outputNodeId,
           },
           workflowContext,
         );
@@ -1060,6 +1066,7 @@ ${transcript(steps)}`;
             id: makeStepId("answer", 0),
             kind: "answer",
             model,
+            final: true,
             prompt: request.prompt,
             history: request.history,
           },
@@ -1121,6 +1128,7 @@ ${draft.content}`,
               id: makeStepId("revision", 0),
               kind: "revision",
               model: author,
+              final: true,
               prompt: `Revise your answer using the critique. Keep only improvements you can justify.
 
 Question:
@@ -1207,6 +1215,7 @@ ${draft.content}`,
               id: makeStepId("revision", 0),
               kind: "revision",
               model: author,
+              final: true,
               prompt: `Produce a hardened final answer after the red-team review. Address valid attacks, reject invalid ones explicitly when necessary, and preserve uncertainty.
 
 Question:
@@ -1270,6 +1279,7 @@ ${transcript(settled.steps, " critique")}`,
             id: makeStepId("answer", 0),
             kind: "answer",
             model: specialist,
+            final: true,
             prompt: `Answer the original question directly. You were selected by a routing step; the router's note is context, not authority.\n\nQuestion:\n${request.prompt}\n\nRouter note:\n${route.content}`,
             history: request.history,
             dependsOn: [routeId],
@@ -1328,6 +1338,7 @@ ${plan.content}`,
               id: makeStepId("review", 0),
               kind: "review",
               model: reviewer,
+              final: true,
               prompt: `Review the plan and executor outputs. Resolve conflicts, correct mistakes, and return the best final answer to the original task. Do not narrate the workflow unless it helps the user.
 
 Task:
@@ -1396,6 +1407,7 @@ ${request.prompt}`,
               id: makeStepId("synthesis", 0),
               kind: "synthesis",
               model: synthesizer,
+              final: true,
               prompt: `Synthesize the council reports into a rigorous answer. Reconcile compatible findings, preserve material disagreements, distinguish evidence from inference, and state what remains unknown. Do not invent citations or imply external research occurred.
 
 Question:
@@ -1469,6 +1481,7 @@ ${transcript(settled.steps, " report")}`,
               id: makeStepId("synthesis", 0),
               kind: "synthesis",
               model: synthesizer,
+              final: true,
               prompt: `Synthesize the independent answers below. Preserve useful disagreements and do not invent consensus.
 
 Question:
@@ -1510,6 +1523,7 @@ ${answersTranscript}`,
               id: makeStepId("judgment", 0),
               kind: "judgment",
               model: synthesizer,
+              final: true,
               prompt: `Act as a judge. Evaluate the candidate answers for correctness, reasoning quality, completeness, calibration, and usefulness. Select or combine only the best-supported material and return the final answer to the user. Mention a material unresolved disagreement if it changes the recommendation.
 
 Question:
@@ -1587,6 +1601,7 @@ ${answersTranscript}`,
               id: makeStepId("review", 0),
               kind: "review",
               model: verifier,
+              final: true,
               prompt: `Audit the proposed consensus against the original independent answers. Remove false consensus, restore meaningful dissent, correct unsupported claims, and then output the corrected final answer.
 
 Question:
@@ -1679,6 +1694,7 @@ ${step.content}`,
               id: makeStepId("synthesis", 0),
               kind: "synthesis",
               model: synthesizer,
+              final: true,
               prompt: `Judge the debate. Produce the best-supported answer, explicitly noting unresolved disagreements and uncertainty.
 
 Question:

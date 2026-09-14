@@ -536,3 +536,80 @@ describe("Orchestrator", () => {
     expect(result.final).toBe("streamed answer");
   });
 });
+
+describe("final step marking", () => {
+  // The web hides the step whose output is the answer, so the reader is not
+  // shown the same text twice. A mode that marks the wrong step would hide a
+  // council member's work and repeat an intermediate result as the answer, so
+  // assert the mark against the answer the mode actually returned.
+  const modes = [
+    "single",
+    "compare",
+    "panel",
+    "debate",
+    "critic-revise",
+    "consensus",
+    "judge",
+    "red-team",
+    "router",
+    "research-council",
+    "planner-executor",
+  ] as const;
+
+  it.each(modes)("marks the step %s finalizes with, and no other", async mode => {
+    const result = await orchestrator.run({
+      mode,
+      prompt: "Which option is safer?",
+      participants: mode === "single" ? participants.slice(0, 1) : participants,
+      budget: { maxCalls: 24, maxRounds: 1 },
+    });
+
+    const marked = result.steps.filter(step => step.final);
+    expect(marked.length, `${mode} marked ${marked.length} steps`).toBeLessThanOrEqual(1);
+
+    if (marked.length === 1) {
+      expect(marked[0].content).toBe(result.final);
+      // it is the last step: nothing runs after the answer is written
+      expect(marked[0].id).toBe(result.steps.at(-1)?.id);
+    } else {
+      // the only mode that answers without a finalizing step joins its own
+      expect(mode).toBe("compare");
+      expect(result.final).toBe(result.steps.map(step => step.content).join("\n\n---\n\n"));
+    }
+  });
+
+  it("marks the custom workflow's declared output node", async () => {
+    const result = await orchestrator.run({
+      mode: "custom",
+      prompt: "Assess the evidence",
+      participants,
+      workflow: {
+        name: "Two-step",
+        outputNodeId: "summary",
+        nodes: [
+          { id: "draft", kind: "answer", model: { type: "participant", index: 0 }, promptTemplate: "{{prompt}}" },
+          { id: "summary", kind: "synthesis", model: { type: "synthesizer" }, promptTemplate: "{{dep.draft}}", dependsOn: ["draft"] },
+        ],
+      },
+      budget: { maxCalls: 4, maxRounds: 1 },
+    });
+
+    expect(result.steps.filter(step => step.final).map(step => step.id)).toEqual(["summary"]);
+    expect(result.steps.find(step => step.final)?.content).toBe(result.final);
+  });
+
+  it("announces the mark on step_started, before any text arrives", async () => {
+    // The answer area opens as soon as the finalizing step starts, so the flag
+    // has to be on the announcement rather than only on the completed step.
+    const events: OrchestrationStreamEvent[] = [];
+    const result = await orchestrator.run(
+      { mode: "research-council", prompt: "Assess the evidence", participants, budget: { maxCalls: 4, maxRounds: 1 } },
+      { runId: "final-mark", emit: event => events.push(event) },
+    );
+
+    const started = events.filter(event => event.type === "step_started");
+    const announced = started.filter(event => event.final);
+    expect(announced.map(event => event.stepId)).toEqual([result.steps.at(-1)!.id]);
+    expect(started.indexOf(announced[0])).toBe(started.length - 1);
+  });
+});

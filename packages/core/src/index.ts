@@ -182,6 +182,14 @@ export interface OrchestrationStep {
   model: ModelRef;
   content: string;
   dependsOn?: string[];
+  /**
+   * This step's output is the run's final answer. Set by the orchestrator on
+   * the step it finalizes with, so a client can show that output once — as the
+   * answer — instead of streaming it as council work and then repeating it.
+   * Absent when no single step produced the answer: Compare joins its
+   * participants, and a degraded run may fall back to assembled prose.
+   */
+  final?: boolean;
 }
 
 export interface OrchestrationResult {
@@ -197,7 +205,7 @@ export type OrchestrationStreamEvent =
   | { type: "run_usage"; runId: string; usage: RunUsage; budget?: RunBudget }
   | { type: "run_cancelled"; runId: string; message: string }
   | { type: "rate_limit"; runId: string; notice: RateLimitNotice }
-  | { type: "step_started"; runId: string; stepId: string; kind: OrchestrationStepKind; model: ModelRef; dependsOn?: string[] }
+  | { type: "step_started"; runId: string; stepId: string; kind: OrchestrationStepKind; model: ModelRef; dependsOn?: string[]; final?: boolean }
   | { type: "step_retrying"; runId: string; stepId: string; attempt: number; message: string }
   | { type: "step_failed"; runId: string; failure: StepFailure }
   | { type: "text_delta"; runId: string; stepId: string; delta: string }
