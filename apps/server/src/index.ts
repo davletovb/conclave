@@ -10,6 +10,7 @@ import type {
   StartRunRequest,
 } from "@conclave/core";
 import { AnthropicClaudeProvider } from "./providers/anthropic-claude.js";
+import { GoogleGeminiProvider } from "./providers/google-gemini.js";
 import { MockProvider } from "./providers/mock.js";
 import { OpenAICodexProvider } from "./providers/openai-codex.js";
 import { XaiGrokProvider } from "./providers/xai-grok.js";
@@ -62,11 +63,13 @@ const mock = new MockProvider();
 const openai = new OpenAICodexProvider();
 const anthropic = new AnthropicClaudeProvider();
 const xai = new XaiGrokProvider();
+const google = new GoogleGeminiProvider();
 const providers = new Map<string, ProviderAdapter>([
   [mock.id, mock],
   [openai.id, openai],
   [anthropic.id, anthropic],
   [xai.id, xai],
+  [google.id, google],
 ]);
 const orchestrator = new Orchestrator(providers);
 const stateStore = new FileStateStore();
@@ -76,16 +79,18 @@ await runManager.init();
 app.get("/health", async () => ({ ok: true }));
 
 app.get("/providers", async (): Promise<ProviderStatus[]> => {
-  const [openaiStatus, anthropicStatus, xaiStatus] = await Promise.all([
+  const [openaiStatus, anthropicStatus, xaiStatus, googleStatus] = await Promise.all([
     openai.status(),
     anthropic.status(),
     xai.status(),
+    google.status(),
   ]);
 
   return [
     openaiStatus,
     anthropicStatus,
     xaiStatus,
+    googleStatus,
     {
       id: "mock",
       label: "Mock provider",
@@ -116,25 +121,33 @@ app.get("/provider-limits", async (): Promise<ProviderLimitSnapshot[]> => {
       available: false,
       message: "Grok Build ACP does not expose a stable structured subscription-limit snapshot to Conclave.",
     },
+    {
+      provider: "google",
+      available: false,
+      message: "Gemini CLI ACP does not expose a stable structured Google-account quota snapshot to Conclave.",
+    },
   ];
 });
 
 app.get("/models", async () => {
   const mockModels = await mock.listModels();
-  const [openaiModels, anthropicModels, xaiModels] = await Promise.all([
+  const [openaiModels, anthropicModels, xaiModels, googleModels] = await Promise.all([
     openai.listModels().catch(() => []),
     anthropic.listModels().catch(() => []),
     xai.listModels().catch(() => []),
+    google.listModels().catch(() => []),
   ]);
 
   const mockGpt = mockModels.filter(model => model.model === "mock-gpt");
   const mockClaude = mockModels.filter(model => model.model === "mock-claude");
   const mockGrok = mockModels.filter(model => model.model === "mock-grok");
+  const mockGemini = mockModels.filter(model => model.model === "mock-gemini");
 
   return [
     ...(openaiModels.length > 0 ? openaiModels : mockGpt),
     ...(anthropicModels.length > 0 ? anthropicModels : mockClaude),
     ...(xaiModels.length > 0 ? xaiModels : mockGrok),
+    ...(googleModels.length > 0 ? googleModels : mockGemini),
   ];
 });
 
