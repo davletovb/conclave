@@ -1,6 +1,6 @@
 # Conclave
 
-Conclave is a personal multi-model reasoning environment: one interface where GPT, Claude, Grok, and future providers can answer independently or work together through explicit orchestration workflows.
+Conclave is a personal multi-model reasoning environment: one interface where GPT, Claude, Grok, Gemini, and future providers can answer independently or work together through explicit orchestration workflows.
 
 ## Orchestration modes
 
@@ -31,23 +31,24 @@ packages/
   core/      shared provider + orchestration contracts
 ```
 
-The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code, and Grok Build ACP.
+The browser never talks directly to provider runtimes. The server owns provider authentication and local processes such as Codex app-server, Claude Code, Grok Build ACP, and Gemini CLI ACP.
 
 ## Current status
 
-All three initial providers now have subscription-backed local adapters:
+All four current providers have subscription-backed local adapters:
 
 - OpenAI through `codex app-server` and ChatGPT sign-in
 - Anthropic through Claude Code and `claude.ai` sign-in
 - xAI through Grok Build ACP and cached Grok/X OAuth sign-in
+- Google through the official Gemini CLI ACP interface and Google-account OAuth sign-in
 
 If a runtime is missing or not authenticated, Conclave keeps that provider's mock model available so the rest of the app remains usable.
 
-The adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions, refuses Claude Console/API-key or cloud-provider authentication, and removes xAI API-key/custom-endpoint environment routes before launching Grok ACP.
+The adapters are intentionally subscription-first. Conclave refuses OpenAI API-key Codex sessions, refuses Claude Console/API-key or cloud-provider authentication, removes xAI API-key/custom-endpoint environment routes before launching Grok ACP, and only accepts Gemini CLI's Google-account OAuth route. The Gemini adapter does not call Google model APIs directly, does not read or copy OAuth credential contents, refuses API-key/Vertex routes, and runs Gemini in a text-only ACP boundary with extensions, MCP servers, filesystem/terminal capabilities, inherited Gemini context, and model tools disabled.
 
 Claude paid plans can separately enable Anthropic **usage credits**. If usage credits are enabled on the Claude account, Anthropic may use them after included subscription limits are exhausted. That is an account-level Claude setting; Conclave cannot override it.
 
-Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex and Grok ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
+Conclave has a normalized streaming protocol. Provider-specific deltas are mapped into orchestration events (`run_started`, `step_started`, `text_delta`, tool/citation/usage events, `step_completed`, `run_completed`, and `error`). OpenAI Codex, Grok ACP, and Gemini ACP expose native text deltas; Claude Code uses its partial-message stream. Providers without native chunk streaming automatically fall back to one complete `text_delta`, so every adapter follows the same contract.
 
 Conversations and run state are persisted locally. A run is owned by the server rather than by one browser request, so closing or refreshing the page does not cancel it. The browser reconnects to the run event log and replays anything it missed. If the Conclave server itself stops during a run, startup reconciles any already-persisted terminal event first; only genuinely unfinished work is marked `interrupted` and offered for a new attempt in the same conversation.
 
@@ -55,17 +56,18 @@ Conversations and run state are persisted locally. A run is owned by the server 
 
 Each persistent run has a server-enforced budget. The default is **12 model calls per attempt**; the UI can choose a lower or higher cap up to the server hard ceiling of **64**. Conclave calculates the complete call count for the chosen orchestration mode before the first provider call and rejects a run that cannot fit within its budget. Debate additionally has a **1–3 round** hard limit.
 
-The web UI shows planned calls before submission and live `calls started / calls completed` telemetry while a run is executing. Token counts are shown when the underlying runtime reports them; token reporting is best-effort because the three subscription runtimes expose different levels of telemetry and an interrupted call may not produce a final token update.
+The web UI shows planned calls before submission and live `calls started / calls completed` telemetry while a run is executing. Token counts are shown when the underlying runtime reports them; token reporting is best-effort because the four subscription runtimes expose different levels of telemetry and an interrupted call may not produce a final token update.
 
 Active runs have a **Stop** control. Cancellation propagates into the current local provider runtime rather than merely disconnecting the browser:
 
 - OpenAI Codex — `turn/interrupt`
 - Claude Code — terminate that call's non-interactive Claude child process
 - Grok Build — close that call's dedicated ACP process
+- Gemini CLI — send ACP `session/cancel`, then terminate the dedicated ACP child if it does not settle
 
 Cancelled attempts retain their already-persisted partial output and can be resumed as a new attempt.
 
-Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code and Grok Build ACP do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
+Conclave exposes structured ChatGPT subscription-window usage when Codex makes `account/rateLimits/read` available. Claude Code, Grok Build ACP, and Gemini CLI ACP do not currently expose equivalent stable structured subscription-limit snapshots to Conclave, so the UI labels those snapshots unavailable rather than inventing estimates. Runtime rate-limit/quota errors are normalized and persisted with the affected run.
 
 Each provider step also has an inactivity watchdog. By default, a call that produces no provider progress event for **180 seconds** is treated as stalled, its local runtime call is aborted, and the step is eligible for the same single bounded retry used for transient transport failures when call-budget headroom remains. Any provider event resets the watchdog, so long-running calls can continue as long as they are still making observable progress. Set `CONCLAVE_STEP_STALL_TIMEOUT_MS` to a positive integer of at least 10 milliseconds to tune the inactivity window for local testing or unusually slow runtimes.
 
@@ -234,6 +236,23 @@ The current built-in Grok Build catalog exposes **Grok 4.6** as the default and 
 
 Restart `pnpm dev` after signing in.
 
+## Connect your Gemini subscription
+
+Conclave expects the official Gemini CLI on the same machine. Verify the installed CLI, then start it interactively:
+
+```bash
+gemini --version
+gemini
+```
+
+Choose **Sign in with Google** using the Google account associated with your Gemini access/subscription. Complete that login in Gemini CLI itself, then restart `pnpm dev`. Conclave deliberately does not initiate the Google login flow and does not read, copy, or parse Gemini OAuth credential contents.
+
+Conclave talks to Gemini through the official Agent Client Protocol mode (`gemini --acp`). Each call runs in a fresh owner-only temporary workspace whose settings force `oauth-personal`. Conclave does not call ACP `authenticate()`, does not use a Gemini API key or Vertex AI, and blocks API/Vertex credential selectors from being restored by Gemini CLI's home `.env` fallback. Extensions, MCP servers, inherited Gemini context/auto-memory, filesystem and terminal capabilities, and model tools are disabled for this text-only provider boundary.
+
+Gemini CLI occasionally emits benign prose next to ACP JSON-RPC (for example a cached-credentials banner); Conclave tolerates that noise but fails closed if stdout/stderr indicates that interactive authentication is required. The exposed stable CLI aliases are `auto` (default), `pro`, `flash`, and `flash-lite`.
+
+Restart `pnpm dev` after signing in.
+
 You can inspect all local provider states at:
 
 ```bash
@@ -255,12 +274,13 @@ GitHub Actions runs the same checks on pull requests.
 1. ✅ OpenAI adapter via subscription-authenticated Codex runtime
 2. ✅ Anthropic adapter via subscription-authenticated Claude Code runtime
 3. ✅ xAI adapter via Grok Build ACP runtime
-4. ✅ Normalized streaming event protocol for partial output and future tool events
-5. ✅ Persistent conversations and resumable orchestration runs
-6. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
-7. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
-8. ✅ Custom workflow graph/presets and richer run inspection
-9. ✅ Web-first robustness: partial-provider failure handling, step-level retry, stalled-provider recovery, reconnect/reload stress coverage, and stronger lifecycle integration tests
-10. ✅ Web UI/UX: conversation management/search/export, collapsible model outputs, better long-run rendering, richer workflow authoring, keyboard shortcuts, and accessibility
+4. ✅ Google Gemini adapter via subscription-authenticated Gemini CLI ACP runtime
+5. ✅ Normalized streaming event protocol for partial output and future tool events
+6. ✅ Persistent conversations and resumable orchestration runs
+7. ✅ Consensus, Judge, Red Team, Router, Research Council, and Planner/Executor modes
+8. ✅ Per-run budgets, round limits, cancellation, and usage/rate-limit visibility
+9. ✅ Custom workflow graph/presets and richer run inspection
+10. ✅ Web-first robustness: partial-provider failure handling, step-level retry, stalled-provider recovery, reconnect/reload stress coverage, and stronger lifecycle integration tests
+11. ✅ Web UI/UX: conversation management/search/export, collapsible model outputs, better long-run rendering, richer workflow authoring, keyboard shortcuts, and accessibility
 
 Desktop/local-native packaging and an IPC transport remain intentionally deferred. The orchestration/provider core should stay transport-independent so native packaging can be added later without driving current product design.
