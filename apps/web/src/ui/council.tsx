@@ -1,18 +1,19 @@
 import React, { useState } from "react";
 import type { OrchestrationStep, RunInspection } from "@conclave/core";
 import { stepStatus } from "../lib/step-status";
-import { formatDuration, previewLine } from "../lib/text";
+import { collapseStepOutput, formatDuration, previewLine } from "../lib/text";
 import { Markdown } from "./markdown";
 import { Icon, Keys, ProviderMark, providerClass, stepKindLabel } from "./primitives";
 
-const CLAMP_AT = 1400;
-
 function StepBody({ step, expanded }: { step: OrchestrationStep; expanded: boolean }) {
-  // Long outputs are clamped so one verbose model cannot bury the rest of the
-  // council. The full text is always one click away.
+  // Long outputs are shortened so one verbose model cannot bury the rest of the
+  // council. The full text is always one click away. Like a collapsed prompt
+  // this truncates rather than clipping: a clipped tail stays in the DOM, where
+  // a link in a model's output still takes focus and focusing it scrolls a box
+  // the reader has no way to scroll back.
   const [full, setFull] = useState(false);
-  const long = step.content.length > CLAMP_AT;
-  const clamped = long && !full;
+  const preview = collapseStepOutput(step.content);
+  const shown = preview && !full ? preview : step.content;
 
   return (
     <div className="step-body" hidden={!expanded}>
@@ -25,10 +26,8 @@ function StepBody({ step, expanded }: { step: OrchestrationStep; expanded: boole
       {step.content
         ? (
           <>
-            <div className={clamped ? "clamp" : undefined}>
-              <Markdown content={step.content} />
-            </div>
-            {long && (
+            <Markdown content={shown} />
+            {preview && (
               <button type="button" className="clamp-toggle" onClick={() => setFull(value => !value)}>
                 {full ? "Show less" : `Show full output (${Math.round(step.content.length / 100) / 10}k characters)`}
               </button>

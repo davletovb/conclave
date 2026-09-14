@@ -101,20 +101,17 @@ export function recencyBucket(iso: string, now = Date.now()) {
   return "Earlier";
 }
 
-const COLLAPSED_LINES = 6;
-const COLLAPSED_CHARS = 360;
-
 /**
- * A shortened prompt for the collapsed state, or undefined when the prompt is
- * already short enough to show whole. The result is real text rather than a
- * visual clip, so nothing stays in the DOM behind the fold where a link could
- * still take focus.
+ * An excerpt for a collapsed block of markdown, or undefined when it is already
+ * short enough to show whole. The result is real text rather than a visual
+ * clip: clipped content stays in the DOM behind the fold, where a link still
+ * takes focus and focusing it scrolls a box the reader cannot scroll back.
  */
-export function collapsePrompt(content: string) {
+export function collapseMarkdown(content: string, limits: { lines: number; chars: number }) {
   const lines = content.split("\n");
-  if (lines.length <= COLLAPSED_LINES && content.length <= COLLAPSED_CHARS) return undefined;
+  if (lines.length <= limits.lines && content.length <= limits.chars) return undefined;
 
-  const clipped = lines.slice(0, COLLAPSED_LINES).join("\n").slice(0, COLLAPSED_CHARS).trimEnd();
+  const clipped = lines.slice(0, limits.lines).join("\n").slice(0, limits.chars).trimEnd();
   const closed = fenceLeftOpen(clipped) ? `${clipped}\n${FENCE}` : clipped;
 
   // The renderer closes a fence only on a line that is nothing but ```, so the
@@ -122,6 +119,16 @@ export function collapsePrompt(content: string) {
   // a closer and either leaves the fence open or reopens one that was closed.
   const lastLine = closed.split("\n").at(-1) ?? "";
   return FENCE_LINE.test(lastLine) ? `${closed}\n…` : `${closed}…`;
+}
+
+/** A pasted prompt, shortened so it cannot bury the answer it belongs to. */
+export function collapsePrompt(content: string) {
+  return collapseMarkdown(content, { lines: 6, chars: 360 });
+}
+
+/** One model's output, shortened so a verbose step cannot bury the council. */
+export function collapseStepOutput(content: string) {
+  return collapseMarkdown(content, { lines: 40, chars: 1400 });
 }
 
 const FENCE = "```";

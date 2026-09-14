@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, expect, it } from "vitest";
 import { Markdown } from "../ui/markdown";
-import { collapsePrompt, formatDuration, formatWindow, highlight, previewLine, recencyBucket, relativeTime, searchTerms } from "./text";
+import { collapsePrompt, collapseStepOutput, formatDuration, formatWindow, highlight, previewLine, recencyBucket, relativeTime, searchTerms } from "./text";
 
 describe("searchTerms", () => {
   it("keeps quoted phrases whole and drops empty input", () => {
@@ -101,29 +101,70 @@ describe("collapsePrompt", () => {
     expect(collapsed).not.toContain("example.com");
     expect(collapsed).toContain("sixth");
   });
+});
 
-  it("leaves the excerpt with no fence open, as the renderer parses it", () => {
-    // Backtick parity is not the invariant: the renderer closes a fence only on
-    // a line that is nothing but ```, so an ellipsis glued to that line leaves
-    // the fence open. Assert through the renderer's own rules instead.
-    const cases = [
-      // the cut lands inside an open fence
-      `before\n${FENCE}js\nconst a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\n${FENCE}`,
-      // the last kept line is itself the closer, which must stay a closer
-      `a\nb\nc\n${FENCE}js\ncode here\n${FENCE}\ntrailing`,
-      // no fences at all
-      Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"),
-    ];
-
-    for (const input of cases) {
-      const collapsed = collapsePrompt(input)!;
-      expect(fenceLeftOpen(collapsed)).toBe(false);
-      expect(collapsed).toContain("…");
-      // and the renderer agrees: whatever it produced, no code block swallowed
-      // the ellipsis that marks the excerpt.
-      expect(renderedText(collapsed).trimEnd().endsWith("…")).toBe(true);
-    }
+describe("collapseStepOutput", () => {
+  it("leaves an ordinary answer whole", () => {
+    expect(collapseStepOutput("A short verdict from one model.")).toBeUndefined();
+    expect(collapseStepOutput(Array.from({ length: 40 }, () => "short line").join("\n"))).toBeUndefined();
   });
+
+  it("shortens an output that is too many lines or too long", () => {
+    const many = Array.from({ length: 90 }, (_, index) => `point ${index}`).join("\n");
+    const collapsed = collapseStepOutput(many)!;
+    expect(collapsed.split("\n")).toHaveLength(40);
+    expect(collapsed.endsWith("…")).toBe(true);
+    expect(collapsed).not.toContain("point 40");
+
+    const wide = collapseStepOutput("x".repeat(9000))!;
+    expect(wide.length).toBeLessThan(1440);
+    expect(wide.endsWith("…")).toBe(true);
+  });
+
+  it("truncates rather than hiding, so nothing stays behind the fold", () => {
+    // The step body used to clamp with `overflow: hidden`, which kept the whole
+    // answer in the DOM: a link past the fold still took focus, and focusing it
+    // scrolled a box the reader had no way to scroll back.
+    const long = [...Array.from({ length: 40 }, (_, index) => `point ${index}`), "[buried](https://example.com)"].join("\n");
+    const collapsed = collapseStepOutput(long)!;
+    expect(collapsed).not.toContain("example.com");
+    expect(collapsed).toContain("point 39");
+  });
+});
+
+describe("collapsed excerpts and code fences", () => {
+  // Backtick parity is not the invariant: the renderer closes a fence only on a
+  // line that is nothing but ```, so an ellipsis glued to that line leaves the
+  // fence open. Assert through the renderer's own rules instead.
+  const collapsers = [
+    ["collapsePrompt", collapsePrompt, 6] as const,
+    ["collapseStepOutput", collapseStepOutput, 40] as const,
+  ];
+
+  for (const [name, collapse, kept] of collapsers) {
+    it(`leaves no fence open in a ${name} excerpt, as the renderer parses it`, () => {
+      const filler = (count: number) => Array.from({ length: count }, (_, index) => `line ${index}`);
+      const cases = [
+        // the line cut lands inside an open fence
+        [...filler(kept - 5), `${FENCE}js`, "const a = 1;", "const b = 2;", "const c = 3;", "const d = 4;", "const e = 5;", FENCE].join("\n"),
+        // the last kept line is itself the closer, which must stay a closer
+        [...filler(kept - 3), `${FENCE}js`, "code here", FENCE, "trailing"].join("\n"),
+        // the character cut lands inside an open fence
+        [`${FENCE}js`, `const a = "${"x".repeat(2000)}";`, FENCE].join("\n"),
+        // no fences at all
+        filler(kept * 2).join("\n"),
+      ];
+
+      for (const input of cases) {
+        const collapsed = collapse(input);
+        expect(collapsed).toBeDefined();
+        expect(fenceLeftOpen(collapsed!)).toBe(false);
+        // and the renderer agrees: whatever it produced, no code block swallowed
+        // the ellipsis that marks the excerpt.
+        expect(renderedText(collapsed!).trimEnd().endsWith("…")).toBe(true);
+      }
+    });
+  }
 });
 
 const FENCE = "```";
