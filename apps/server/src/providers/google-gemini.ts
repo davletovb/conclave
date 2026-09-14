@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import type {
   ModelRef,
   ProviderAdapter,
@@ -183,8 +184,11 @@ export class GoogleGeminiProvider implements ProviderAdapter {
         emit?.({ type: "text_delta", delta: content.text });
       });
 
+      // Run the ACP session in a neutral temporary directory rather than the
+      // Conclave repository so Gemini cannot accidentally ingest project files
+      // or workspace instructions even if its tool policy changes upstream.
       const session = await client.request<SessionNewResponse>("session/new", {
-        cwd: process.cwd(),
+        cwd: tmpdir(),
         mcpServers: [],
       }, 30_000);
       sessionId = session.sessionId;
