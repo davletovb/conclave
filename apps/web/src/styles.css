@@ -25,11 +25,20 @@
   --r-xl: 20px;
 
   --rail-w: 264px;
-  --measure: 74ch;
+  --measure: 45rem;
 
   --ease: cubic-bezier(.32, .72, 0, 1);
   --fast: 130ms var(--ease);
   --slow: 220ms var(--ease);
+
+  /* One ladder for everything that is `position: fixed`, so a layer can never
+     drift back under navigation. On a narrow viewport the rail is fixed too,
+     and a dialog opened from the rail has to win against it. */
+  --z-rail-scrim: 44;
+  --z-rail: 45;
+  --z-overlay: 50;
+  --z-layer: 51;
+  --z-skip-link: 100;
 
   color-scheme: dark;
 
@@ -121,6 +130,7 @@
 * { box-sizing: border-box; }
 
 html, body, #root { height: 100%; }
+html, body { overflow: hidden; }
 
 body {
   margin: 0;
@@ -154,7 +164,7 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
 
 .skip-link {
   position: fixed;
-  z-index: 100;
+  z-index: var(--z-skip-link);
   top: 10px;
   left: 10px;
   padding: 10px 14px;
@@ -193,6 +203,7 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
   height: 100dvh;
   display: grid;
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   background:
     radial-gradient(120% 80% at 82% -10%, color-mix(in srgb, var(--accent) 6%, transparent) 0, transparent 58%),
@@ -206,6 +217,7 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
 
 .rail {
   min-width: 0;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   border-right: 1px solid var(--line-soft);
@@ -433,9 +445,12 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
 .workspace {
   position: relative;
   min-width: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
+.topbar, .runstrip, .composer-wrap { flex: 0 0 auto; }
+.stream { flex: 1 1 auto; }
 
 .topbar {
   display: flex;
@@ -679,6 +694,8 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
   background: var(--panel-2);
   font-size: var(--step-0);
 }
+.bubble-more { margin-top: 6px; color: var(--accent); font-size: 11.5px; font-weight: 550; }
+.bubble-more:hover { text-decoration: underline; }
 .turn-them .bubble { font-size: var(--step-1); }
 .turn-label { display: flex; align-items: center; gap: 7px; }
 
@@ -794,15 +811,6 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 .step-lineage { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 9px; }
 .tag { padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; font: 500 var(--micro)/1.6 var(--font-mono); color: var(--ink-3); }
 
-.clamp { position: relative; max-height: 21em; overflow: hidden; }
-.clamp::after {
-  content: "";
-  position: absolute;
-  inset: auto 0 0;
-  height: 5em;
-  background: linear-gradient(transparent, var(--canvas) 88%);
-  pointer-events: none;
-}
 .clamp-toggle { margin-top: 8px; color: var(--accent); font-size: 11.5px; font-weight: 550; }
 .clamp-toggle:hover { text-decoration: underline; }
 
@@ -959,7 +967,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-overlay);
   background: var(--scrim);
   backdrop-filter: blur(2px);
   animation: fade var(--fast);
@@ -968,7 +976,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 
 .drawer {
   position: fixed;
-  z-index: 41;
+  z-index: var(--z-layer);
   inset: 0 0 0 auto;
   width: min(460px, 100vw);
   display: grid;
@@ -993,7 +1001,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 
 .modal {
   position: fixed;
-  z-index: 41;
+  z-index: var(--z-layer);
   top: 12vh;
   left: 50%;
   transform: translateX(-50%);
@@ -1101,7 +1109,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
   .shell { grid-template-columns: minmax(0, 1fr); }
   .rail {
     position: fixed;
-    z-index: 45;
+    z-index: var(--z-rail);
     inset: 0 auto 0 0;
     width: min(300px, 86vw);
     box-shadow: var(--shadow-3);
@@ -1109,7 +1117,7 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
   }
   @keyframes rail-in { from { transform: translateX(-14px); opacity: 0; } }
   .shell[data-rail="closed"] .rail { display: none; }
-  .shell[data-rail="open"] .scrim { display: block; position: fixed; inset: 0; z-index: 44; background: var(--scrim); }
+  .shell[data-rail="open"] .scrim { display: block; position: fixed; inset: 0; z-index: var(--z-rail-scrim); background: var(--scrim); }
   .column { padding: 20px 16px 32px; }
   .composer-wrap { padding: 0 16px 14px; }
   .modes { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); }

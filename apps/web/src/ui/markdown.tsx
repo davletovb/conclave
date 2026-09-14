@@ -147,7 +147,8 @@ export function Markdown({ content }: MarkdownProps) {
         quote.push(lines[index].replace(/^\s*>\s?/, ""));
         index += 1;
       }
-      blocks.push(<blockquote key={`block-${block}`}>{inlineWithBreaks(quote.join("\n"), `quote-${block++}`)}</blockquote>);
+      const key = `block-${block++}`;
+      blocks.push(<blockquote key={key}>{inlineWithBreaks(quote.join("\n"), `quote-${key}`)}</blockquote>);
       continue;
     }
 
@@ -191,7 +192,8 @@ export function Markdown({ content }: MarkdownProps) {
       paragraph.push(lines[index]);
       index += 1;
     }
-    blocks.push(<p key={`block-${block}`}>{inlineWithBreaks(paragraph.join("\n"), `paragraph-${block++}`)}</p>);
+    const key = `block-${block++}`;
+    blocks.push(<p key={key}>{inlineWithBreaks(paragraph.join("\n"), `paragraph-${key}`)}</p>);
   }
 
   return <div className="markdown">{blocks}</div>;

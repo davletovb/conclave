@@ -22,6 +22,7 @@ import type {
   WorkflowPreset,
 } from "@conclave/core";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
+import { collapsePrompt } from "./lib/text";
 import { isEditableTarget, matchShortcut } from "./lib/shortcuts";
 import { formatDuration } from "./lib/text";
 import { parseWorkflow, requiredParticipants, serializeWorkflow } from "./lib/workflow-model";
@@ -109,6 +110,35 @@ function initialSelection(models: ModelRef[]) {
 
 function freshUsage(): RunUsage {
   return { callsStarted: 0, callsCompleted: 0, inputTokens: 0, outputTokens: 0, tokenReports: 0 };
+}
+
+/**
+ * One conversation turn. A pasted prompt can run to hundreds of lines, which
+ * would bury the answer it belongs to, so a long one is shortened until asked
+ * for. It is truncated rather than visually clipped: anything hidden behind a
+ * clip is still in the DOM, so a link inside it stays focusable and tabbing
+ * lands on something nobody can see.
+ */
+function Turn({ role, content }: { role: "user" | "assistant"; content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const preview = role === "user" ? collapsePrompt(content) : undefined;
+  const shown = preview && !expanded ? preview : content;
+
+  return (
+    <article className={`turn ${role === "user" ? "turn-you" : "turn-them"}`}>
+      {role === "assistant" && <span className="eyebrow turn-label">Conclave</span>}
+      <div className="bubble">
+        <div className="bubble-body">
+          <Markdown content={shown} />
+        </div>
+        {preview && (
+          <button type="button" className="bubble-more" onClick={() => setExpanded(value => !value)}>
+            {expanded ? "Show less" : "Show full prompt"}
+          </button>
+        )}
+      </div>
+    </article>
+  );
 }
 
 function App() {
@@ -500,6 +530,8 @@ function App() {
     if (!isCurrent(epoch)) return;
     setConversation(data);
     setSetupOpen(false);
+    setStuckToBottom(true);
+    if (streamRef.current) streamRef.current.scrollTop = 0;
     localStorage.setItem("conclave.conversationId", id);
 
     if (data.lastRunId) {
@@ -593,6 +625,7 @@ function App() {
 
   function newConversation() {
     beginViewOperation();
+    if (streamRef.current) streamRef.current.scrollTop = 0;
     setConversation(null);
     setSetupOpen(true);
     setActiveRunId(null);
@@ -1247,12 +1280,7 @@ function App() {
             {priorMessages.length > 0 && (
               <section className="turns" aria-label="Conversation history">
                 {priorMessages.map(message => (
-                  <article className={`turn ${message.role === "user" ? "turn-you" : "turn-them"}`} key={message.id}>
-                    {message.role === "assistant" && <span className="eyebrow turn-label">Conclave</span>}
-                    <div className="bubble">
-                      <Markdown content={message.content} />
-                    </div>
-                  </article>
+                  <Turn key={message.id} role={message.role} content={message.content} />
                 ))}
               </section>
             )}

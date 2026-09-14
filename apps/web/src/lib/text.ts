@@ -100,3 +100,54 @@ export function recencyBucket(iso: string, now = Date.now()) {
   if (days < 30) return "This month";
   return "Earlier";
 }
+
+/**
+ * An excerpt for a collapsed block of markdown, or undefined when it is already
+ * short enough to show whole. The result is real text rather than a visual
+ * clip: clipped content stays in the DOM behind the fold, where a link still
+ * takes focus and focusing it scrolls a box the reader cannot scroll back.
+ */
+export function collapseMarkdown(content: string, limits: { lines: number; chars: number }) {
+  const lines = content.split("\n");
+  if (lines.length <= limits.lines && content.length <= limits.chars) return undefined;
+
+  const clipped = lines.slice(0, limits.lines).join("\n").slice(0, limits.chars).trimEnd();
+  const closed = fenceLeftOpen(clipped) ? `${clipped}\n${FENCE}` : clipped;
+
+  // The renderer closes a fence only on a line that is nothing but ```, so the
+  // ellipsis has to stay off any fence line: glued on, it stops the line being
+  // a closer and either leaves the fence open or reopens one that was closed.
+  const lastLine = closed.split("\n").at(-1) ?? "";
+  return FENCE_LINE.test(lastLine) ? `${closed}\n…` : `${closed}…`;
+}
+
+/** A pasted prompt, shortened so it cannot bury the answer it belongs to. */
+export function collapsePrompt(content: string) {
+  return collapseMarkdown(content, { lines: 6, chars: 360 });
+}
+
+/** One model's output, shortened so a verbose step cannot bury the council. */
+export function collapseStepOutput(content: string) {
+  return collapseMarkdown(content, { lines: 40, chars: 1400 });
+}
+
+const FENCE = "```";
+/** Any line the renderer could treat as a fence marker. */
+const FENCE_LINE = /^\s*```/;
+/** What the renderer opens a fence on, and what it closes one on. */
+const FENCE_OPEN = /^\s*```([^`]*)$/;
+const FENCE_CLOSE = /^\s*```\s*$/;
+
+/**
+ * Whether an excerpt ends inside a code fence, by the same rules the renderer
+ * uses. Counting backticks is not the same question: a closer is only a closer
+ * on a line of its own.
+ */
+function fenceLeftOpen(text: string) {
+  let open = false;
+  for (const line of text.split("\n")) {
+    if (open) open = !FENCE_CLOSE.test(line);
+    else if (FENCE_OPEN.test(line)) open = true;
+  }
+  return open;
+}
