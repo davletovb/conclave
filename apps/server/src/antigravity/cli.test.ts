@@ -1,5 +1,23 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildAntigravityChildEnv, parseAntigravityModels } from "./cli.js";
+import {
+  buildAntigravityChildEnv,
+  CONCLAVE_ANTIGRAVITY_AGENT,
+  createAntigravityWorkspace,
+  NativeAntigravityCliRunner,
+  parseAntigravityModels,
+} from "./cli.js";
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error("Timed out waiting for condition");
+}
 
 describe("Antigravity CLI transport", () => {
   it("discovers only Gemini models from the live agy catalog", () => {
@@ -18,7 +36,7 @@ describe("Antigravity CLI transport", () => {
     ]);
   });
 
-  it("shadows direct API, custom-endpoint and Vertex billing routes while preserving normal process env", () => {
+  it("removes API/Vertex credentials and inherited Antigravity session plumbing", () => {
     const env = buildAntigravityChildEnv({
       PATH: "/usr/bin",
       HOME: "/Users/example",
@@ -35,6 +53,12 @@ describe("Antigravity CLI transport", () => {
       GOOGLE_CLOUD_LOCATION: "global",
       CLOUD_ML_PROJECT_ID: "ml-project",
       GOOGLE_GEMINI_BASE_URL: "https://example.invalid",
+      ANTIGRAVITY_CONVERSATION_ID: "private-session",
+      ANTIGRAVITY_SOURCE_METADATA: "private-source",
+      AGY_BROWSER_WS_URL: "ws://127.0.0.1:1234",
+      AGY_BROWSER_ACTIVE_PORT_FILE: "/tmp/port",
+      AGY_SIDECAR_PORT: "4567",
+      ANTIGRAVITY_SIDECAR_PORT: "4568",
     });
 
     expect(env.PATH).toBe("/usr/bin");
@@ -53,9 +77,70 @@ describe("Antigravity CLI transport", () => {
       "GOOGLE_CLOUD_LOCATION",
       "CLOUD_ML_PROJECT_ID",
       "GOOGLE_GEMINI_BASE_URL",
+      "ANTIGRAVITY_CONVERSATION_ID",
+      "ANTIGRAVITY_SOURCE_METADATA",
+      "AGY_BROWSER_WS_URL",
+      "AGY_BROWSER_ACTIVE_PORT_FILE",
+      "AGY_SIDECAR_PORT",
+      "ANTIGRAVITY_SIDECAR_PORT",
     ]) {
-      expect(env[name]).toBe("");
+      expect(Object.hasOwn(env, name)).toBe(false);
     }
     expect(env.AGY_CLI_DISABLE_AUTO_UPDATE).toBe("true");
+  });
+
+  it("creates a workspace-local primary agent with no tools, MCP, skills, plugins, or subagent capability", () => {
+    const workspace = createAntigravityWorkspace();
+    try {
+      const definition = readFileSync(
+        join(workspace, ".agents", "agents", CONCLAVE_ANTIGRAVITY_AGENT, "agent.md"),
+        "utf8",
+      );
+      expect(definition).toContain("tools: []");
+      expect(definition).toContain("mainAgent: true");
+      expect(definition).toContain("subagent: false");
+      expect(definition).toContain("inheritMcp: false");
+      expect(definition).toContain('commandExecutionPolicy: "off"');
+      expect(definition).toContain("mcpServers: []");
+      expect(definition).toContain("skills: []");
+      expect(definition).toContain("plugins: []");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the child workspace until an aborted process has actually closed", async () => {
+    if (process.platform === "win32") return;
+
+    const root = mkdtempSync(join(tmpdir(), "conclave-agy-lifecycle-test-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace, { mode: 0o700 });
+    const script = [
+      'console.log("ready")',
+      'process.on("SIGTERM", () => setTimeout(() => process.exit(0), 150))',
+      'setInterval(() => {}, 1000)',
+    ].join(";");
+    const runner = new NativeAntigravityCliRunner({
+      command: process.execPath,
+      prefixArgs: ["-e", script, "--"],
+      createWorkspace: () => workspace,
+    });
+    const controller = new AbortController();
+    let existedAtAbort = false;
+
+    try {
+      const pending = runner.run(["ignored"], 5_000, line => {
+        if (line !== "ready") return;
+        existedAtAbort = existsSync(workspace);
+        controller.abort();
+      }, controller.signal);
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(existedAtAbort).toBe(true);
+      expect(existsSync(workspace)).toBe(true);
+      await waitUntil(() => !existsSync(workspace));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
