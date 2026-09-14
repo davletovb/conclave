@@ -31,6 +31,8 @@ export class RunManager {
   private readonly activeControllers = new Map<string, AbortController>();
   /** Which conversations are claimed, and by what, so the guard can say so. */
   private readonly activeConversations = new Map<string, "run" | "delete">();
+  /** Which active run owns a conversation reservation. */
+  private readonly activeRunByConversation = new Map<string, string>();
 
   constructor(
     private readonly orchestrator: Orchestrator,
@@ -146,6 +148,12 @@ export class RunManager {
   }
 
   async deleteConversation(conversationId: string) {
+    // Terminal state is persisted before execute() has necessarily finished its
+    // final writes and released the run reservation. If the caller already
+    // followed the run to a terminal state, let that short settling window close
+    // before taking the delete reservation. A genuinely live run still rejects.
+    await this.settleFinishedRun(conversationId);
+
     // A run owns provider processes and an append-only event log. Removing its
     // conversation underneath it would leave both orphaned, so the delete takes
     // the same reservation a run does: checking and releasing around the store
@@ -179,6 +187,23 @@ export class RunManager {
   }
 
   /**
+   * A run can publish a terminal status from the event queue before execute()
+   * has completed its last writes and released the conversation. Wait for that
+   * specific task only when the persisted run is already terminal. Otherwise
+   * leave the live-run guard untouched so deleteConversation() still rejects.
+   */
+  private async settleFinishedRun(conversationId: string) {
+    if (this.activeConversations.get(conversationId) !== "run") return;
+    const runId = this.activeRunByConversation.get(conversationId);
+    if (!runId) return;
+
+    const run = await this.store.getRun(runId);
+    if (!run || !isTerminal(run.status)) return;
+
+    await this.active.get(runId)?.catch(() => undefined);
+  }
+
+  /**
    * Claims a conversation for one exclusive operation. The check and the claim
    * are synchronous on purpose: nothing may await between them, or two callers
    * can both believe the conversation is free.
@@ -198,12 +223,16 @@ export class RunManager {
     if (this.active.has(run.id)) return;
     const controller = new AbortController();
     this.activeControllers.set(run.id, controller);
+    this.activeRunByConversation.set(run.conversationId, run.id);
     const task = this.execute(run, history ?? [], controller.signal)
       .catch(() => undefined)
       .finally(() => {
         this.active.delete(run.id);
         this.activeControllers.delete(run.id);
-        this.activeConversations.delete(run.conversationId);
+        if (this.activeRunByConversation.get(run.conversationId) === run.id) {
+          this.activeRunByConversation.delete(run.conversationId);
+          this.activeConversations.delete(run.conversationId);
+        }
       });
     this.active.set(run.id, task);
   }
