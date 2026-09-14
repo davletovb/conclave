@@ -115,6 +115,70 @@ describe("RunManager", () => {
     expect(await store.readRunEvents(started.runId)).toEqual([]);
   });
 
+  it("waits for terminal cancellation cleanup before deleting the conversation", async () => {
+    const provider = new CancellableMockProvider();
+    const { manager, store } = await makeManager(provider);
+    const originalUpdateRun = store.updateRun.bind(store);
+
+    let terminalRewriteStarted!: () => void;
+    const terminalRewriteStartedPromise = new Promise<void>(resolve => {
+      terminalRewriteStarted = resolve;
+    });
+    let releaseTerminalRewrite!: () => void;
+    const releaseTerminalRewritePromise = new Promise<void>(resolve => {
+      releaseTerminalRewrite = resolve;
+    });
+    let cancelledWrites = 0;
+
+    store.updateRun = async (runId, patch) => {
+      if (patch.status === "cancelled") {
+        cancelledWrites += 1;
+        if (cancelledWrites === 2) {
+          terminalRewriteStarted();
+          await releaseTerminalRewritePromise;
+        }
+      }
+      return originalUpdateRun(runId, patch);
+    };
+
+    const started = await manager.start({
+      request: {
+        mode: "single",
+        prompt: "Expose the terminal-state cleanup window",
+        participants: [participant],
+      },
+    });
+
+    await waitForCalls(manager, started.runId);
+    await manager.cancel(started.runId);
+    const cancelled = await waitForTerminal(manager, started.runId);
+    expect(cancelled.status).toBe("cancelled");
+
+    // The run_cancelled event has already made the run terminal, while execute()
+    // is deliberately held on its final state write and still owns the
+    // conversation reservation. This is the ordering that used to fail on CI.
+    await terminalRewriteStartedPromise;
+
+    let deletionState: "pending" | "resolved" | "rejected" = "pending";
+    const deleting = manager.deleteConversation(started.conversationId);
+    void deleting.then(
+      () => { deletionState = "resolved"; },
+      () => { deletionState = "rejected"; },
+    );
+
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(deletionState).toBe("pending");
+      expect(await manager.getConversation(started.conversationId)).not.toBeNull();
+    } finally {
+      releaseTerminalRewrite();
+    }
+
+    await deleting;
+    expect(await manager.getConversation(started.conversationId)).toBeNull();
+    expect(await manager.getRun(started.runId)).toBeNull();
+  });
+
   it("refuses to start a run against a conversation that is being deleted", async () => {
     const { manager } = await makeManager();
     const first = await manager.start({
