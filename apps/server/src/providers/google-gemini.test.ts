@@ -1,11 +1,27 @@
 import { describe, expect, it } from "vitest";
-import type { AntigravityCliRunner, AntigravityRunResult } from "../antigravity/cli.js";
+import {
+  CONCLAVE_ANTIGRAVITY_AGENT,
+  type AntigravityCliRunner,
+  type AntigravityRunResult,
+} from "../antigravity/cli.js";
 import { GoogleGeminiProvider } from "./google-gemini.js";
 
 function abortError() {
   const error = new Error("aborted");
   error.name = "AbortError";
   return error;
+}
+
+function initLine(permissionMode = "request-review", tools: string[] = [], agent = CONCLAVE_ANTIGRAVITY_AGENT) {
+  return JSON.stringify({
+    event: "init",
+    conversation_id: "agy-1",
+    init: {
+      permission_mode: permissionMode,
+      agent,
+      tools,
+    },
+  });
 }
 
 class FakeAntigravityRunner implements AntigravityCliRunner {
@@ -21,7 +37,7 @@ class FakeAntigravityRunner implements AntigravityCliRunner {
     ].join("\n"),
   };
   generateLines = [
-    JSON.stringify({ event: "init", conversation_id: "agy-1", init: { permission_mode: "request-review" } }),
+    initLine(),
     JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE", text_delta: "Gemini subscription " } }),
     JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: "answer" } }),
     JSON.stringify({
@@ -167,7 +183,7 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(status.message).toMatch(/modelProvider/i);
   });
 
-  it("streams Antigravity answer deltas and sends the prompt over stdin", async () => {
+  it("streams answer deltas through the workspace-local tool-free agent and stdin", async () => {
     const runner = new FakeAntigravityRunner();
     const provider = new GoogleGeminiProvider(runner);
     const events: Array<{ type: string; [key: string]: unknown }> = [];
@@ -191,7 +207,9 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(args).toContain("--output-format");
     expect(args).toContain("stream-json");
     expect(args).toContain("--sandbox");
-    expect(args).toContain("--mode=default");
+    expect(args).toContain("--agent");
+    expect(args[args.indexOf("--agent") + 1]).toBe(CONCLAVE_ANTIGRAVITY_AGENT);
+    expect(args).not.toContain("--mode=default");
     expect(args).toContain("--model");
     expect(args).toContain("gemini-3.8-flash-high");
     expect(args).not.toContain("-p");
@@ -205,6 +223,19 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(input.event).toBe("user");
     expect(input.message.content).toMatch(/Do not use tools/i);
     expect(input.message.content).toContain("Compare the designs.");
+  });
+
+  it("accepts every documented non-auto-approve permission mode when the init tool list is empty", async () => {
+    for (const mode of ["request-review", "proceed-in-sandbox", "strict"]) {
+      const runner = new FakeAntigravityRunner();
+      runner.generateLines[0] = initLine(mode);
+      const provider = new GoogleGeminiProvider(runner);
+
+      await expect(provider.generate({
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "Hello" }],
+      })).resolves.toMatchObject({ content: "Gemini subscription answer" });
+    }
   });
 
   it("keeps the old auto model id compatible by letting Antigravity choose its default", async () => {
@@ -264,31 +295,74 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
     expect(runner.calls[1][runner.calls[1].indexOf("--model") + 1]).toBe("gemini-3.8-flash-high");
   });
 
-  it("fails closed if Antigravity attempts a tool step", async () => {
+  it("fails closed if Antigravity advertises any tools for the Conclave agent", async () => {
     const runner = new FakeAntigravityRunner();
-    runner.generateLines = [
-      JSON.stringify({ event: "init", init: { permission_mode: "request-review" } }),
-      JSON.stringify({ event: "step_update", step_update: { step_type: "tool", state: "ACTIVE", tool_name: "run_command" } }),
-    ];
+    runner.generateLines = [initLine("request-review", ["write_file"] )];
     const provider = new GoogleGeminiProvider(runner);
 
     await expect(provider.generate({
       model: "gemini-3.8-flash-high",
       messages: [{ role: "user", content: "Just answer." }],
-    })).rejects.toThrow(/attempted a tool step.*run_command/i);
+    })).rejects.toThrow(/expected zero available tools.*write_file/i);
   });
 
-  it("fails closed when Antigravity starts in an unsafe permission mode", async () => {
+  it("fails closed when the init agent is missing or not Conclave's tool-free agent", async () => {
+    for (const agent of ["default", ""]) {
+      const runner = new FakeAntigravityRunner();
+      runner.generateLines = [initLine("request-review", [], agent)];
+      const provider = new GoogleGeminiProvider(runner);
+
+      await expect(provider.generate({
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "Just answer." }],
+      })).rejects.toThrow(/expected agent conclave-text/i);
+    }
+  });
+
+  it("fails closed when the stream omits init entirely", async () => {
     const runner = new FakeAntigravityRunner();
-    runner.generateLines = [
-      JSON.stringify({ event: "init", init: { permission_mode: "always-proceed" } }),
-    ];
+    runner.generateLines = [JSON.stringify({
+      event: "result",
+      result: { status: "SUCCESS", response: "unverified", usage: { output_tokens: 1 } },
+    })];
     const provider = new GoogleGeminiProvider(runner);
 
     await expect(provider.generate({
       model: "gemini-3.8-flash-high",
       messages: [{ role: "user", content: "Just answer." }],
-    })).rejects.toThrow(/permission mode always-proceed.*not safe/i);
+    })).rejects.toThrow(/without a verifiable tool-free init event/i);
+  });
+
+  it("fails closed if tool or subagent activity appears after a verified tool-free init", async () => {
+    for (const violatingStep of [
+      { step_type: "tool", state: "ACTIVE", tool_name: "run_command", tool_info: {} },
+      { step_type: "checkpoint", state: "ACTIVE", subagent_info: { conversation_id: "child" } },
+    ]) {
+      const runner = new FakeAntigravityRunner();
+      runner.generateLines = [
+        initLine(),
+        JSON.stringify({ event: "step_update", step_update: violatingStep }),
+      ];
+      const provider = new GoogleGeminiProvider(runner);
+
+      await expect(provider.generate({
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "Just answer." }],
+      })).rejects.toThrow(/tool\/subagent step/i);
+    }
+  });
+
+  it("fails closed when Antigravity starts in always-proceed or an unknown permission mode", async () => {
+    for (const mode of ["always-proceed", "mystery-mode"]) {
+      const runner = new FakeAntigravityRunner();
+      runner.generateLines = [initLine(mode)];
+      const provider = new GoogleGeminiProvider(runner);
+
+      await expect(provider.generate({
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "Just answer." }],
+      })).rejects.toThrow(/permission mode .* is not one of/i);
+    }
   });
 
   it("propagates Conclave cancellation into the Antigravity process", async () => {
@@ -321,7 +395,7 @@ describe("GoogleGeminiProvider via Antigravity CLI", () => {
   it("treats Antigravity's empty zero-usage success signature as a failure", async () => {
     const runner = new FakeAntigravityRunner();
     runner.generateLines = [
-      JSON.stringify({ event: "init", init: { permission_mode: "request-review" } }),
+      initLine(),
       JSON.stringify({
         event: "result",
         result: {
