@@ -148,22 +148,45 @@ export class RunManager {
   }
 
   async deleteConversation(conversationId: string) {
-    // Terminal state is persisted before execute() has necessarily finished its
-    // final writes and released the run reservation. If the caller already
-    // followed the run to a terminal state, let that short settling window close
-    // before taking the delete reservation. A genuinely live run still rejects.
-    await this.settleFinishedRun(conversationId);
+    // Claim delete synchronously before the first await so start() cannot slip
+    // between a terminal run releasing its reservation and the store deletion.
+    // If the holder is a genuinely live run, restore its reservation and reject.
+    const existing = this.activeConversations.get(conversationId);
+    if (existing === "delete") {
+      throw new Error("This conversation is being deleted.");
+    }
 
-    // A run owns provider processes and an append-only event log. Removing its
-    // conversation underneath it would leave both orphaned, so the delete takes
-    // the same reservation a run does: checking and releasing around the store
-    // call means start() and delete() can never interleave, which would
-    // otherwise launch a run against state that is being wiped.
-    this.reserveConversation(conversationId, "delete");
+    if (existing === "run") {
+      const runId = this.activeRunByConversation.get(conversationId);
+      if (!runId) {
+        throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
+      }
+
+      this.activeConversations.set(conversationId, "delete");
+      const run = await this.store.getRun(runId);
+      if (run && isTerminal(run.status)) {
+        // The terminal status can be visible before execute() finishes its last
+        // writes. Keep the delete claim while that exact task settles.
+        await this.active.get(runId)?.catch(() => undefined);
+      } else if (this.activeRunByConversation.get(conversationId) === runId) {
+        // Still genuinely live: give the reservation back to the run and keep
+        // the longstanding guard behavior.
+        this.activeConversations.set(conversationId, "run");
+        throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
+      }
+      // If the task finished while getRun() was in flight, its finally already
+      // removed the run owner. The delete claim remains ours, so it is safe to
+      // continue without reopening a start/delete gap.
+    } else {
+      this.activeConversations.set(conversationId, "delete");
+    }
+
     try {
       await this.store.deleteConversation(conversationId);
     } finally {
-      this.activeConversations.delete(conversationId);
+      if (this.activeConversations.get(conversationId) === "delete") {
+        this.activeConversations.delete(conversationId);
+      }
     }
     return { id: conversationId, deleted: true as const };
   }
@@ -184,23 +207,6 @@ export class RunManager {
       listeners.delete(listener);
       if (listeners.size === 0) this.listeners.delete(runId);
     };
-  }
-
-  /**
-   * A run can publish a terminal status from the event queue before execute()
-   * has completed its last writes and released the conversation. Wait for that
-   * specific task only when the persisted run is already terminal. Otherwise
-   * leave the live-run guard untouched so deleteConversation() still rejects.
-   */
-  private async settleFinishedRun(conversationId: string) {
-    if (this.activeConversations.get(conversationId) !== "run") return;
-    const runId = this.activeRunByConversation.get(conversationId);
-    if (!runId) return;
-
-    const run = await this.store.getRun(runId);
-    if (!run || !isTerminal(run.status)) return;
-
-    await this.active.get(runId)?.catch(() => undefined);
   }
 
   /**
@@ -231,7 +237,9 @@ export class RunManager {
         this.activeControllers.delete(run.id);
         if (this.activeRunByConversation.get(run.conversationId) === run.id) {
           this.activeRunByConversation.delete(run.conversationId);
-          this.activeConversations.delete(run.conversationId);
+          if (this.activeConversations.get(run.conversationId) === "run") {
+            this.activeConversations.delete(run.conversationId);
+          }
         }
       });
     this.active.set(run.id, task);
