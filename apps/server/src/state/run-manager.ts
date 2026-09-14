@@ -150,39 +150,50 @@ export class RunManager {
   async deleteConversation(conversationId: string) {
     // Claim delete synchronously before the first await so start() cannot slip
     // between a terminal run releasing its reservation and the store deletion.
-    // If the holder is a genuinely live run, restore its reservation and reject.
     const existing = this.activeConversations.get(conversationId);
     if (existing === "delete") {
       throw new Error("This conversation is being deleted.");
     }
 
+    let runId: string | undefined;
     if (existing === "run") {
-      const runId = this.activeRunByConversation.get(conversationId);
+      runId = this.activeRunByConversation.get(conversationId);
       if (!runId) {
         throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
       }
-
-      this.activeConversations.set(conversationId, "delete");
-      const run = await this.store.getRun(runId);
-      if (run && isTerminal(run.status)) {
-        // The terminal status can be visible before execute() finishes its last
-        // writes. Keep the delete claim while that exact task settles.
-        await this.active.get(runId)?.catch(() => undefined);
-      } else if (this.activeRunByConversation.get(conversationId) === runId) {
-        // Still genuinely live: give the reservation back to the run and keep
-        // the longstanding guard behavior.
-        this.activeConversations.set(conversationId, "run");
-        throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
-      }
-      // If the task finished while getRun() was in flight, its finally already
-      // removed the run owner. The delete claim remains ours, so it is safe to
-      // continue without reopening a start/delete gap.
-    } else {
-      this.activeConversations.set(conversationId, "delete");
     }
 
+    this.activeConversations.set(conversationId, "delete");
     try {
+      if (runId) {
+        const run = await this.store.getRun(runId);
+        if (run && isTerminal(run.status)) {
+          // The terminal status can be visible before execute() finishes its
+          // last writes. Keep the delete claim while that exact task settles.
+          await this.active.get(runId)?.catch(() => undefined);
+        } else if (this.activeRunByConversation.get(conversationId) === runId) {
+          // Still genuinely live: give the reservation back to the run and keep
+          // the longstanding guard behavior.
+          this.activeConversations.set(conversationId, "run");
+          throw new Error("This conversation already has an active run. Wait for it to finish or start a new conversation.");
+        }
+        // If the task finished while getRun() was in flight, its finally already
+        // removed the run owner. The delete claim remains ours, so it is safe to
+        // continue without reopening a start/delete gap.
+      }
+
       await this.store.deleteConversation(conversationId);
+    } catch (error) {
+      // A read/delete failure after stealing a live run's reservation must not
+      // strand the conversation as "delete" or drop protection for a run that
+      // is still executing. Restore ownership only if that exact run still owns
+      // the conversation; otherwise cleanup can safely release the delete claim.
+      if (runId
+        && this.activeConversations.get(conversationId) === "delete"
+        && this.activeRunByConversation.get(conversationId) === runId) {
+        this.activeConversations.set(conversationId, "run");
+      }
+      throw error;
     } finally {
       if (this.activeConversations.get(conversationId) === "delete") {
         this.activeConversations.delete(conversationId);
