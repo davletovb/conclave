@@ -1,14 +1,5 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { buildGeminiAcpArgs, geminiOAuthCredentialPath } from "./acp-client.js";
-
-const originalGeminiCliHome = process.env.GEMINI_CLI_HOME;
-
-afterEach(() => {
-  if (originalGeminiCliHome === undefined) delete process.env.GEMINI_CLI_HOME;
-  else process.env.GEMINI_CLI_HOME = originalGeminiCliHome;
-});
+import { describe, expect, it } from "vitest";
+import { buildGeminiAcpArgs, buildGeminiChildEnv } from "./acp-client.js";
 
 describe("Gemini ACP launch policy", () => {
   it("starts ACP with extensions disabled, MCP restricted, and a deny-all admin policy", () => {
@@ -28,15 +19,44 @@ describe("Gemini ACP launch policy", () => {
     expect(args).not.toContain("--model");
   });
 
-  it("looks for OAuth where Gemini CLI looks when GEMINI_CLI_HOME is unset", () => {
-    delete process.env.GEMINI_CLI_HOME;
-    expect(geminiOAuthCredentialPath()).toBe(join(homedir(), ".gemini", "oauth_creds.json"));
-  });
+  it("strips API, Vertex, sandbox and model selectors while forcing non-browser ACP", () => {
+    const env = buildGeminiChildEnv({
+      PATH: "/usr/bin",
+      GEMINI_API_KEY: "secret",
+      GOOGLE_API_KEY: "secret",
+      GOOGLE_APPLICATION_CREDENTIALS: "/tmp/adc.json",
+      GOOGLE_GENAI_USE_VERTEXAI: "true",
+      GOOGLE_GENAI_USE_GCA: "true",
+      GOOGLE_CLOUD_ACCESS_TOKEN: "token",
+      GOOGLE_CLOUD_PROJECT: "project",
+      GOOGLE_CLOUD_PROJECT_ID: "project-id",
+      GOOGLE_CLOUD_QUOTA_PROJECT: "quota-project",
+      CLOUD_ML_PROJECT_ID: "ml-project",
+      GOOGLE_GEMINI_BASE_URL: "https://example.invalid",
+      GEMINI_MODEL: "forced-model",
+      GEMINI_SANDBOX: "docker",
+    });
 
-  it("respects GEMINI_CLI_HOME without reading the credential file", () => {
-    process.env.GEMINI_CLI_HOME = join("/tmp", "gemini-home-for-conclave-test");
-    expect(geminiOAuthCredentialPath()).toBe(
-      join(process.env.GEMINI_CLI_HOME, ".gemini", "oauth_creds.json"),
-    );
+    expect(env.PATH).toBe("/usr/bin");
+    for (const name of [
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "GOOGLE_GENAI_USE_VERTEXAI",
+      "GOOGLE_GENAI_USE_GCA",
+      "GOOGLE_CLOUD_ACCESS_TOKEN",
+      "GOOGLE_CLOUD_PROJECT",
+      "GOOGLE_CLOUD_PROJECT_ID",
+      "GOOGLE_CLOUD_QUOTA_PROJECT",
+      "CLOUD_ML_PROJECT_ID",
+      "GOOGLE_GEMINI_BASE_URL",
+      "GEMINI_MODEL",
+      "GEMINI_SANDBOX",
+    ]) {
+      expect(env[name]).toBeUndefined();
+    }
+    expect(env.NO_BROWSER).toBe("true");
+    expect(env.GEMINI_CLI_SURFACE).toBe("conclave");
+    expect(env.GEMINI_CLI_TRUST_WORKSPACE).toBe("true");
   });
 });
