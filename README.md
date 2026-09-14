@@ -238,10 +238,13 @@ Restart `pnpm dev` after signing in.
 
 ## Connect your Gemini subscription
 
-Install the official Google Antigravity CLI:
+Download Google's official Antigravity installer first, inspect it if desired, then run it:
 
 ```bash
-curl -fsSL https://antigravity.google/cli/install.sh | bash
+curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/antigravity-install.sh
+less /tmp/antigravity-install.sh   # press q after inspection
+bash /tmp/antigravity-install.sh
+rm /tmp/antigravity-install.sh
 ```
 
 Open a new terminal (or reload your shell), verify the CLI, and start one interactive session:
