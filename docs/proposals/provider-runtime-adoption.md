@@ -165,7 +165,7 @@
   - The setting's description states the tradeoff: within that time, a CLI that has switched to API-key or Console sign-in goes unnoticed, and a call could be billed.
 - **If the check turns out to dominate latency,** look for evidence the CLI reports before any model request, provider by provider, rather than starting billable work early.
 
-**Every Conclave turn is `Ephemeral`.** This is the library's session policy, so nothing a provider saves outlives the call. Claude runs with `--no-session-persistence`, and the other providers' files are removed after each turn.
+**Every Conclave turn is `Ephemeral`.** This is the library's session policy, so nothing a provider saves outlives the call. Claude runs with `--no-session-persistence`, Codex with `exec --ephemeral`, and Antigravity's transcripts and Grok's workspaces are removed after each turn. The library's live smoke tests verify that no prompt content remains in anything a CLI stores. A CLI that can't meet that, such as a Codex too old for `--ephemeral`, refuses the turn.
 
 **Fixes to shared behavior go to the library.**
 - A problem in one of the four shared adapters is fixed in the library, and both Conclave and Pervue pick up the fix by bumping their pin.
