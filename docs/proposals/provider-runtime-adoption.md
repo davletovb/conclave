@@ -7,7 +7,7 @@
 
 ## Summary
 
-- **Conclave adopts the shared provider runtime for all four providers at once.** The runtime is the Rust library being extracted from Pervue. Conclave adopts it in a new Rust server, which replaces the Fastify server and keeps the same HTTP API, so the web app doesn't change.
+- **Conclave adopts the shared provider runtime for all four providers at once.** The runtime is the Rust library being extracted from Pervue. Conclave adopts it in a new Rust server, which replaces the Fastify server and keeps the same HTTP API. The web app's requests and data shapes don't change. Its only additions are a sign-in handoff and sending credentials (§4).
 - **Decisions made** (§2):
   - Rewrite the server in Rust, with no go/no-go spike beforehand.
   - Use `codex exec` for OpenAI and Grok's one-shot headless mode for Grok.
@@ -62,6 +62,7 @@
     - status codes;
     - response headers, including `Content-Type` and `Content-Disposition` for exports;
     - CORS responses, for allowed and denied origins and preflights;
+    - the request-body limit: Fastify's default of 1 MiB, answered with 413;
     - how invalid bodies and unknown fields are handled.
   - **Event streams:**
     - NDJSON framing and event order;
@@ -71,7 +72,9 @@
     - what happens when the client disconnects.
   - **Every orchestration mode:** the event sequences, the errors, and the files stored under the data directory.
 
-  Authentication, Host checks, and body limits aren't in today's server, so the recording can't cover them. They're specified and tested as new behavior in the Rust server (§4).
+  - **Configuration:** run the recording once more with `CONCLAVE_DATA_DIR` pointing at a non-default directory.
+
+  Authentication and Host checks aren't in today's server, so the recording can't cover them. They're specified and tested as new behavior in the Rust server (§4). The 1 MiB body limit is in today's server, so it's recorded. Any deliberate change to it is documented.
 
 ## 4. The Rust server
 
@@ -84,10 +87,18 @@
 | Orchestrator (12 modes, workflow graphs, budgets, retries) | tokio tasks for parallel steps, plus cancellation tokens |
 | Stall watchdog plus 180 s per-adapter timeouts | The library's idle and absolute limits. `CONCLAVE_STEP_STALL_TIMEOUT_MS` and `CONCLAVE_*_TURN_TIMEOUT_MS` map onto them |
 | Retry decisions by regex on error text | The library's `retryable` flag and reason codes |
-| `state.json` and `runs/*.ndjson`, with 0700/0600 permissions | Same file formats, so existing data still loads |
+| `state.json` and `runs/*.ndjson` under `~/.conclave`, or under `CONCLAVE_DATA_DIR` when it's set, with 0700/0600 permissions | Same files in the same place, so existing data still loads |
 | SearXNG client | reqwest, with the search-result sanitizer shared with Pervue |
 | Four provider adapters | The library's four adapters, through its service API |
 | Web app served by Vite in development | The server also serves the built web app, so users need neither Node nor pnpm |
+
+**Configuration.** Every variable the current server reads keeps working, or is deliberately retired with a startup warning:
+- **Same meaning:** `PORT`, `CONCLAVE_HOST`, `CONCLAVE_WEB_ORIGIN`, `CONCLAVE_DATA_DIR`, `CONCLAVE_SEARXNG_URL`, and `CONCLAVE_SEARCH_TIMEOUT_MS`. The web build's `VITE_CONCLAVE_API` also stays.
+- **Mapped onto the library:**
+  - `CONCLAVE_STEP_STALL_TIMEOUT_MS` becomes the idle limit.
+  - `CONCLAVE_CLAUDE_TURN_TIMEOUT_MS`, `CONCLAVE_CODEX_TURN_TIMEOUT_MS`, `CONCLAVE_GROK_TURN_TIMEOUT_MS`, and `CONCLAVE_ANTIGRAVITY_TURN_TIMEOUT_MS` become each provider's absolute limit.
+  - `CONCLAVE_CODEX_BIN` becomes the library's explicit executable override for Codex, read from startup configuration.
+- **Retired,** because they belong to modes Conclave is leaving: `CONCLAVE_CODEX_RPC_TIMEOUT_MS` (Codex app-server) and `CONCLAVE_GROK_FIRST_CHUNK_WAIT_MS` (Grok ACP).
 
 **Web app types.**
 - The server's Rust types become the source of truth, and the TypeScript types in `packages/core` are generated from them, for example with ts-rs.
@@ -103,10 +114,31 @@
   - per-turn cleanup;
   - strict `init` checks.
 - New in the server:
-  - a per-install token on every request;
-  - a Host-header allowlist;
-  - explicit request-body limits;
+  - a per-install token, with the handoff below;
+  - a Host-header allowlist on every request, static files included;
   - request bodies parsed into typed structs.
+- Kept from today: the 1 MiB request-body limit and its 413 response, now set explicitly rather than inherited from Fastify's default.
+
+**Token handoff.** The web app sends no credentials today, so requiring a token needs a way to get it into the browser, and a small client change.
+- **The token.** The server generates a random token on first start. It stores it in the data directory, readable only by the user (0600).
+- **Bootstrap.**
+  - At startup, the server prints a launch URL that carries the token in its fragment: `http://127.0.0.1:8787/#token=…`. A fragment never reaches server logs or `Referer` headers. The server can also open that URL itself.
+  - The web app reads the fragment and removes it from the address bar.
+  - It exchanges the token once, at `POST /session`, for a session cookie marked `HttpOnly` and `SameSite=Strict`.
+- **Requests.** Every API request carries the cookie, including event streams and exports, which all go through `fetch` with `credentials: "include"`. Clients that aren't browsers, such as `curl`, send `Authorization: Bearer <token>` instead.
+- **Exempt from the token, but still Host-checked:**
+  - CORS preflights, which never carry credentials;
+  - the built web app's static files, which hold no secrets;
+  - `POST /session`, which checks the token itself.
+- **Development.** Vite serves the web app on port 5173 and the API runs on 8787. Both are `localhost` and therefore the same site, so the `SameSite=Strict` cookie is sent. CORS allows credentials only for the exact origins in `CONCLAVE_WEB_ORIGIN`.
+- **Client changes:**
+  - `credentials: "include"` on its `fetch` calls;
+  - reading the launch URL's fragment;
+  - a screen that asks the user to open the launch URL when there's no session.
+- **What it protects against.**
+  - **Other local users:** they can read neither the token file nor the launch URL.
+  - **Websites:** they can't make the browser send a `SameSite=Strict` cookie, can't read cross-origin responses, and can't get past the Host allowlist by DNS rebinding.
+  - **Not covered:** processes running as the same user can read the token, just as they can already read `state.json`.
 - Rust itself adds less than it sounds, because JavaScript is memory-safe too.
 
 **Speed.** Rust handles each event in microseconds and uses tens of MB less memory than Node, but users won't notice either. The visible gains:
@@ -116,9 +148,9 @@
 **Switching over.**
 - During the port, the Rust server runs alongside the TypeScript server on another port.
 - It becomes the default once three things hold:
-  - it passes the whole recorded contract, plus tests for the new security behavior;
+  - it passes the whole recorded contract, plus tests for the new security behavior, including the token handoff when the server serves the web app and in the Vite development setup;
   - it serves all four providers;
-  - it loads real `~/.conclave` data.
+  - it loads real data, both from `~/.conclave` and from a directory set with `CONCLAVE_DATA_DIR`.
 - The TypeScript server stays available for one release as a fallback, and is then removed.
 
 ## 5. Provider behavior
@@ -132,6 +164,8 @@
   - When on, a successful check is reused for a short set time, and any authentication or provider failure invalidates it immediately.
   - The setting's description states the tradeoff: within that time, a CLI that has switched to API-key or Console sign-in goes unnoticed, and a call could be billed.
 - **If the check turns out to dominate latency,** look for evidence the CLI reports before any model request, provider by provider, rather than starting billable work early.
+
+**Every Conclave turn is `Ephemeral`.** This is the library's session policy, so nothing a provider saves outlives the call. Claude runs with `--no-session-persistence`, and the other providers' files are removed after each turn.
 
 **Fixes to shared behavior go to the library.**
 - A problem in one of the four shared adapters is fixed in the library, and both Conclave and Pervue pick up the fix by bumping their pin.
@@ -182,7 +216,8 @@ These steps make up Stage 3 of the [runtime plan][runtime-stages]. Steps 1, 2, a
 1. **Record the HTTP contract** (§3).
 2. **Port storage and the HTTP API** against the contract, using the mock provider:
    - generate the web app's types;
-   - add authentication, the Host allowlist, and body limits, with their own tests.
+   - add the token and its handoff (including the web app's small client change), and the Host allowlist, with their own tests;
+   - keep the 1 MiB body limit, and every configuration variable, as §4 describes.
 3. **First milestone: one slice end to end,** for example the Panel mode with Gemini through the library.
 4. **Port the rest of the orchestrator** together with its tests.
 5. **Connect all four providers** through the library.
@@ -218,6 +253,7 @@ If the port stalls, the library's service API can be wrapped in a sidecar execut
 3. Caching the sign-in check: keep it off by default (recommended), and what time limit when it's on?
 4. Where does the OpenAI model list that's kept by hand live, and who updates it when OpenAI's models change?
 5. Does Conclave accept the library's stricter defaults, the environment allowlist and private workspaces, as they are?
+6. Should the session cookie expire, and how is the per-install token rotated?
 
 [runtime-proposal]: https://github.com/davletovb/pervue/blob/claude/eloquent-franklin-8qo1f1/docs/architecture/provider-runtime-extraction-proposal.md
 [runtime-stages]: https://github.com/davletovb/pervue/blob/claude/eloquent-franklin-8qo1f1/docs/architecture/provider-runtime-extraction-proposal.md#7-stages
