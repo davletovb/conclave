@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { createServer } from "node:https";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 import { WebSocketServer, WebSocket } from "ws";
 import { importKey, seal, open } from "../cloudflare/crypto.mjs";
 
 const executable = resolve(process.argv[2]);
-const root = mkdtempSync(join(tmpdir(), "seatline-web-roundtrip-"));
+// Provider workspaces require trusted ancestors; a shared /tmp cannot hold one.
+const root = mkdtempSync(join(process.cwd(), ".seatline-web-roundtrip-"));
 const certificate = join(root, "certificate.pem");
 const privateKey = join(root, "key.pem");
 const authority = join(root, "authority.pem");
@@ -62,7 +62,7 @@ echo '{"type":"turn.started"}'
 echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"Shared companion answer"}}'
 echo '{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":3}}'
 `); chmodSync(provider, 0o700);
-const env = { ...process.env, HOME: root, SEATLINE_DATA_DIR: join(root, "seatline"), CONCLAVE_PROVIDER_PATH: providerDir, SSL_CERT_FILE: authority };
+const env = { ...process.env, HOME: root, XDG_CACHE_HOME: join(root, "cache"), XDG_DATA_HOME: join(root, "data"), SEATLINE_DATA_DIR: join(root, "seatline"), CONCLAVE_PROVIDER_PATH: providerDir, SSL_CERT_FILE: authority };
 for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) delete env[name];
 execFileSync(executable, ["authorize", "conclave", "codex", "https://conclave.test", `--relay=${relay}`], { env, stdio: "ignore" });
 const broker = spawn(executable,["serve"],{env,stdio:"ignore"});
@@ -98,7 +98,8 @@ try {
     return terminal;
   };
   assert.equal((await request(1, { id: "status", provider: "codex", method: "status", params: null })).event.type, "completed");
-  assert.ok(records.some(value => value.id === "status" && value.event.type === "status" && value.event.status.authentication === "authenticated"));
+  const status = records.find(value => value.id === "status" && value.event.type === "status")?.event.status;
+  assert.equal(status?.authentication, "authenticated", `Provider status: ${JSON.stringify(status)}`);
   assert.equal((await request(2, { id: "turn", provider: "codex", method: "send", params: { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true } })).event.type, "completed");
   assert.ok(records.some(value => value.id === "turn" && value.event.type === "delta" && value.event.text.includes("Shared companion answer")));
   // Ciphertext replay must not schedule another model call or return another status.
