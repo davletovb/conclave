@@ -1,6 +1,8 @@
 import type { ModelRef, ProviderAdapter, ProviderEventSink, ProviderId, ProviderLimitSnapshot, ProviderRequest, ProviderResponse, ProviderStatus } from "@conclave/core";
 import { SeatlineClient, type SeatlineEvent } from "./companion";
 
+const DEFAULT_MODEL = "seatline:default";
+
 export class SeatlineProvider implements ProviderAdapter {
   constructor(readonly id: Exclude<ProviderId, "mock">, readonly label: string,
     private readonly provider: string, private readonly client: SeatlineClient) {}
@@ -30,7 +32,8 @@ export class SeatlineProvider implements ProviderAdapter {
   async listModels(): Promise<ModelRef[]> {
     const state = await this.state();
     if (state.authentication !== "authenticated" || !this.acceptedSignIn(state.sign_in)) return [];
-    return state.models.map(model => ({ provider: this.id, model: model.id, label: model.label, source: "subscription" }));
+    return [{ provider: this.id, model: DEFAULT_MODEL, label: `${this.label} (provider default)`, source: "subscription" as const, isDefault: true },
+      ...state.models.map(model => ({ provider: this.id, model: model.id, label: model.label, source: "subscription" as const }))];
   }
 
   async limits(): Promise<ProviderLimitSnapshot> {
@@ -48,7 +51,7 @@ export class SeatlineProvider implements ProviderAdapter {
     await this.client.request(this.provider, "send", {
       system: [request.system, ...request.messages.filter(m => m.role === "system").map(m => m.content)].filter(Boolean).join("\n\n") || null,
       messages: request.messages.filter(m => m.role !== "system").map(m => ({ role: m.role, text: m.content })),
-      model: request.model, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true,
+      model: request.model === DEFAULT_MODEL ? null : request.model, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true,
     }, event => {
       if (event.type === "status" && !this.acceptedSignIn(event.status?.sign_in)) throw new Error("Provider sign-in changed; subscription account required");
       if (event.type === "delta" && event.text) { content += event.text; emit?.({ type: "text_delta", delta: event.text }); }
@@ -58,4 +61,3 @@ export class SeatlineProvider implements ProviderAdapter {
     return { provider: this.id, model: request.model, content, latencyMs: Date.now() - startedAt };
   }
 }
-
