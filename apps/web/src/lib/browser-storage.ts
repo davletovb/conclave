@@ -1,4 +1,4 @@
-import type { StorageBackend } from "../../../../server/src/state/store";
+import type { StorageBackend } from "../../../server/src/state/store";
 
 /** Conclave's own persistence backend. IndexedDB records replace app-server files. */
 export class BrowserStorage implements StorageBackend {
