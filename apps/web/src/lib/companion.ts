@@ -56,11 +56,11 @@ async function connect() {
     let settled = false;
     const timer = setTimeout(() => { reject(new Error("Seatline companion is offline. Open the companion and try again.")); current.close(); }, 15_000);
     current.onopen = () => current.send(JSON.stringify({ type: "auth", token: pair.token }));
-    current.onmessage = event => {
-      if (typeof event.data !== "string" || event.data.length > 768 * 1024 || ++inbound > 128) { current.close(1008); inbound--; return; }
+    current.onmessage = message => {
+      if (typeof message.data !== "string" || message.data.length > 768 * 1024 || ++inbound > 128) { current.close(1008); inbound--; return; }
       incoming = incoming.then(async () => {
         if (current !== socket) return;
-        const envelope = JSON.parse(event.data);
+        const envelope = JSON.parse(message.data);
         if (envelope.type === "ready" || envelope.type === "peer") {
           peerReady = envelope.peer === true || envelope.connected === true;
           if (peerReady) { clearTimeout(timer); settled = true; resolve(); }
