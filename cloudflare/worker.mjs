@@ -10,8 +10,21 @@ export default {
     if (url.pathname === "/pair" && request.method === "POST") {
       if (Number(request.headers.get("content-length")) > 2048) return new Response("Too large", { status: 413 });
       let input;
-      try { const text = await request.text(); if (text.length > 2048) throw Error(); input = JSON.parse(text); }
+      try {
+        const reader = request.body?.getReader();
+        if (!reader) throw Error();
+        const decoder = new TextDecoder("utf-8", { fatal: true });
+        let text = ""; let bytes = 0;
+        while (true) {
+          const chunk = await reader.read(); if (chunk.done) break;
+          bytes += chunk.value.byteLength;
+          if (bytes > 2048) { await reader.cancel(); return new Response("Too large", { status: 413 }); }
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+        input = JSON.parse(text + decoder.decode());
+      }
       catch { return new Response("Invalid pairing request", { status: 400 }); }
+      if (!input || typeof input.app !== "string" || typeof input.origin !== "string") return new Response("Invalid pairing request", { status: 400 });
       const origins = JSON.parse(env.APP_ORIGINS ?? "{}")[input.app];
       if (!Array.isArray(origins) || !origins.includes(input.origin)) return new Response("App origin not approved", { status: 403 });
       const id = token();
