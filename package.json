@@ -10,6 +10,7 @@
     "test": "pnpm -r test"
   },
   "devDependencies": {
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "ws": "^8.18.3"
   }
 }
