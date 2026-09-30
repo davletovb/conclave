@@ -14,12 +14,13 @@ jobs:
           repository: davletovb/seatline
           ref: codex/shared-companion
           path: seatline-runtime
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
       - uses: pnpm/action-setup@v4
         with:
           version: 10.15.1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          package-manager-cache: false
       - run: pnpm install --no-frozen-lockfile
       - run: rustup toolchain install stable --profile minimal
       - run: cargo +stable build --manifest-path seatline-runtime/Cargo.toml --locked -p seatline-companion

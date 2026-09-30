@@ -1,7 +1,7 @@
 // Integration test tooling only: production Seatline and its transport are Rust.
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { createServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -57,8 +57,10 @@ echo '{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":3}}'
 `); chmodSync(provider, 0o700);
 const env = { ...process.env, HOME: root, SEATLINE_DATA_DIR: join(root, "seatline"), CONCLAVE_PROVIDER_PATH: providerDir, SSL_CERT_FILE: certificate };
 execFileSync(executable, ["authorize", "conclave", "codex", "https://conclave.test", `--relay=${relay}`], { env, stdio: "ignore" });
+const broker = spawn(executable,["serve"],{env,stdio:"ignore"});
+for (let i=0;i<100 && !existsSync(join(env.SEATLINE_DATA_DIR,"broker.sock"));i++) await new Promise(resolve=>setTimeout(resolve,20));
 let helper; let browser; const records = []; const waiting = new Map();
-const timeout = setTimeout(() => { console.error("Native web integration timed out"); helper?.kill(); process.exitCode = 1; }, 40_000);
+const timeout = setTimeout(() => { console.error("Native web integration timed out"); helper?.kill(); broker.kill(); process.exit(1); }, 40_000);
 try {
   helper = spawn(executable, ["pair", "conclave", relay, "https://conclave.test"], { env, stdio: ["ignore", "pipe", "inherit"] });
   let printed = "";
@@ -73,13 +75,14 @@ try {
   const [id, token, secret] = link.split(":"); assert.equal(id, credentials.id); assert.equal(token, credentials.browser);
   const key = await importKey(Buffer.from(secret, "base64url"));
   browser = new WebSocket(`${relay.replace("https:", "wss:")}/channels/${id}/browser`, { ca: readFileSync(certificate), headers: { origin: "https://conclave.test" } });
-  const ready = new Promise(resolve => browser.on("message", async data => {
+  let receiving = Promise.resolve();
+  const ready = new Promise(resolve => browser.on("message", data => { receiving = receiving.then(async () => {
     const value = JSON.parse(String(data));
     if ((value.type === "ready" && value.peer) || (value.type === "peer" && value.connected)) { resolve(); return; }
     if (value.type !== "data") return;
     const packet = await open(key, "helper", value); records.push(packet);
     if (["completed", "failed", "stopped"].includes(packet.event?.type)) waiting.get(packet.id)?.(packet);
-  }));
+  }).catch(error => {console.error(error);process.exit(1);}); }));
   await once(browser, "open"); browser.send(JSON.stringify({ type: "auth", token })); await ready;
   const request = async (seq, value) => {
     const terminal = new Promise(resolve => waiting.set(value.id, resolve));
@@ -98,7 +101,7 @@ try {
 } finally {
   clearTimeout(timeout); browser?.terminate(); helper?.kill();
   for (const socket of sockets.clients) socket.terminate(); sockets.close(); server.close();
-  // The test-started broker is an independent shared process; retire only its test instance.
-  try { if (env.SEATLINE_DATA_DIR) { const lock = join(env.SEATLINE_DATA_DIR, "broker.pid"); if (readFileSync(lock, "utf8")) process.kill(Number(readFileSync(lock, "utf8"))); } } catch { /* broker cleanup handled by runner teardown */ }
+  broker.kill();
+  await once(broker,"exit").catch(() => {});
   rmSync(root, { recursive: true, force: true });
 }

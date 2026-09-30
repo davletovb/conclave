@@ -23,7 +23,7 @@ describe("Conclave browser engine persistence", () => {
     const recovered = new StateStore("conclave", new BrowserStorage(database)); await recovered.init();
     expect((await recovered.getConversation(started.conversationId))?.messages.length).toBeGreaterThanOrEqual(2);
     expect((await recovered.getRun(started.runId))?.status).toBe("completed");
-    expect(await manager.inspect(started.runId)).toMatchObject({ runId: started.runId });
+    expect(await manager.inspect(started.runId)).toMatchObject({ run: { id: started.runId } });
     await recovered.deleteConversation(started.conversationId);
     expect(await recovered.getConversation(started.conversationId)).toBeNull();
   });

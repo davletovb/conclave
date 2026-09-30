@@ -140,3 +140,8 @@ export class SeatlineClient {
 export function disconnectCompanion() {
   sessionStorage.removeItem(STORAGE); socket?.close(); fail(new Error("Seatline pairing disconnected"));
 }
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => socket?.close());
+  window.addEventListener("pageshow", event => {if (event.persisted) location.reload();});
+}
