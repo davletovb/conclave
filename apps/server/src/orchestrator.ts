@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { readEnvironment } from "./environment.js";
 import type {
   ChatMessage,
   ModelRef,
@@ -151,7 +151,7 @@ export class Orchestrator {
     options: OrchestratorOptions = {},
   ) {
     const configured = options.stepStallTimeoutMs
-      ?? Number(process.env.CONCLAVE_STEP_STALL_TIMEOUT_MS ?? DEFAULT_STEP_STALL_TIMEOUT_MS);
+      ?? Number(readEnvironment("CONCLAVE_STEP_STALL_TIMEOUT_MS") ?? DEFAULT_STEP_STALL_TIMEOUT_MS);
     if (!Number.isInteger(configured) || configured < 10) {
       throw new Error("stepStallTimeoutMs must be an integer of at least 10ms");
     }
@@ -1031,7 +1031,7 @@ ${transcript(steps)}`;
     request: OrchestrationRequest,
     options: RunOptions = {},
   ): Promise<OrchestrationResult> {
-    const runId = options.runId ?? randomUUID();
+    const runId = options.runId ?? crypto.randomUUID();
     const context: RunContext = {
       runId,
       emit: options.emit,

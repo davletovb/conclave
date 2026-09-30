@@ -1,4 +1,5 @@
-import { companionFetch, usesCompanion } from "./companion";
+import { usesCompanion } from "./companion";
+import { hostedFetch } from "./hosted-api";
 import type {
   Conversation,
   ConversationExportFormat,
@@ -16,7 +17,7 @@ import type {
 export const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
 
 function request(path: string, init?: RequestInit) {
-  return usesCompanion ? companionFetch(path, init) : fetch(`${API}${path}`, init);
+  return usesCompanion ? hostedFetch(path, init) : fetch(`${API}${path}`, init);
 }
 
 export async function readJson<T>(response: Response): Promise<T> {

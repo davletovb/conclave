@@ -1,43 +1,43 @@
-# Hosted Conclave with shared Seatline
+# Hosted Conclave and shared Seatline
 
-Conclave's website can be served as static files from Cloudflare Pages. Users
-install the Seatline companion once and open Conclave from its launcher. A
-private pairing link connects the browser to Conclave's local app engine through
-the Seatline Cloudflare relay. The engine uses stdio and opens no HTTP listener.
+Conclave owns its app logic. The Cloudflare-hosted browser runs orchestration,
+budgets, history, run inspection, cancellation and exports. History and run event
+logs are stored in IndexedDB under the website's origin. The existing app server
+remains available for standalone development and existing local histories.
 
-The shared distribution includes Node and both Conclave and TabBeam workers;
-users do not install Node, Cargo or separate companion applications. Conclave
-owns its orchestration, budgets, history, exports, run inspection, cancellation
-and recovery. Seatline owns provider execution and shared scheduling. Existing
-Conclave state at `~/.conclave` is preserved.
+Seatline remains provider-neutral. Its shared native companion exposes provider
+status, turns and scoped sessions to multiple authorized apps. No Conclave code,
+Conclave storage, or Node runtime is included in Seatline. Only provider frames
+pass through the encrypted web connection.
 
-Build the web app with `VITE_SEATLINE_RELAY=https://YOUR_SEATLINE_RELAY` and deploy
-`apps/web/dist` to Pages. Configure that exact website origin in the relay's
-`APP_ORIGINS` and the installed Conclave grant. Production web builds require
-this pairing transport; development keeps the existing local API mode unless
-the relay environment variable is set. Local development HTTP mode remains
-available with `pnpm dev`.
+Build the web app with `VITE_SEATLINE_RELAY=https://YOUR_RELAY` and deploy
+`apps/web/dist` to Cloudflare Pages. Conclave's relay Worker and Durable Object
+live in `cloudflare/`; set the exact website origin in `APP_ORIGINS` before
+deploying. Locally authorize Conclave in Seatline:
 
-The worker entry point is `apps/server/dist/companion.js`. After building, run it
-with Node using protocol 1 framed stdio. For development authorization and
-pairing commands, see [Seatline companion setup](https://github.com/davletovb/seatline/blob/codex/shared-companion/companion/README.md).
-No provider credentials enter Cloudflare or the browser. App messages are
-encrypted with a locally generated pairing key; pairing secrets use the URL
-fragment, are removed immediately, and remain only in the browser tab session.
-The relay can observe traffic timing and encrypted frame sizes.
+```sh
+seatline-companion authorize conclave codex,claude,gemini,grok https://YOUR_CONCLAVE --relay=https://YOUR_RELAY
+seatline-companion pair conclave https://YOUR_RELAY https://YOUR_CONCLAVE --open
+```
 
-A website disconnection ends its subscriptions, while model runs continue in
-the companion. The existing event cursor restores output when the website
-reconnects. Requests whose acknowledgements were lost are surfaced for inspection
-and are never automatically retried, avoiding duplicate model calls. Pairing
-expires after 24 hours and can be removed with Disconnect.
+This installs/uses one shared Seatline binary. Users need no Node installation
+and no per-app companion executable. Future web apps implement the same neutral
+protocol and keep their product policy in their own code.
 
-Subscription and Google cloud-account sign-ins are accepted; API-key and unknown
-sign-ins are refused. The shared CLI adapters cannot currently supply the
-OpenAI subscription-quota telemetry offered by the standalone app-server mode;
-the UI reports it unavailable. Provider limits still apply at the provider.
-Provider process warming is unchanged.
+Pairing lasts 24 hours, is scoped to the exact origin, and uses distinct helper
+and browser credentials. The encryption key is generated locally and never sent
+to the relay. URL fragments are cleared immediately and secrets stay in tab
+session storage. Cloudflare can observe connection timing and encrypted sizes.
 
-The PR builds a portable shared installer. Publisher signing/notarization,
-Cloudflare deployment, production origins and the final Chrome extension ID are
-release configuration steps. No deployment is performed by this change.
+One browser tab owns Conclave's engine. Closing/reloading it interrupts active
+runs; reopening marks persisted unfinished runs interrupted, with an explicit
+resume action. Interrupted provider calls are cancelled. Requests are never
+automatically resubmitted after a lost acknowledgement. History is scoped to
+the browser profile and origin, not synchronized between devices.
+
+Subscription sign-ins and Google's cloud-account sign-in are accepted. API-key
+and unknown sign-ins are refused. Quota telemetry is unavailable through the
+shared adapters; provider limits still apply. Provider warming is unchanged.
+
+Cloudflare deployment, native publisher signing and production origin/extension
+configuration are release steps. This change does not deploy or publish.

@@ -20,6 +20,4 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
-      - run: node scripts/companion-smoke.mjs
-      - run: pnpm --filter @conclave/server deploy --prod --legacy deployed-server
-      - run: node scripts/companion-smoke.mjs deployed-server/dist/companion.js
+      - run: node --test cloudflare/*.test.mjs

@@ -1,5 +1,5 @@
 import type { ModelRef, ProviderAdapter, ProviderEventSink, ProviderId, ProviderLimitSnapshot, ProviderRequest, ProviderResponse, ProviderStatus } from "@conclave/core";
-import { SeatlineClient, type SeatlineEvent } from "../seatline-client.js";
+import { SeatlineClient, type SeatlineEvent } from "./companion";
 
 export class SeatlineProvider implements ProviderAdapter {
   constructor(readonly id: Exclude<ProviderId, "mock">, readonly label: string,
@@ -58,3 +58,4 @@ export class SeatlineProvider implements ProviderAdapter {
     return { provider: this.id, model: request.model, content, latencyMs: Date.now() - startedAt };
   }
 }
+

@@ -1,6 +1,7 @@
 type Pair = { id: string; token: string; key: string; sent: number; received: number };
-type Packet = { id: string; type: string; status?: number; headers?: Record<string, string>; data?: string };
-type Pending = { resolve: (response: Response) => void; reject: (error: Error) => void; controller: ReadableStreamDefaultController<Uint8Array>; dispose: () => void; headed: boolean };
+export type SeatlineEvent = { type: string; text?: string; reason?: string; status?: { availability: string; authentication: string; sign_in?: string; models: Array<{id:string;label:string}> }; usage?: {input_tokens?:number;output_tokens?:number} };
+type Packet = {id: string; event: SeatlineEvent};
+type Pending = { resolve: () => void; reject: (error: Error) => void; emit: (event: SeatlineEvent) => void; dispose: () => void };
 const STORAGE = "conclave.seatline.pair.v1";
 const relayUrl = import.meta.env.VITE_SEATLINE_RELAY as string | undefined;
 export const usesCompanion = Boolean(relayUrl) || !import.meta.env.DEV;
@@ -35,8 +36,8 @@ function pairing(): Pair {
 
 function fail(error: Error) {
   peerReady = false;
-  for (const item of pending.values()) { item.dispose(); if (item.headed) item.controller.error(error); else item.reject(error); }
-  pending.clear(); streams.clear(); connected = undefined;
+  for (const item of pending.values()) { item.dispose(); item.reject(error); }
+  pending.clear(); connected = undefined;
 }
 
 async function connect() {
@@ -73,19 +74,18 @@ async function connect() {
         const packet: Packet = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(clear));
         pair.received = envelope.seq; const saved = pairing(); saved.received = envelope.seq; sessionStorage.setItem(STORAGE, JSON.stringify(saved));
         const item = pending.get(packet.id); if (!item) return;
-        if (packet.type === "head" && !item.headed) {
-          if (!Number.isInteger(packet.status) || packet.status! < 200 || packet.status! > 599) throw new Error("Invalid companion status");
-          item.headed = true;
-          // The stream is created by companionFetch and attached below.
-          item.resolve(new Response(streams.get(packet.id)!, { status: packet.status, headers: packet.headers }));
-        } else if (packet.type === "chunk" && item.headed && typeof packet.data === "string") {
-          const bytes = from64(packet.data);
-          if (bytes.length > 16384 || (item.controller.desiredSize ?? 0) < -4 * 1024 * 1024) throw new Error("Companion stream queue is full");
-          item.controller.enqueue(bytes);
-        } else if (packet.type === "end") {
-          pending.delete(packet.id); streams.delete(packet.id); item.dispose();
-          if (item.headed) item.controller.close(); else item.reject(new Error("Companion response ended without headers"));
-        } else { throw new Error("Invalid companion response order"); }
+        if (!packet.event || typeof packet.event.type !== "string") throw new Error("Invalid companion provider event");
+        const event = packet.event;
+        if (["completed","failed","stopped"].includes(event.type)) {
+          pending.delete(packet.id); item.dispose();
+          if (event.type === "completed") item.resolve();
+          else { const error = new Error(event.type === "stopped" ? "Run cancelled" : event.reason ?? "Provider failed"); if (event.type === "stopped") error.name = "AbortError"; item.reject(error); }
+        } else {
+          try {item.emit(event);} catch (error) {
+            pending.delete(packet.id); item.dispose(); item.reject(error instanceof Error ? error : new Error("Provider event rejected"));
+            void send({id:crypto.randomUUID(),method:"cancel",target:packet.id}).catch(() => {});
+          }
+        }
       }).catch(() => { fail(new Error("Invalid encrypted companion response")); current.close(1008); }).finally(() => inbound--);
     };
     current.onclose = () => { clearTimeout(timer); if (!settled) reject(new Error("Seatline companion is unavailable or pairing expired")); if (current === socket) fail(new Error("Seatline connection closed")); };
@@ -93,7 +93,6 @@ async function connect() {
   });
   return connected;
 }
-const streams = new Map<string, ReadableStream<Uint8Array>>();
 
 async function send(value: unknown) {
   const target = socket;
@@ -115,31 +114,27 @@ async function send(value: unknown) {
   return outgoing;
 }
 
-export async function companionFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  if (init.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
-  await connect();
-  if (init.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
-  if (pending.size >= 32) throw new Error("Seatline request queue is full");
-  const id = crypto.randomUUID();
-  return new Promise<Response>((resolve, reject) => {
-    const abort = () => {
-      const item = pending.get(id); if (!item) return;
-      pending.delete(id); streams.delete(id); item.dispose();
-      const error = new DOMException("Request aborted", "AbortError");
-      if (item.headed) item.controller.error(error); else reject(error);
-      void send({ id, type: "abort" }).catch(() => {});
-    };
-    let controller!: ReadableStreamDefaultController<Uint8Array>;
-    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; }, cancel: abort }, { highWaterMark: 1024 * 1024, size: bytes => bytes.length });
-    const timer = setTimeout(() => { if (!pending.get(id)?.headed) { abort(); reject(new Error("Seatline request timed out")); } }, 60_000);
-    const dispose = () => { clearTimeout(timer); init.signal?.removeEventListener("abort", abort); };
-    streams.set(id, stream); pending.set(id, { resolve, reject, controller, dispose, headed: false });
-    init.signal?.addEventListener("abort", abort, { once: true });
-    if (init.body !== undefined && init.body !== null && typeof init.body !== "string") { abort(); reject(new Error("Companion requests require a JSON body")); return; }
-    void send({ id, type: "request", path, method: init.method ?? "GET", body: init.body }).catch(error => {
-      pending.delete(id); streams.delete(id); dispose(); reject(error);
+/** The companion only exposes neutral Seatline provider operations. */
+export class SeatlineClient {
+  async request(provider: string, method: string, params: unknown, emit: (event: SeatlineEvent) => void, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
+    await connect();
+    if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
+    if (pending.size >= 32) throw new Error("Seatline request queue is full");
+    const id = crypto.randomUUID();
+    return new Promise<void>((resolve,reject) => {
+      const abort = () => {
+        const item = pending.get(id); if (!item) return;
+        pending.delete(id); item.dispose(); reject(new DOMException("Run cancelled", "AbortError"));
+        void send({id:crypto.randomUUID(),method:"cancel",target:id}).catch(() => {});
+      };
+      const timer = setTimeout(() => {abort();},16*60_000);
+      const dispose = () => {clearTimeout(timer);signal?.removeEventListener("abort",abort);};
+      pending.set(id,{resolve,reject,emit,dispose});
+      signal?.addEventListener("abort",abort,{once:true});
+      void send({id,provider,method,params}).catch(error => {pending.delete(id);dispose();reject(error);});
     });
-  });
+  }
 }
 
 export function disconnectCompanion() {
