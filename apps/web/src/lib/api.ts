@@ -1,3 +1,5 @@
+import { usesCompanion } from "./companion";
+import { hostedFetch } from "./hosted-api";
 import type {
   Conversation,
   ConversationExportFormat,
@@ -14,6 +16,10 @@ import type {
 
 export const API = import.meta.env.VITE_CONCLAVE_API ?? "http://localhost:8787";
 
+function request(path: string, init?: RequestInit) {
+  return usesCompanion ? hostedFetch(path, init) : fetch(`${API}${path}`, init);
+}
+
 export async function readJson<T>(response: Response): Promise<T> {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -26,11 +32,12 @@ export async function readJson<T>(response: Response): Promise<T> {
 }
 
 function get<T>(path: string, init?: RequestInit) {
-  return fetch(`${API}${path}`, init).then(response => readJson<T>(response));
+  return request(path, init).then(response => readJson<T>(response));
 }
 
 function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
-  const enabled = localStorage.getItem("conclave.webSearch") === "shared";
+  // Shared web search needs a Conclave server with SearXNG behind it, which the hosted app does not have.
+  const enabled = !usesCompanion && localStorage.getItem("conclave.webSearch") === "shared";
   if (!enabled) return body;
   return {
     ...body,
@@ -42,6 +49,8 @@ function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
 }
 
 export const api = {
+  /** `persistent: false` means the browser did not promise to keep the hosted app's history. */
+  health: () => get<{ ok: boolean; persistent?: boolean }>("/health"),
   models: () => get<ModelRef[]>("/models"),
   providers: () => get<ProviderStatus[]>("/providers"),
   limits: () => get<ProviderLimitSnapshot[]>("/provider-limits"),
@@ -58,7 +67,7 @@ export const api = {
   deleteConversation: (id: string) => get<{ id: string; deleted: true }>(`/conversations/${id}`, { method: "DELETE" }),
 
   async exportConversation(id: string, format: ConversationExportFormat) {
-    const response = await fetch(`${API}/conversations/${id}/export?format=${format}`);
+    const response = await request(`/conversations/${id}/export?format=${format}`);
     if (!response.ok) await readJson(response);
     const disposition = response.headers.get("content-disposition") ?? "";
     const named = /filename="([^"]+)"/.exec(disposition)?.[1];
@@ -75,7 +84,7 @@ export const api = {
   cancelRun: (id: string) => get<StoredRun>(`/runs/${id}/cancel`, { method: "POST" }),
   resumeRun: (id: string) => get<StartRunResponse>(`/runs/${id}/resume`, { method: "POST" }),
   eventStream: (id: string, after: number, follow: boolean, signal?: AbortSignal) =>
-    fetch(`${API}/runs/${id}/events?after=${after}&follow=${follow ? 1 : 0}`, { signal }),
+    request(`/runs/${id}/events?after=${after}&follow=${follow ? 1 : 0}`, { signal }),
 };
 
 /** Hands a generated file to the browser without leaking the object URL. */

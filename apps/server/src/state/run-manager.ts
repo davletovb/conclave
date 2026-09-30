@@ -8,7 +8,7 @@ import type {
 } from "@conclave/core";
 import { Orchestrator } from "../orchestrator.js";
 import { formatWebEvidence, SearxngSearchProvider } from "../search/searxng.js";
-import { FileStateStore, type ListOptions } from "./file-store.js";
+import type { StateStore, ListOptions } from "./store.js";
 import { inspectRun } from "./run-inspection.js";
 
 type RunListener = (record: RunEventRecord) => void;
@@ -38,7 +38,7 @@ export class RunManager {
 
   constructor(
     private readonly orchestrator: Orchestrator,
-    private readonly store: FileStateStore,
+    private readonly store: StateStore,
   ) {}
 
   async init() {

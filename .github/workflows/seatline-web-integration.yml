@@ -1,0 +1,27 @@
+name: Native Seatline web integration
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: davletovb/seatline
+          ref: dc1086582c8b98498aa48dae91c8d174bc3cfc3c
+          path: seatline-runtime
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo +stable build --manifest-path seatline-runtime/Cargo.toml --locked -p seatline-companion
+      - run: node scripts/seatline-web-roundtrip.mjs seatline-runtime/target/debug/seatline-companion

@@ -1,5 +1,3 @@
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
 import type {
   RunAttemptInspection,
   RunEventRecord,
@@ -9,43 +7,12 @@ import type {
   StoredRun,
 } from "@conclave/core";
 import { emptyRunUsage } from "@conclave/core";
-import type { FileStateStore } from "./file-store.js";
+import type { StateStore } from "./store.js";
 
 function durationMs(start?: string, end?: string) {
   if (!start || !end) return undefined;
   const duration = Date.parse(end) - Date.parse(start);
   return Number.isFinite(duration) && duration >= 0 ? duration : undefined;
-}
-
-async function readRecords(path: string) {
-  try {
-    const raw = await readFile(path, "utf8");
-    const records: RunEventRecord[] = [];
-    for (const line of raw.split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      try {
-        records.push(JSON.parse(line) as RunEventRecord);
-      } catch {
-        // Preserve all complete records if the process stopped during a final append.
-      }
-    }
-    return records;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-}
-
-async function allRecords(dataDir: string, runId: string) {
-  const runsDir = join(dataDir, "runs");
-  const entries = await readdir(runsDir, { withFileTypes: true });
-  const names = entries
-    .filter(entry => entry.isFile())
-    .map(entry => entry.name)
-    .filter(name => name === `${runId}.ndjson` || name.startsWith(`${runId}.attempt-`) && name.endsWith(".ndjson"));
-
-  const records = (await Promise.all(names.map(name => readRecords(join(runsDir, name))))).flat();
-  return records.sort((a, b) => a.attempt - b.attempt || a.seq - b.seq);
 }
 
 function attemptStatus(records: RunEventRecord[], fallback: RunStatus): RunStatus {
@@ -189,8 +156,8 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
   };
 }
 
-export async function inspectRun(store: FileStateStore, run: StoredRun): Promise<RunInspection> {
-  const records = await allRecords(store.dataDir, run.id);
+export async function inspectRun(store: StateStore, run: StoredRun): Promise<RunInspection> {
+  const records = await store.readRunEventAttempts(run.id);
   const grouped = new Map<number, RunEventRecord[]>();
   for (const record of records) {
     const group = grouped.get(record.attempt) ?? [];

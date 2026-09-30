@@ -1,4 +1,5 @@
 import React from "react";
+import { usesCompanion } from "../lib/companion";
 import type { ModelRef, OrchestrationMode } from "@conclave/core";
 import {
   Icon,
@@ -64,7 +65,7 @@ export function RunSetup(props: SetupProps) {
     loading, workflowSlot,
   } = props;
   const [webSearchEnabled, setWebSearchEnabled] = React.useState(
-    () => localStorage.getItem("conclave.webSearch") === "shared",
+    () => !usesCompanion && localStorage.getItem("conclave.webSearch") === "shared",
   );
 
   const meta = (id: OrchestrationMode) => modes.find(item => item.id === id)!;
@@ -201,18 +202,20 @@ export function RunSetup(props: SetupProps) {
       <div className="section">
         <header>
           <span className="eyebrow">Web evidence</span>
-          <span className="num">{webSearchEnabled ? "ON" : "OFF"}</span>
+          <span className="num">{usesCompanion ? "UNAVAILABLE" : webSearchEnabled ? "ON" : "OFF"}</span>
         </header>
         <button
           type="button"
           className="mode"
           aria-pressed={webSearchEnabled}
-          disabled={loading}
+          disabled={loading || usesCompanion}
           onClick={toggleWebSearch}
         >
           <strong>Shared web search</strong>
           <span>
-            Search once before the run and give every selected model the same SearXNG evidence packet. Requires CONCLAVE_SEARXNG_URL on the server.
+            {usesCompanion
+              ? "Not available in the hosted app: shared search needs a Conclave server with SearXNG behind it."
+              : "Search once before the run and give every selected model the same SearXNG evidence packet. Requires CONCLAVE_SEARXNG_URL on the server."}
           </span>
         </button>
       </div>

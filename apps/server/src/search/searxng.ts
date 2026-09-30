@@ -1,3 +1,4 @@
+import { readEnvironment } from "../environment.js";
 import type { WebSearchConfig, WebSearchEvidence, WebSearchResult, WebSearchStatus } from "@conclave/core";
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -18,7 +19,7 @@ type SearxngResponse = {
 };
 
 function configuredBaseUrl() {
-  return process.env.CONCLAVE_SEARXNG_URL?.trim().replace(/\/$/, "") ?? "";
+  return readEnvironment("CONCLAVE_SEARXNG_URL")?.trim().replace(/\/$/, "") ?? "";
 }
 
 function cleanText(value: unknown, maxLength: number) {
@@ -88,7 +89,7 @@ export class SearxngSearchProvider {
     if (config.language?.trim()) url.searchParams.set("language", config.language.trim());
     if (config.timeRange) url.searchParams.set("time_range", config.timeRange);
 
-    const timeoutMs = Number(process.env.CONCLAVE_SEARCH_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
+    const timeoutMs = Number(readEnvironment("CONCLAVE_SEARCH_TIMEOUT_MS") ?? DEFAULT_TIMEOUT_MS);
     const timeoutController = new AbortController();
     const timeout = setTimeout(() => timeoutController.abort(), Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS);
     const onAbort = () => timeoutController.abort();

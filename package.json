@@ -7,9 +7,10 @@
     "dev": "pnpm --parallel --filter @conclave/server --filter @conclave/web dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test && node scripts/check-web-bundle-boundary.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "ws": "^8.18.3"
   }
 }
