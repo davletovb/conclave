@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: davletovb/seatline
-          ref: codex/shared-companion
+          ref: 1bab40697bb3f9cba6431fe3c490a85e36981250
           path: seatline-runtime
       - uses: pnpm/action-setup@v4
         with:
