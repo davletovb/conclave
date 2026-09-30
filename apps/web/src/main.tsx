@@ -21,6 +21,7 @@ import type {
   WorkflowGraph,
   WorkflowPreset,
 } from "@conclave/core";
+import { usesCompanion, disconnectCompanion } from "./lib/companion";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
 import { answerPhase, finalAnswerStepId, followDistance } from "./lib/final-step";
 import { collapsePrompt } from "./lib/text";
@@ -1177,6 +1178,10 @@ function App() {
       />
 
       <div className="workspace">
+        {usesCompanion && <div className="banner" role="status">
+          <p>Use your shared Seatline companion. Open Conclave from Seatline to pair this browser.</p>
+          <button type="button" className="btn btn-ghost" onClick={() => { disconnectCompanion(); location.reload(); }}>Disconnect</button>
+        </div>}
         <header className="topbar">
           {!railOpen && (
             <button type="button" className="btn btn-ghost btn-icon" onClick={() => setRailOpen(true)} aria-label="Show conversation rail">
