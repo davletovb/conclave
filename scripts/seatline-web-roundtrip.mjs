@@ -13,7 +13,14 @@ const executable = resolve(process.argv[2]);
 const root = mkdtempSync(join(tmpdir(), "seatline-web-roundtrip-"));
 const certificate = join(root, "certificate.pem");
 const privateKey = join(root, "key.pem");
-execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", privateKey, "-out", certificate, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"], { stdio: "ignore" });
+const authority = join(root, "authority.pem");
+const authorityKey = join(root, "authority-key.pem");
+const certificateRequest = join(root, "certificate-request.pem");
+const certificateExtensions = join(root, "certificate-extensions.conf");
+execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", authorityKey, "-out", authority, "-days", "1", "-subj", "/CN=Seatline Integration Root", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"], { stdio: "ignore" });
+execFileSync("openssl", ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", privateKey, "-out", certificateRequest, "-subj", "/CN=localhost"], { stdio: "ignore" });
+writeFileSync(certificateExtensions, "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n");
+execFileSync("openssl", ["x509", "-req", "-in", certificateRequest, "-CA", authority, "-CAkey", authorityKey, "-CAcreateserial", "-out", certificate, "-days", "1", "-extfile", certificateExtensions], { stdio: "ignore" });
 const credentials = { id: "a".repeat(64), helper: "b".repeat(64), browser: "c".repeat(64) };
 const peers = new Map();
 const server = createServer({ key: readFileSync(privateKey), cert: readFileSync(certificate) }, async (request, response) => {
@@ -55,7 +62,8 @@ echo '{"type":"turn.started"}'
 echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"Shared companion answer"}}'
 echo '{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":3}}'
 `); chmodSync(provider, 0o700);
-const env = { ...process.env, HOME: root, SEATLINE_DATA_DIR: join(root, "seatline"), CONCLAVE_PROVIDER_PATH: providerDir, SSL_CERT_FILE: certificate };
+const env = { ...process.env, HOME: root, SEATLINE_DATA_DIR: join(root, "seatline"), CONCLAVE_PROVIDER_PATH: providerDir, SSL_CERT_FILE: authority };
+for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) delete env[name];
 execFileSync(executable, ["authorize", "conclave", "codex", "https://conclave.test", `--relay=${relay}`], { env, stdio: "ignore" });
 const broker = spawn(executable,["serve"],{env,stdio:"ignore"});
 for (let i=0;i<100 && !existsSync(join(env.SEATLINE_DATA_DIR,"broker.sock"));i++) await new Promise(resolve=>setTimeout(resolve,20));
@@ -74,7 +82,7 @@ try {
   });
   const [id, token, secret] = link.split(":"); assert.equal(id, credentials.id); assert.equal(token, credentials.browser);
   const key = await importKey(Buffer.from(secret, "base64url"));
-  browser = new WebSocket(`${relay.replace("https:", "wss:")}/channels/${id}/browser`, { ca: readFileSync(certificate), headers: { origin: "https://conclave.test" } });
+  browser = new WebSocket(`${relay.replace("https:", "wss:")}/channels/${id}/browser`, { ca: readFileSync(authority), headers: { origin: "https://conclave.test" } });
   let receiving = Promise.resolve();
   const ready = new Promise(resolve => browser.on("message", data => { receiving = receiving.then(async () => {
     const value = JSON.parse(String(data));

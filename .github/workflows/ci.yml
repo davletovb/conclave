@@ -16,13 +16,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: pnpm install --no-frozen-lockfile
-      - name: Export reviewed dependency lock
-        run: |
-          python3 - <<'PY'
-          import pathlib,base64
-          print('CONCLAVE_LOCK_BEGIN'+base64.b64encode(pathlib.Path('pnpm-lock.yaml').read_bytes()).decode()+'CONCLAVE_LOCK_END')
-          PY
+      - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
