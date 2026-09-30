@@ -6,7 +6,7 @@ import { createServer } from "node:https";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 import { WebSocketServer, WebSocket } from "ws";
-import { importKey, seal, open } from "../cloudflare/crypto.mjs";
+import { importKey, seal, open, sealHello, openHello, newNonce } from "../cloudflare/crypto.mjs";
 
 const executable = resolve(process.argv[2]);
 // Provider workspaces require trusted ancestors; a shared /tmp cannot hold one.
@@ -84,29 +84,58 @@ try {
   const key = await importKey(Buffer.from(secret, "base64url"));
   browser = new WebSocket(`${relay.replace("https:", "wss:")}/channels/${id}/browser`, { ca: readFileSync(authority), headers: { origin: "https://conclave.test" } });
   let receiving = Promise.resolve();
+  // Protocol 2: the browser opens a handshake whenever the helper (re)connects.
+  let epoch; let browserNonce; let handshake; let handshakeDone;
+  const seen = { peerDisconnects: 0, handshakes: 0 };
+  const beginHandshake = () => {
+    epoch = undefined; browserNonce = newNonce();
+    handshake = new Promise(resolve => { handshakeDone = resolve; });
+    return sealHello(key, "browser", browserNonce).then(frame => browser.send(JSON.stringify(frame)));
+  };
   const ready = new Promise(resolve => browser.on("message", data => { receiving = receiving.then(async () => {
     const value = JSON.parse(String(data));
-    if ((value.type === "ready" && value.peer) || (value.type === "peer" && value.connected)) { resolve(); return; }
+    if ((value.type === "ready" && value.peer) || (value.type === "peer" && value.connected)) { await beginHandshake(); resolve(); return; }
+    if (value.type === "peer" && !value.connected) { seen.peerDisconnects++; epoch = undefined; return; }
     if (value.type !== "data") return;
-    const packet = await open(key, "helper", value); records.push(packet);
+    if (value.seq === 0) {
+      const hello = await openHello(key, "helper", value);
+      assert.equal(hello.echo, browserNonce, "the helper must echo the browser nonce");
+      epoch = { helper: hello.nonce, browser: browserNonce }; seen.handshakes++; handshakeDone(); return;
+    }
+    const packet = await open(key, "helper", epoch, value); records.push(packet);
     if (["completed", "failed", "stopped"].includes(packet.event?.type)) waiting.get(packet.id)?.(packet);
   }).catch(error => {console.error(error);process.exit(1);}); }));
-  await once(browser, "open"); browser.send(JSON.stringify({ type: "auth", token })); await ready;
-  const request = async (seq, value) => {
+  await once(browser, "open"); browser.send(JSON.stringify({ type: "auth", token })); await ready; await handshake;
+  let sequence = 0;
+  const request = async (value, number = ++sequence) => {
     const terminal = new Promise(resolve => waiting.set(value.id, resolve));
-    browser.send(JSON.stringify(await seal(key, "browser", seq, value)));
+    browser.send(JSON.stringify(await seal(key, "browser", epoch, number, value)));
     return terminal;
   };
-  assert.equal((await request(1, { id: "status", provider: "codex", method: "status", params: null })).event.type, "completed");
+  const until = async (done, message) => { for (let i = 0; i < 200 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 50)); assert.ok(done(), message); };
+  assert.equal((await request({ id: "status", provider: "codex", method: "status", params: null })).event.type, "completed");
   const status = records.find(value => value.id === "status" && value.event.type === "status")?.event.status;
   assert.equal(status?.authentication, "authenticated", `Provider status: ${JSON.stringify(status)}`);
-  assert.equal((await request(2, { id: "turn", provider: "codex", method: "send", params: { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true } })).event.type, "completed");
+  assert.equal((await request({ id: "turn", provider: "codex", method: "send", params: { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true } })).event.type, "completed");
   assert.ok(records.some(value => value.id === "turn" && value.event.type === "delta" && value.event.text.includes("Shared companion answer")));
-  // Ciphertext replay must not schedule another model call or return another status.
+
+  // A repeated frame must not schedule another model call: the helper ends the connection instead.
   const count = records.length;
-  browser.send(JSON.stringify(await seal(key, "browser", 2, { id: "replayed", provider: "codex", method: "status", params: null })));
-  await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(records.length, count);
-  console.log("Native Rust pairing, encrypted browser/provider round trip, and replay rejection passed");
+  browser.send(JSON.stringify(await seal(key, "browser", epoch, sequence, { id: "replayed", provider: "codex", method: "status", params: null })));
+  await until(() => seen.peerDisconnects >= 1, "a repeated frame must end the helper's connection");
+  assert.equal(records.length, count);
+  // The helper reconnects, the relay reports it, and a fresh handshake restarts the counters.
+  await until(() => seen.handshakes >= 2, "the pairing must recover with a new handshake");
+  sequence = 0;
+  assert.equal((await request({ id: "after-replay", provider: "codex", method: "status", params: null })).event.type, "completed");
+
+  // A lost frame (a gap) does the same.
+  browser.send(JSON.stringify(await seal(key, "browser", epoch, 5, { id: "gap", provider: "codex", method: "status", params: null })));
+  await until(() => seen.peerDisconnects >= 2, "a gap must end the helper's connection");
+  await until(() => seen.handshakes >= 3, "the pairing must recover after a gap");
+  sequence = 0;
+  assert.equal((await request({ id: "after-gap", provider: "codex", method: "status", params: null })).event.type, "completed");
+  console.log("Protocol 2: handshake, encrypted round trip, replay and gap rejection, and recovery passed");
 } finally {
   clearTimeout(timeout); browser?.terminate(); helper?.kill();
   for (const socket of sockets.clients) socket.terminate(); sockets.close(); server.close();

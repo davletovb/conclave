@@ -45,4 +45,58 @@ describe("Conclave subscription use through Seatline", () => {
     expect(await google.status()).toMatchObject({ connected: true });
     expect(await openai.status()).toMatchObject({ connected: false });
   });
+
+  it("asks for provider status once for several steps of a run, and again once it is stale or unusable", async () => {
+    const { client, calls } = companion("subscription");
+    const provider = new SeatlineProvider("openai", "OpenAI Codex", "codex", client);
+    const ask = () => provider.generate({ model: "any", messages: [{ role: "user", content: "Hello" }] });
+    await Promise.all([ask(), ask(), ask()]);
+    await ask();
+    expect(calls.filter(call => call.method === "status")).toHaveLength(1);
+    expect(calls.filter(call => call.method === "send")).toHaveLength(4);
+  });
+
+  it("checks again rather than trusting an earlier answer that said the provider was unusable", async () => {
+    let signIn: string | undefined = "api_key";
+    const calls: string[] = [];
+    const client: SeatlineClient = {
+      async request(_provider, method, _params, emit) {
+        calls.push(method);
+        if (method === "status") emit({ type: "status", status: { availability: "available", authentication: "authenticated", sign_in: signIn, models: [] } });
+        if (method === "send") emit({ type: "delta", text: "ok" });
+      },
+    };
+    const provider = new SeatlineProvider("openai", "OpenAI Codex", "codex", client);
+    await expect(provider.generate({ model: "any", messages: [{ role: "user", content: "Hi" }] })).rejects.toThrow("verified subscription");
+    signIn = "subscription"; // the user signed in
+    await expect(provider.generate({ model: "any", messages: [{ role: "user", content: "Hi" }] })).resolves.toMatchObject({ content: "ok" });
+    expect(calls.filter(method => method === "status")).toHaveLength(3);
+  });
+
+  it("does not remember a failed status request", async () => {
+    let attempts = 0;
+    const client: SeatlineClient = {
+      async request(_provider, method, _params, emit) {
+        if (method === "status" && ++attempts === 1) throw new Error("companion offline");
+        if (method === "status") emit({ type: "status", status: { availability: "available", authentication: "authenticated", sign_in: "subscription", models: [] } });
+      },
+    };
+    const provider = new SeatlineProvider("openai", "OpenAI Codex", "codex", client);
+    expect(await provider.status()).toMatchObject({ connected: false, message: "companion offline" });
+    expect(await provider.status()).toMatchObject({ connected: true });
+  });
+
+  it("turns a queued notice into run activity, so a step waiting for the companion is not counted as stalled", async () => {
+    const client: SeatlineClient = {
+      async request(_provider, method, _params, emit) {
+        if (method === "status") emit({ type: "status", status: { availability: "available", authentication: "authenticated", sign_in: "subscription", models: [] } });
+        if (method === "send") { emit({ type: "queued" }); emit({ type: "delta", text: "done" }); }
+      },
+    };
+    const provider = new SeatlineProvider("openai", "OpenAI Codex", "codex", client);
+    const events: unknown[] = [];
+    await provider.generate({ model: "any", messages: [{ role: "user", content: "Hi" }] }, event => events.push(event));
+    expect(events).toContainEqual({ type: "status", message: expect.stringContaining("Waiting for your Seatline companion") });
+  });
 });
+

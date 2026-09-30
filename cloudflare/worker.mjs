@@ -1,4 +1,10 @@
 const MAX_MESSAGE = 768 * 1024;
+// Pairing is open to anyone who can reach the relay: the helper is not a browser and cannot prove who it is,
+// and each pairing creates a Durable Object that lives 24 hours. So creating pairings is rate-limited, per
+// client address and per app, by a limiter object that ships with the relay.
+const PAIR_WINDOW_MS = 60_000;
+const PAIRS_PER_CLIENT = 6;
+const PAIRS_PER_APP = 60;
 const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 const token = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const equal = (a, b) => typeof a === "string" && a.length === 64 && typeof b === "string" && b.length === 64
@@ -27,6 +33,12 @@ export default {
       if (!input || typeof input.app !== "string" || typeof input.origin !== "string") return new Response("Invalid pairing request", { status: 400 });
       const origins = JSON.parse(env.APP_ORIGINS ?? "{}")[input.app];
       if (!Array.isArray(origins) || !origins.includes(input.origin)) return new Response("App origin not approved", { status: 403 });
+      if (!env.LIMITERS) return new Response("The relay is not configured to limit pairing", { status: 503 });
+      const client = request.headers.get("cf-connecting-ip") ?? "unknown";
+      for (const [key, limit] of [[`client:${client}`, PAIRS_PER_CLIENT], [`app:${input.app}`, PAIRS_PER_APP]]) {
+        const answer = await env.LIMITERS.get(env.LIMITERS.idFromName(key)).fetch(new Request("https://internal/take", { method: "POST", body: JSON.stringify({ limit, windowMs: PAIR_WINDOW_MS }) }));
+        if (!answer.ok) return new Response("Too many pairing requests", { status: 429, headers: { "retry-after": String(PAIR_WINDOW_MS / 1000) } });
+      }
       const id = token();
       const credentials = { helper: token(), browser: token() };
       const stub = env.CHANNELS.get(env.CHANNELS.idFromName(id));
@@ -39,6 +51,20 @@ export default {
     return stub.fetch(request);
   },
 };
+
+/** A sliding-window counter. One instance per limited key; it forgets a hit once the window has passed. */
+export class PairLimiter {
+  constructor(state) { this.state = state; }
+  async fetch(request) {
+    const { limit, windowMs } = await request.json();
+    const now = Date.now();
+    const hits = ((await this.state.storage.get("hits")) ?? []).filter(at => now - at < windowMs);
+    if (hits.length >= limit) { await this.state.storage.put("hits", hits); return new Response("Limited", { status: 429 }); }
+    hits.push(now);
+    await this.state.storage.put("hits", hits);
+    return new Response("Allowed");
+  }
+}
 
 export class Channel {
   constructor(state) { this.state = state; }

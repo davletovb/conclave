@@ -36,7 +36,8 @@ function get<T>(path: string, init?: RequestInit) {
 }
 
 function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
-  const enabled = localStorage.getItem("conclave.webSearch") === "shared";
+  // Shared web search needs a Conclave server with SearXNG behind it, which the hosted app does not have.
+  const enabled = !usesCompanion && localStorage.getItem("conclave.webSearch") === "shared";
   if (!enabled) return body;
   return {
     ...body,
@@ -48,6 +49,8 @@ function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
 }
 
 export const api = {
+  /** `persistent: false` means the browser did not promise to keep the hosted app's history. */
+  health: () => get<{ ok: boolean; persistent?: boolean }>("/health"),
   models: () => get<ModelRef[]>("/models"),
   providers: () => get<ProviderStatus[]>("/providers"),
   limits: () => get<ProviderLimitSnapshot[]>("/provider-limits"),

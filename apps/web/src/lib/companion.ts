@@ -1,147 +1,286 @@
-type Pair = { id: string; token: string; key: string; sent: number; received: number };
+import { envelopeSequence, importKey, newNonce, openFrame, openHello, sealFrame, sealHello, type Envelope, type Epoch } from "./seatline-protocol";
+
+type Pair = { id: string; token: string; key: string };
 export type SeatlineEvent = { type: string; text?: string; reason?: string; status?: { availability: string; authentication: string; sign_in?: string; models: Array<{id:string;label:string}> }; usage?: {input_tokens?:number;output_tokens?:number} };
 type Packet = {id: string; event: SeatlineEvent};
 type Pending = { resolve: () => void; reject: (error: Error) => void; emit: (event: SeatlineEvent) => void; dispose: () => void };
-const STORAGE = "conclave.seatline.pair.v1";
+
+// Version 2 of the saved pairing: the sequence counters of version 1 are gone, because a counter now
+// only lives as long as the handshake it belongs to.
+const STORAGE = "conclave.seatline.pair.v2";
+const LEGACY_STORAGE = "conclave.seatline.pair.v1";
 const relayUrl = import.meta.env.VITE_SEATLINE_RELAY as string | undefined;
-export const usesCompanion = Boolean(relayUrl) || !import.meta.env.DEV;
-let socket: WebSocket | undefined;
-let connected: Promise<void> | undefined;
-let peerReady = false;
-let outgoing = Promise.resolve();
-let incoming = Promise.resolve();
-let inbound = 0;
-const pending = new Map<string, Pending>();
-const from64 = (value: string) => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
-const to64 = (bytes: Uint8Array) => {
-  let text = ""; for (let i = 0; i < bytes.length; i += 8192) text += String.fromCharCode(...bytes.subarray(i, i + 8192));
-  return btoa(text);
+// A build with a relay talks to the shared companion. So does a production build that names no
+// standalone server; one that sets VITE_CONCLAVE_API keeps using that server, as before.
+export const usesCompanion = Boolean(relayUrl) || (!import.meta.env.DEV && !import.meta.env.VITE_CONCLAVE_API);
+
+const SOCKET_OPEN = 1; // WebSocket.OPEN
+
+/** A frame the relay lost, repeated or replayed. The connection is dropped and re-established. */
+class ProtocolError extends Error {}
+
+export type SeatlineEnvironment = {
+  relayUrl?: string;
+  openSocket: (url: URL) => WebSocket;
+  storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+  /** location.hash, which carries the pairing link the first time the page opens. */
+  hash: () => string;
+  /** Removes the pairing link from the address bar. */
+  clearFragment: () => void;
+  /** How long to wait for the companion to appear and answer the handshake. */
+  connectTimeoutMs?: number;
+  /** How often a request waiting for a free slot says so, so the caller can tell it is not stuck. */
+  queueNoticeMs?: number;
 };
 
-function pairing(): Pair {
-  const fragment = new URLSearchParams(location.hash.slice(1)).get("seatline");
-  if (fragment) {
-    const [id, token, key] = fragment.split(":");
-    history.replaceState(null, "", location.pathname + location.search);
-    if (!/^[a-f0-9]{64}$/.test(id ?? "") || !/^[a-f0-9]{64}$/.test(token ?? "") || !/^[a-zA-Z0-9_-]{43}$/.test(key ?? "")) throw new Error("Invalid Seatline pairing link");
-    sessionStorage.setItem(STORAGE, JSON.stringify({ id, token, key, sent: 0, received: 0 }));
-  }
-  const saved = sessionStorage.getItem(STORAGE);
-  if (!saved) throw new Error("Open Conclave from the Seatline companion to connect this browser.");
-  const pair: Pair = JSON.parse(saved);
-  if (!/^[a-f0-9]{64}$/.test(pair.id) || !/^[a-f0-9]{64}$/.test(pair.token) || !/^[a-zA-Z0-9_-]{43}$/.test(pair.key)
-    || !Number.isSafeInteger(pair.sent) || pair.sent < 0 || !Number.isSafeInteger(pair.received) || pair.received < 0) throw new Error("Invalid saved Seatline pairing");
-  return pair;
-}
+/**
+ * The companion runs two requests per app at a time and queues a few more out of sight. Sending no more
+ * than it will run keeps every request's wait visible here, where it can be reported, instead of in a queue
+ * that says nothing and can overflow.
+ */
+export const MAX_RUNNING_REQUESTS = 2;
 
-function fail(error: Error) {
-  peerReady = false;
-  for (const item of pending.values()) { item.dispose(); item.reject(error); }
-  pending.clear(); connected = undefined;
-}
+const b64 = (value: string) => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
 
-async function connect() {
-  if (connected && socket?.readyState === WebSocket.OPEN && peerReady) return connected;
-  if (connected) return connected;
-  if (!relayUrl) throw new Error("The hosted website needs a configured Seatline relay.");
-  const relay = new URL(relayUrl);
-  if (relay.protocol !== "https:") throw new Error("Seatline relay must use HTTPS");
-  const pair = pairing();
-  const endpoint = new URL(`/channels/${pair.id}/browser`, relay); endpoint.protocol = "wss:";
-  const key = await crypto.subtle.importKey("raw", from64(pair.key), "AES-GCM", false, ["encrypt", "decrypt"]);
-  // Share connection creation across concurrent catalogue/bootstrap requests.
-  if (connected) return connected;
-  const current = new WebSocket(endpoint); socket = current;
-  connected = new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => { reject(new Error("Seatline companion is offline. Open the companion and try again.")); current.close(); }, 15_000);
-    current.onopen = () => current.send(JSON.stringify({ type: "auth", token: pair.token }));
-    current.onmessage = message => {
-      if (typeof message.data !== "string" || message.data.length > 768 * 1024 || ++inbound > 128) { current.close(1008); inbound--; return; }
-      incoming = incoming.then(async () => {
-        if (current !== socket) return;
-        const envelope = JSON.parse(message.data);
-        if (envelope.type === "ready" || envelope.type === "peer") {
-          peerReady = envelope.peer === true || envelope.connected === true;
-          if (peerReady) { clearTimeout(timer); settled = true; resolve(); }
-          else if (settled) { fail(new Error("Seatline companion disconnected")); current.close(); }
-          return;
-        }
-        if (envelope.type === "pong") return;
-        if (envelope.type !== "data" || !Number.isSafeInteger(envelope.seq) || envelope.seq <= pair.received) return;
-        const aad = new TextEncoder().encode(`seatline:1:helper:${envelope.seq}`);
-        const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: from64(envelope.iv), additionalData: aad }, key, from64(envelope.body));
-        const packet: Packet = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(clear));
-        pair.received = envelope.seq; const saved = pairing(); saved.received = envelope.seq; sessionStorage.setItem(STORAGE, JSON.stringify(saved));
-        const item = pending.get(packet.id); if (!item) return;
-        if (!packet.event || typeof packet.event.type !== "string") throw new Error("Invalid companion provider event");
-        const event = packet.event;
-        if (["completed","failed","stopped"].includes(event.type)) {
-          pending.delete(packet.id); item.dispose();
-          if (event.type === "completed") item.resolve();
-          else { const error = new Error(event.type === "stopped" ? "Run cancelled" : event.reason ?? "Provider failed"); if (event.type === "stopped") error.name = "AbortError"; item.reject(error); }
-        } else {
-          try {item.emit(event);} catch (error) {
-            pending.delete(packet.id); item.dispose(); item.reject(error instanceof Error ? error : new Error("Provider event rejected"));
-            void send({id:crypto.randomUUID(),method:"cancel",target:packet.id}).catch(() => {});
-          }
-        }
-      }).catch(() => { fail(new Error("Invalid encrypted companion response")); current.close(1008); }).finally(() => inbound--);
+/** One browser tab's encrypted connection to the user's Seatline companion through the relay. */
+export class SeatlineConnection {
+  private socket: WebSocket | undefined;
+  private connected: Promise<void> | undefined;
+  private key: CryptoKey | undefined;
+  private epoch: Epoch | undefined;
+  private browserNonce: string | undefined;
+  private handshake: Promise<void> = Promise.resolve();
+  private handshakeDone: (() => void) | undefined;
+  private sent = 0;
+  private received = 0;
+  private outgoing = Promise.resolve();
+  private incoming = Promise.resolve();
+  private inbound = 0;
+  private readonly pending = new Map<string, Pending>();
+  private running = 0;
+  private readonly waiting: Array<{ start: () => void; cancel: (error: Error) => void }> = [];
+
+  constructor(private readonly env: SeatlineEnvironment) {}
+
+  /** Waits for one of the companion's running slots. The returned function gives it back, and is safe to call twice. */
+  private acquire(notice: () => void, signal?: AbortSignal): Promise<() => void> {
+    const release = () => {
+      let done = false;
+      return () => { if (done) return; done = true; this.running--; this.waiting.shift()?.start(); };
     };
-    current.onclose = () => { clearTimeout(timer); if (!settled) reject(new Error("Seatline companion is unavailable or pairing expired")); if (current === socket) fail(new Error("Seatline connection closed")); };
-    current.onerror = () => current.close();
-  });
-  return connected;
+    if (this.running < MAX_RUNNING_REQUESTS && this.waiting.length === 0) { this.running++; return Promise.resolve(release()); }
+    return new Promise((resolve, reject) => {
+      const ticker = setInterval(notice, this.env.queueNoticeMs ?? 20_000);
+      const stop = () => { clearInterval(ticker); signal?.removeEventListener("abort", onAbort); };
+      const waiter = {
+        start: () => { stop(); this.running++; resolve(release()); },
+        cancel: (error: Error) => { stop(); reject(error); },
+      };
+      const onAbort = () => {
+        const at = this.waiting.indexOf(waiter); if (at >= 0) this.waiting.splice(at, 1);
+        waiter.cancel(new DOMException("Run cancelled", "AbortError"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.waiting.push(waiter);
+    });
+  }
+
+  private pairing(): Pair {
+    const { storage } = this.env;
+    const fragment = new URLSearchParams(this.env.hash().slice(1)).get("seatline");
+    if (fragment) {
+      const [id, token, key] = fragment.split(":");
+      this.env.clearFragment();
+      if (!/^[a-f0-9]{64}$/.test(id ?? "") || !/^[a-f0-9]{64}$/.test(token ?? "") || !/^[a-zA-Z0-9_-]{43}$/.test(key ?? "")) throw new Error("Invalid Seatline pairing link");
+      storage.setItem(STORAGE, JSON.stringify({ id, token, key }));
+      storage.removeItem(LEGACY_STORAGE);
+    }
+    const saved = storage.getItem(STORAGE);
+    if (!saved) throw new Error("Open Conclave from the Seatline companion to connect this browser.");
+    const pair: Pair = JSON.parse(saved);
+    if (!/^[a-f0-9]{64}$/.test(pair.id) || !/^[a-f0-9]{64}$/.test(pair.token) || !/^[a-zA-Z0-9_-]{43}$/.test(pair.key)) throw new Error("Invalid saved Seatline pairing");
+    return pair;
+  }
+
+  /** Rejects what is in flight without touching the connection: the helper dropped it. */
+  private interrupt(error: Error) {
+    for (const item of this.pending.values()) { item.dispose(); item.reject(error); }
+    this.pending.clear();
+  }
+
+  private fail(error: Error) {
+    this.epoch = undefined; this.browserNonce = undefined;
+    this.interrupt(error);
+    this.connected = undefined;
+  }
+
+  private async beginHandshake(socket: WebSocket) {
+    // A fresh nonce for every handshake: nothing sent under an earlier one can be replayed into this one.
+    this.epoch = undefined; this.sent = 0; this.received = 0;
+    this.browserNonce = newNonce();
+    this.handshake = new Promise<void>(resolve => { this.handshakeDone = resolve; });
+    const hello = await sealHello(this.key!, "browser", this.browserNonce);
+    if (socket === this.socket && socket.readyState === SOCKET_OPEN) socket.send(JSON.stringify(hello));
+  }
+
+  private async onFrame(envelope: Envelope, settle: () => void) {
+    const sequence = envelopeSequence(envelope);
+    if (sequence === 0) {
+      const hello = await openHello(this.key!, "helper", envelope);
+      // An answer to an earlier hello of ours, or a replay of one, is not an answer to this one.
+      if (!this.browserNonce || hello.echo !== this.browserNonce) return;
+      this.epoch = { helper: hello.nonce, browser: this.browserNonce };
+      this.sent = 0; this.received = 0;
+      settle(); this.handshakeDone?.();
+      return;
+    }
+    if (!this.epoch) throw new ProtocolError("The companion sent data before the handshake");
+    // Exactly the next frame. A gap is a lost frame and a repeat a replay; either way the connection
+    // is dropped and the next handshake starts both counters again.
+    if (sequence !== this.received + 1) throw new ProtocolError("Seatline lost a message on the way; reconnecting");
+    const packet = await openFrame(this.key!, "helper", this.epoch, envelope) as Packet;
+    this.received = sequence;
+    const item = this.pending.get(packet.id); if (!item) return;
+    if (!packet.event || typeof packet.event.type !== "string") throw new Error("Invalid companion provider event");
+    const event = packet.event;
+    if (["completed","failed","stopped"].includes(event.type)) {
+      this.pending.delete(packet.id); item.dispose();
+      if (event.type === "completed") item.resolve();
+      else { const error = new Error(event.type === "stopped" ? "Run cancelled" : event.reason ?? "Provider failed"); if (event.type === "stopped") error.name = "AbortError"; item.reject(error); }
+    } else {
+      try { item.emit(event); } catch (error) {
+        this.pending.delete(packet.id); item.dispose(); item.reject(error instanceof Error ? error : new Error("Provider event rejected"));
+        void this.send({ id: crypto.randomUUID(), method: "cancel", target: packet.id }).catch(() => {});
+      }
+    }
+  }
+
+  private async connect(): Promise<void> {
+    if (this.connected) return this.connected;
+    if (!this.env.relayUrl) throw new Error("The hosted website needs a configured Seatline relay.");
+    const relay = new URL(this.env.relayUrl);
+    if (relay.protocol !== "https:") throw new Error("Seatline relay must use HTTPS");
+    const pair = this.pairing();
+    const endpoint = new URL(`/channels/${pair.id}/browser`, relay); endpoint.protocol = "wss:";
+    this.key = await importKey(b64(pair.key));
+    // Share connection creation across concurrent catalogue/bootstrap requests.
+    if (this.connected) return this.connected;
+    const current = this.env.openSocket(endpoint); this.socket = current;
+    this.connected = new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settle = () => { clearTimeout(timer); settled = true; resolve(); };
+      const timer = setTimeout(() => { reject(new Error("Seatline companion did not answer. Open the companion (it must speak web protocol 2) and try again.")); current.close(); }, this.env.connectTimeoutMs ?? 15_000);
+      current.onopen = () => current.send(JSON.stringify({ type: "auth", token: pair.token }));
+      current.onmessage = message => {
+        if (typeof message.data !== "string" || message.data.length > 768 * 1024 || ++this.inbound > 128) { current.close(1008); this.inbound--; return; }
+        this.incoming = this.incoming.then(async () => {
+          if (current !== this.socket) return;
+          const envelope = JSON.parse(message.data);
+          if (envelope.type === "ready" || envelope.type === "peer") {
+            const peer = envelope.peer === true || envelope.connected === true;
+            if (!peer) {
+              this.epoch = undefined;
+              if (settled) { this.fail(new Error("Seatline companion disconnected")); current.close(); }
+              return;
+            }
+            // The companion is (re)connected: what ran before it is gone, and a new epoch begins.
+            this.interrupt(new Error("Seatline companion reconnected; the request was interrupted"));
+            await this.beginHandshake(current);
+            return;
+          }
+          if (envelope.type === "pong") return;
+          if (envelope.type !== "data") return;
+          await this.onFrame(envelope, settle);
+        }).catch(error => {
+          const failure = error instanceof ProtocolError ? error : new Error("Invalid encrypted companion response");
+          this.fail(failure);
+          // Before the handshake finished, the caller is waiting on this promise and should hear why, not
+          // the generic close that follows.
+          if (!settled) reject(failure);
+          current.close(1008);
+        }).finally(() => this.inbound--);
+      };
+      current.onclose = () => { clearTimeout(timer); if (!settled) reject(new Error("Seatline companion is unavailable or pairing expired")); if (current === this.socket) this.fail(new Error("Seatline connection closed")); };
+      current.onerror = () => current.close();
+    });
+    return this.connected;
+  }
+
+  private async send(value: unknown) {
+    const target = this.socket;
+    const key = this.key;
+    this.outgoing = this.outgoing.catch(() => {}).then(async () => {
+      const epoch = this.epoch;
+      if (!target || !key || target !== this.socket || target.readyState !== SOCKET_OPEN || !epoch) throw new Error("Seatline companion is offline");
+      const clear = new TextEncoder().encode(JSON.stringify(value));
+      if (clear.length > 512 * 1024 || target.bufferedAmount > 2 * 1024 * 1024) throw new Error("Seatline request queue is full");
+      const sequence = ++this.sent;
+      const frame = await sealFrame(key, "browser", epoch, sequence, value);
+      // The helper started over while this was sealed: the frame belongs to an epoch that no longer exists.
+      if (this.epoch !== epoch || target !== this.socket) throw new Error("Seatline companion reconnected; the request was interrupted");
+      target.send(JSON.stringify(frame));
+    });
+    return this.outgoing;
+  }
+
+  private async ready() {
+    if (this.epoch) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([this.handshake, new Promise<void>((_, reject) => { timer = setTimeout(() => reject(new Error("Seatline companion did not complete the handshake")), this.env.connectTimeoutMs ?? 15_000); })]).finally(() => clearTimeout(timer));
+    if (!this.epoch) throw new Error("Seatline companion is offline");
+  }
+
+  async request(provider: string, method: string, params: unknown, emit: (event: SeatlineEvent) => void, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
+    await this.connect();
+    await this.ready();
+    if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
+    const release = await this.acquire(() => emit({ type: "queued" }), signal);
+    if (signal?.aborted) { release(); throw new DOMException("Run cancelled", "AbortError"); }
+    if (this.pending.size >= 32) { release(); throw new Error("Seatline request queue is full"); }
+    const id = crypto.randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        const item = this.pending.get(id); if (!item) return;
+        this.pending.delete(id); item.dispose(); reject(new DOMException("Run cancelled", "AbortError"));
+        void this.send({ id: crypto.randomUUID(), method: "cancel", target: id }).catch(() => {});
+      };
+      const timer = setTimeout(() => { abort(); }, 16 * 60_000);
+      const dispose = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); release(); };
+      this.pending.set(id, { resolve, reject, emit, dispose });
+      signal?.addEventListener("abort", abort, { once: true });
+      void this.send({ id, provider, method, params }).catch(error => { this.pending.delete(id); dispose(); reject(error); });
+    });
+  }
+
+  disconnect() {
+    this.env.storage.removeItem(STORAGE);
+    this.socket?.close();
+    this.fail(new Error("Seatline pairing disconnected"));
+  }
+
+  /** Closes the socket when the page goes away; the companion sees the browser leave. */
+  close() { this.socket?.close(); }
 }
 
-async function send(value: unknown) {
-  const target = socket;
-  const pair = pairing();
-  const key = await crypto.subtle.importKey("raw", from64(pair.key), "AES-GCM", false, ["encrypt"]);
-  outgoing = outgoing.catch(() => {}).then(async () => {
-    if (!target || target !== socket || target.readyState !== WebSocket.OPEN || !peerReady) throw new Error("Seatline companion is offline");
-    const clear = new TextEncoder().encode(JSON.stringify(value));
-    if (clear.length > 512 * 1024 || target.bufferedAmount > 2 * 1024 * 1024) throw new Error("Seatline request queue is full");
-    const saved = pairing();
-    const seq = ++saved.sent;
-    // Save before sending so reconnect/reload cannot replay a mutating request.
-    sessionStorage.setItem(STORAGE, JSON.stringify(saved));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const aad = new TextEncoder().encode(`seatline:1:browser:${seq}`);
-    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: aad }, key, clear);
-    target.send(JSON.stringify({ type: "data", seq, iv: to64(iv), body: to64(new Uint8Array(ciphertext)) }));
-  });
-  return outgoing;
-}
+const seatline = new SeatlineConnection({
+  relayUrl,
+  openSocket: url => new WebSocket(url),
+  get storage() { return sessionStorage; },
+  hash: () => location.hash,
+  clearFragment: () => history.replaceState(null, "", location.pathname + location.search),
+});
 
 /** The companion only exposes neutral Seatline provider operations. */
 export class SeatlineClient {
-  async request(provider: string, method: string, params: unknown, emit: (event: SeatlineEvent) => void, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
-    await connect();
-    if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
-    if (pending.size >= 32) throw new Error("Seatline request queue is full");
-    const id = crypto.randomUUID();
-    return new Promise<void>((resolve,reject) => {
-      const abort = () => {
-        const item = pending.get(id); if (!item) return;
-        pending.delete(id); item.dispose(); reject(new DOMException("Run cancelled", "AbortError"));
-        void send({id:crypto.randomUUID(),method:"cancel",target:id}).catch(() => {});
-      };
-      const timer = setTimeout(() => {abort();},16*60_000);
-      const dispose = () => {clearTimeout(timer);signal?.removeEventListener("abort",abort);};
-      pending.set(id,{resolve,reject,emit,dispose});
-      signal?.addEventListener("abort",abort,{once:true});
-      void send({id,provider,method,params}).catch(error => {pending.delete(id);dispose();reject(error);});
-    });
+  request(provider: string, method: string, params: unknown, emit: (event: SeatlineEvent) => void, signal?: AbortSignal): Promise<void> {
+    return seatline.request(provider, method, params, emit, signal);
   }
 }
 
-export function disconnectCompanion() {
-  sessionStorage.removeItem(STORAGE); socket?.close(); fail(new Error("Seatline pairing disconnected"));
-}
+export function disconnectCompanion() { seatline.disconnect(); }
 
 if (typeof window !== "undefined") {
-  window.addEventListener("pagehide", () => socket?.close());
+  window.addEventListener("pagehide", () => seatline.close());
   window.addEventListener("pageshow", event => {if (event.persisted) location.reload();});
 }

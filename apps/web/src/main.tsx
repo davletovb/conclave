@@ -148,6 +148,7 @@ function App() {
   /* ---------------------------------------------------------------- state */
   const [models, setModels] = useState<ModelRef[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
+  const [historyUnprotected, setHistoryUnprotected] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [providersLoading, setProvidersLoading] = useState(true);
@@ -254,6 +255,11 @@ function App() {
   const modeLabel = modes.find(item => item.id === mode)?.label ?? mode;
 
   /* ------------------------------------------------------------ effects */
+  useEffect(() => {
+    if (!usesCompanion) return;
+    void api.health().then(health => setHistoryUnprotected(health.persistent === false)).catch(() => {});
+  }, []);
+
   useEffect(() => {
     const epoch = beginViewOperation();
     void initialize(epoch);
@@ -1181,6 +1187,10 @@ function App() {
         {usesCompanion && <div className="banner" role="status">
           <p>Use your shared Seatline companion. Open Conclave from Seatline to pair this browser.</p>
           <button type="button" className="btn btn-ghost" onClick={() => { disconnectCompanion(); location.reload(); }}>Disconnect</button>
+        </div>}
+        {usesCompanion && historyUnprotected && <div className="banner" data-tone="warn" role="status">
+          <Icon name="alert" size={14} className="banner-icon" />
+          <p>Your browser has not promised to keep Conclave's history, which lives only in this browser. Export the conversations you want to keep.</p>
         </div>}
         <header className="topbar">
           {!railOpen && (

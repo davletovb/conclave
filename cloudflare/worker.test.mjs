@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import worker, { Channel } from "./worker.mjs";
+import worker, { Channel, PairLimiter } from "./worker.mjs";
 
 const approved = "https://conclave.test";
 const pair = { origin: approved, credentials: { helper: "a".repeat(64), browser: "b".repeat(64) }, expires: Date.now() + 60_000 };
-const request = body => new Request("https://relay.test/pair", { method: "POST", body: JSON.stringify(body) });
+const request = (body, ip = "203.0.113.1") => new Request("https://relay.test/pair", { method: "POST", body: JSON.stringify(body), headers: { "cf-connecting-ip": ip } });
+
+/** The relay's limiter namespace, backed by the real PairLimiter class and an in-memory store per key. */
+function limiters() {
+  const objects = new Map();
+  return { idFromName: name => name, get: name => {
+    if (!objects.has(name)) { const data = new Map(); objects.set(name, new PairLimiter({ storage: { get: async key => data.get(key), put: async (key, value) => void data.set(key, value) } })); }
+    return objects.get(name);
+  } };
+}
 
 test("pairing admits only configured app origins and bounds chunked bodies", async () => {
   let created = 0;
-  const env = { APP_ORIGINS: JSON.stringify({ conclave: [approved] }), CHANNELS: {
+  const env = { LIMITERS: limiters(), APP_ORIGINS: JSON.stringify({ conclave: [approved] }), CHANNELS: {
     idFromName: id => id,
     get: () => ({ async fetch(input) { created++; const saved = await input.json(); assert.equal(saved.origin, approved); return new Response("Created"); } }),
   } };
@@ -24,6 +33,51 @@ test("pairing admits only configured app origins and bounds chunked bodies", asy
   assert.equal(created, 1);
   for (const value of Object.values(credentials)) assert.match(value, /^[a-f0-9]{64}$/);
   assert.notEqual(credentials.helper, credentials.browser);
+});
+
+function pairingEnv() {
+  let created = 0;
+  const env = { LIMITERS: limiters(), APP_ORIGINS: JSON.stringify({ conclave: [approved] }), CHANNELS: {
+    idFromName: id => id, get: () => ({ async fetch() { created++; return new Response("Created"); } }),
+  } };
+  return { env, created: () => created };
+}
+
+test("pairing is rate-limited per client address and per app, and says when to retry", async () => {
+  const { env, created } = pairingEnv();
+  for (let i = 0; i < 6; i++) assert.equal((await worker.fetch(request({ app: "conclave", origin: approved }), env)).status, 200);
+  const limited = await worker.fetch(request({ app: "conclave", origin: approved }), env);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "60");
+  assert.equal(created(), 6, "a limited request must not create a channel");
+  // Another client is unaffected...
+  assert.equal((await worker.fetch(request({ app: "conclave", origin: approved }, "198.51.100.7"), env)).status, 200);
+  // ...until the whole app has been asked for too many pairings.
+  for (let i = 0; i < 60; i++) await worker.fetch(request({ app: "conclave", origin: approved }, `192.0.2.${i}`), env);
+  assert.equal((await worker.fetch(request({ app: "conclave", origin: approved }, "192.0.2.250"), env)).status, 429);
+});
+
+test("requests that are refused before pairing do not use up the limit", async () => {
+  const { env } = pairingEnv();
+  for (let i = 0; i < 20; i++) assert.equal((await worker.fetch(request({ app: "conclave", origin: "https://other.test" }), env)).status, 403);
+  assert.equal((await worker.fetch(request({ app: "conclave", origin: approved }), env)).status, 200);
+});
+
+test("a relay deployed without its limiter refuses to hand out pairings", async () => {
+  const { env, created } = pairingEnv();
+  delete env.LIMITERS;
+  assert.equal((await worker.fetch(request({ app: "conclave", origin: approved }), env)).status, 503);
+  assert.equal(created(), 0);
+});
+
+test("the limiter forgets a hit once its window has passed", async () => {
+  const data = new Map();
+  const limiter = new PairLimiter({ storage: { get: async key => data.get(key), put: async (key, value) => void data.set(key, value) } });
+  const take = (windowMs, limit = 2) => limiter.fetch(new Request("https://internal/take", { method: "POST", body: JSON.stringify({ limit, windowMs }) }));
+  assert.equal((await take(30)).status, 200); assert.equal((await take(30)).status, 200);
+  assert.equal((await take(30)).status, 429);
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal((await take(30)).status, 200);
 });
 
 function socket(role) {

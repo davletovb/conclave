@@ -9,8 +9,22 @@ import { BrowserStorage } from "./browser-storage";
 import { SeatlineClient } from "./companion";
 import { SeatlineProvider } from "./seatline-provider";
 
-type Runtime = { manager: RunManager; mock: MockProvider; providers: SeatlineProvider[] };
+type Runtime = { manager: RunManager; mock: MockProvider; providers: SeatlineProvider[]; persistent: boolean };
 let runtime: Promise<Runtime> | undefined;
+// The mock provider answers from a script, never from a model. In the hosted app it is only offered when the
+// build asks for it (VITE_CONCLAVE_MOCK=1), so it cannot stand in for Codex or Claude when they are not signed in.
+const mockEnabled = import.meta.env.VITE_CONCLAVE_MOCK === "1";
+
+/**
+ * Asks the browser to keep this origin's data. Conclave's history and run logs live only in IndexedDB here, and a
+ * browser under storage pressure may otherwise evict them without warning. False means it did not promise.
+ */
+async function requestPersistence(): Promise<boolean> {
+  try {
+    if (await navigator.storage?.persisted?.()) return true;
+    return (await navigator.storage?.persist?.()) === true;
+  } catch { return false; }
+}
 
 async function initialize(): Promise<Runtime> {
   // One engine per browser origin; another tab must not mark a live run stale.
@@ -34,7 +48,7 @@ async function initialize(): Promise<Runtime> {
   const registry = new Map<string, ProviderAdapter>([mock, ...providers].map(provider => [provider.id, provider]));
   const manager = new RunManager(new Orchestrator(registry), new StateStore("conclave", new BrowserStorage()));
   await manager.init();
-  return { manager, providers, mock };
+  return { manager, providers, mock, persistent: await requestPersistence() };
 }
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
@@ -73,23 +87,23 @@ async function streamEvents(manager: RunManager, id: string, url: URL, signal?: 
 export async function hostedFetch(path: string, init: RequestInit = {}): Promise<Response> {
   if (init.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
   try {
-    runtime ??= initialize(); const { manager, providers, mock } = await runtime;
+    runtime ??= initialize(); const { manager, providers, mock, persistent } = await runtime;
     const url = new URL(path, "https://conclave.internal");
     if (url.origin !== "https://conclave.internal") return json({ error: "Invalid app path" }, 400);
     const method = init.method?.toUpperCase() ?? "GET";
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
-    if (url.pathname === "/health") return json({ ok: true });
+    if (url.pathname === "/health") return json({ ok: true, persistent });
     if (url.pathname === "/providers") {
       const status: ProviderStatus[] = await Promise.all(providers.map(provider => provider.status()));
-      return json([...status, { id: "mock", label: "Mock provider", available: true, connected: true, authMode: "mock" }]);
+      return json(mockEnabled ? [...status, { id: "mock", label: "Mock provider (scripted demo, not a model)", available: true, connected: true, authMode: "mock" }] : status);
     }
     if (url.pathname === "/provider-limits") return json(await Promise.all(providers.map(provider => provider.limits())));
     if (url.pathname === "/models") {
-      const fallback = await mock.listModels();
+      const fallback = mockEnabled ? await mock.listModels() : [];
       const names = ["mock-gpt", "mock-claude", "mock-grok", "mock-gemini"];
       const catalog = await Promise.all(providers.map(async (provider, index) => {
         const models = await provider.listModels().catch(() => []);
-        return models.length ? models : fallback.filter(model => model.model === names[index]);
+        return models.length || !mockEnabled ? models : fallback.filter(model => model.model === names[index]);
       }));
       return json(catalog.flat());
     }
