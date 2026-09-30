@@ -4,5 +4,5 @@
   "compatibility_date": "2026-09-30",
   "durable_objects": { "bindings": [{ "name": "CHANNELS", "class_name": "Channel" }, { "name": "LIMITERS", "class_name": "PairLimiter" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Channel"] }, { "tag": "v2", "new_sqlite_classes": ["PairLimiter"] }],
-  "vars": { "APP_ORIGINS": "{\"conclave\":[\"https://conclave.example.com\"]}" }
+  "vars": { "APP_ORIGINS": "{\"conclave\":[\"https://shoorah.pages.dev\"]}" }
 }
