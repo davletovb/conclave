@@ -91,10 +91,10 @@ that and shows a waiting step as waiting rather than stalled.
 ## Provider readiness and preparation
 
 Conclave owns when to check a provider and what account it accepts; Seatline owns
-the readiness cache (its [readiness contract](https://github.com/davletovb/seatline/blob/0cb105e4c4d753abf8fb305d8ccedeeb64dd0ef4/docs/readiness-and-preparation.md)).
+the readiness cache (its [readiness contract](https://github.com/davletovb/seatline/blob/a33a0c95bd00956abb3314c8b87a0151a127ef32/docs/readiness-and-preparation.md)).
 
 - **Readiness, not a probe per step.** The app asks `readiness` (reusable for up
-  to 30 seconds, Seatline's own ceiling) and sends each turn with `send_ready`
+  to 30 seconds, Seatline's own ceiling) and sends each turn with `send_ready_with_policy`
   under it, with `check_sign_in: false`, so Seatline does not run a second
   sign-in probe inside every turn. An answer is reused here for a few seconds in
   a burst of UI requests and up to 30 seconds across the steps of a run, but
@@ -103,8 +103,9 @@ the readiness cache (its [readiness contract](https://github.com/davletovb/seatl
   layers never add up to more than one window.
 - **Conclave's account rule stays Conclave's.** A subscription sign-in (or Google's
   cloud account for Google) is required, from the readiness before a turn and
-  again from the status the send reports as it starts; a turn that changed
-  account is stopped.
+  again inside the companion immediately before launch, using the supplied
+  `allowed_sign_in` list. A credential change to an API key fails with
+  `SIGN_IN_POLICY_DENIED` and zero turns even when client status is delayed.
 - **Account and configuration changes.** Seatline fingerprints the provider's
   account and configuration files and drops what it knew when they change, and
   after a turn that fails to authenticate. The app forgets its own answer after
@@ -128,27 +129,26 @@ the readiness cache (its [readiness contract](https://github.com/davletovb/seatl
   running slots is free (so it can never hold up a run), and a failure shows
   nothing. Loading the catalogue already checks every provider, so the first
   selection is not prepared again.
-- **Older companions.** A companion that predates the readiness API answers those
-  methods as an unknown request (`INVALID_REQUEST`). The app then uses `status`
-  and `send` with `check_sign_in: true`, as it did before, and remembers that
-  until the companion reconnects (it may have been updated), so the API is tried
-  again then. Once the API has answered, an invalid request from it is a real
-  failure, not a reason to fall back. Seatline `dc1086582c8b98498aa48dae91c8d174bc3cfc3c`
-  is the oldest revision the app is tested against; CI runs the real-companion
-  round trip against it, in this fallback mode, and against
-  `0cb105e4c4d753abf8fb305d8ccedeeb64dd0ef4`, which has the API.
+- **First handshake and reconnects.** Successful readiness/prepare capability
+  detection is associated with the connection generation that delivered status,
+  including the initial 0 → 1 handshake. A reconnect discards the old record.
+- **Older companions.** Setup can still read legacy `status`. Generation requires
+  `send_ready_with_policy`; an unknown/unsupported method shows a companion-update
+  message and never falls back to ordinary send. CI tests legacy refusal against
+  `dc1086582c8b98498aa48dae91c8d174bc3cfc3c`, with zero turns, and the protected
+  contract at `a33a0c95bd00956abb3314c8b87a0151a127ef32` ([Seatline #11](https://github.com/davletovb/seatline/pull/11)).
 
 What was measured, and what was not: `scripts/seatline-web-roundtrip.mjs` runs the
 real companion helper, the encrypted protocol 2 and a stand-in relay against a
 shell `codex` that records every launch. One probe served a fresh readiness, a
 cached readiness, a preparation and a checked send (which ran its turn); after the
-account's file changed the next cached readiness was a new check (one probe); and
+account's file changed the next cached readiness was a new check (one probe);
+changing to an API key before the protected send was refused with zero turns; and
 a plain `send` with `check_sign_in: true`, which is what each step used to be,
 probed again and ran its turn. So a step inside the window now costs its turn and
 no probe, where it cost a probe each. These are launches of a stand-in provider on
 one machine: **there is no live measurement of latency, quota or sign-in behaviour
-for a real provider**, and the extra requests (a readiness check takes one of the
-two running slots for a moment, and a relay round trip) are not timed here.
+for a real provider**, and the extra requests (a readiness check uses Seatline's separate bounded readiness allowance, and a relay round trip) are not timed here.
 
 Shared web search is not available in the hosted app: it needs a Conclave server
 with SearXNG behind it, and the setting says so instead of failing a run. The

@@ -56,18 +56,27 @@ export class SeatlineProvider implements ProviderAdapter {
    */
   private async fetchState(freshness: Freshness): Promise<Reading> {
     let status: Status | undefined;
-    const take = (event: SeatlineEvent) => { if (event.type === "status") status = event.status; };
-    const known = this.companion;
+    let answered: ReturnType<typeof capability> | undefined;
+    const take = (event: SeatlineEvent) => { if (event.type === "status") { status = event.status; answered = this.companion; } };
+    let known = this.companion;
     if (known.readiness !== false) {
-      try { await this.client.request(this.provider, "readiness", freshness, take); known.readiness = true; }
+      try {
+        await this.client.request(this.provider, "readiness", freshness, take);
+        // The first request may complete the 0 -> 1 handshake. Remember the
+        // capability on the connection that answered, including reconnects.
+        known = answered ?? this.companion;
+        known.readiness = true;
+      }
       catch (error) {
         // An older companion answers a method it does not know as an invalid request. Once the API has answered, that is a real failure.
+        known = this.companion;
         if (known.readiness === true || failureReason(error) !== "INVALID_REQUEST") throw error;
         known.readiness = false;
       }
     }
     if (known.readiness === false) await this.client.request(this.provider, "status", null, take);
     if (!status) throw new Error("Seatline did not return provider status");
+    if (answered && answered.generation !== this.link?.generation()) throw new Error("Seatline reconnected while checking readiness. Try again.");
     const seen = status as Status;
     return { status: seen, observedAt: Date.now() - (seen.readiness?.age_ms ?? 0) };
   }
@@ -128,11 +137,14 @@ export class SeatlineProvider implements ProviderAdapter {
     if (known.readiness === false || now - this.preparedAt < PREPARE_INTERVAL_MS || this.link?.congested()) return "skipped";
     this.preparedAt = now;
     let status: Status | undefined;
+    let answered: ReturnType<typeof capability> | undefined;
     try {
-      await this.client.request(this.provider, "prepare", CACHED, event => { if (event.type === "status") status = event.status; });
-      known.readiness = true;
+      await this.client.request(this.provider, "prepare", CACHED, event => { if (event.type === "status") { status = event.status; answered = this.companion; } });
+      if (answered && answered.generation !== this.link?.generation()) return "skipped";
+      (answered ?? this.companion).readiness = true;
     } catch (error) {
-      if (known.readiness !== true && failureReason(error) === "INVALID_REQUEST") known.readiness = false;
+      const answered = this.companion;
+      if (answered.readiness !== true && failureReason(error) === "INVALID_REQUEST") answered.readiness = false;
       return "skipped";
     }
     const seen = status as Status | undefined;
@@ -169,14 +181,20 @@ export class SeatlineProvider implements ProviderAdapter {
         if (event.type === "usage") emit?.({ type: "usage", inputTokens: event.usage?.input_tokens, outputTokens: event.usage?.output_tokens });
       };
       try {
-        // `send_ready` runs under the readiness just checked, so Seatline does not probe sign-in again inside the turn; a companion
-        // without the API gets `send` with its own check, as before.
-        if (this.companion.readiness) await this.client.request(this.provider, "send_ready", { turn: { ...turn, check_sign_in: false }, freshness: CACHED }, onEvent, request.signal);
-        else await this.client.request(this.provider, "send", { ...turn, check_sign_in: true }, onEvent, request.signal);
+        // Older companions must refuse this distinct method: an unknown
+        // parameter on send_ready could otherwise be silently ignored.
+        if (!this.companion.readiness) throw new Error("Update your Seatline companion to enforce the subscription sign-in policy.");
+        await this.client.request(this.provider, "send_ready_with_policy", {
+          turn: { ...turn, check_sign_in: false }, freshness: CACHED,
+          allowed_sign_in: this.id === "google" ? ["subscription", "cloud"] : ["subscription"],
+        }, onEvent, request.signal);
       } catch (error) {
         // Whatever failed, the earlier answer about this provider may no longer hold (a turn that fails to authenticate also makes
         // Seatline drop its own), so the next step asks again.
         this.latest = undefined;
+        if (["INVALID_REQUEST", "READINESS_UNSUPPORTED"].includes(failureReason(error) ?? "")) {
+          throw new Error("Update your Seatline companion to enforce the subscription sign-in policy.");
+        }
         // Seatline refused before it started a turn because the evidence changed or lapsed: nothing ran, so one more attempt is safe, from a
         // new check, which the send then reuses (it is the cached evidence now).
         if (attempt === 0 && !request.signal?.aborted && REFUSED_BEFORE_START.has(failureReason(error) ?? "")) {

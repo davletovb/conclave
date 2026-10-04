@@ -9,7 +9,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { importKey, seal, open, sealHello, openHello, newNonce } from "../cloudflare/crypto.mjs";
 
 const executable = resolve(process.argv[2]);
-// `--legacy`: the companion under test predates Seatline's readiness API, so the app must meet a refusal and fall back to status and send.
+// `--legacy`: status remains usable, but an older companion must refuse the protected send before any generation.
 const legacy = process.argv.includes("--legacy");
 // Provider workspaces require trusted ancestors; a shared /tmp cannot hold one.
 const root = mkdtempSync(join(process.cwd(), ".seatline-web-roundtrip-"));
@@ -59,7 +59,10 @@ writeFileSync(provider, `#!/bin/sh
 # One line per launch, so the test can count the provider processes the companion starts.
 echo "$1" >> "$(dirname "$0")/launches"
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.1.0'; exit 0; fi
-if [ "$1" = "login" ]; then echo 'Logged in using ChatGPT'; exit 0; fi
+if [ "$1" = "login" ]; then
+  if grep -q api-key "$(dirname "$0")/../.codex/auth.json" 2>/dev/null; then echo 'Logged in using an API key'; else echo 'Logged in using ChatGPT'; fi
+  exit 0
+fi
 cat >/dev/null
 echo '{"type":"thread.started","thread_id":"test-session"}'
 echo '{"type":"turn.started"}'
@@ -120,12 +123,15 @@ try {
   assert.equal((await request({ id: "status", provider: "codex", method: "status", params: null })).event.type, "completed");
   const status = records.find(value => value.id === "status" && value.event.type === "status")?.event.status;
   assert.equal(status?.authentication, "authenticated", `Provider status: ${JSON.stringify(status)}`);
-  assert.equal((await request({ id: "turn", provider: "codex", method: "send", params: { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true } })).event.type, "completed");
-  assert.ok(records.some(value => value.id === "turn" && value.event.type === "delta" && value.event.text.includes("Shared companion answer")));
+  if (!legacy) {
+    assert.equal((await request({ id: "turn", provider: "codex", method: "send", params: { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true } })).event.type, "completed");
+    assert.ok(records.some(value => value.id === "turn" && value.event.type === "delta" && value.event.text.includes("Shared companion answer")));
+  }
 
   // Seatline's readiness API over the same encrypted path: one provider probe serves a cached check, a preparation and a checked send,
   // and a change to the account's files makes the next check a new one. Real provider launches, counted from the fake's own record.
   const launched = name => (existsSync(join(providerDir, "launches")) ? readFileSync(join(providerDir, "launches"), "utf8").split("\n") : []).filter(line => line === name).length;
+  const launchCounts = () => ({ login: launched("login"), exec: launched("exec") });
   const statusOf = id => records.find(value => value.id === id && value.event.type === "status")?.event.status;
   const cached = { mode: "cached", max_age_ms: 30000 };
   const turn = { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: false };
@@ -141,11 +147,10 @@ try {
       const refused = await request({ id: `legacy-${method}`, provider: "codex", method, params: cached });
       assert.equal(refused.event.type, "failed"); assert.equal(refused.event.reason, "INVALID_REQUEST", `${method} must be refused as an unknown request`);
     }
-    const refusedSend = await request({ id: "legacy-send-ready", provider: "codex", method: "send_ready", params: { turn, freshness: cached } });
+    const refusedSend = await request({ id: "legacy-send-ready", provider: "codex", method: "send_ready_with_policy", params: { turn, freshness: cached, allowed_sign_in: ["subscription"] } });
     assert.equal(refusedSend.event.reason, "INVALID_REQUEST");
-    // The fallback sequence works, and the connection survives the refusals.
-    assert.equal((await request({ id: "legacy-send", provider: "codex", method: "send", params: { ...turn, check_sign_in: true } })).event.type, "completed");
-    console.log("Older companion: readiness, prepare and send_ready are refused as invalid requests; status and send still work");
+    assert.equal(launchCounts().exec, 0, "no generation is launched against an unprotected companion");
+    console.log("Older companion: status works, and protected generation is refused with zero turns");
   } else {
   mkdirSync(join(root, ".codex"), { mode: 0o700 }); writeFileSync(join(root, ".codex", "auth.json"), '{"account":"first"}', { mode: 0o600 });
   await measure("readiness fresh", { id: "ready-fresh", provider: "codex", method: "readiness", params: { mode: "fresh" } });
@@ -154,13 +159,23 @@ try {
   assert.equal(statusOf("ready-cached")?.readiness?.source, "cached");
   await measure("prepare cached", { id: "prepare", provider: "codex", method: "prepare", params: cached });
   assert.equal(statusOf("prepare")?.readiness?.source, "cached");
-  await measure("send_ready cached", { id: "send-ready", provider: "codex", method: "send_ready", params: { turn, freshness: cached } });
+  await measure("send_ready_with_policy cached", { id: "send-ready", provider: "codex", method: "send_ready_with_policy", params: { turn, freshness: cached, allowed_sign_in: ["subscription"] } });
   assert.equal(records.find(value => value.id === "send-ready")?.event.type, "status", "a checked send reports the readiness it ran under before its turn");
   assert.ok(records.some(value => value.id === "send-ready" && value.event.type === "delta" && value.event.text.includes("Shared companion answer")));
   // An account or configuration change invalidates what was learned: the next cached check is a new one.
   writeFileSync(join(root, ".codex", "auth.json"), '{"account":"second"}', { mode: 0o600 });
   await measure("readiness cached after the account file changed", { id: "ready-changed", provider: "codex", method: "readiness", params: cached });
   assert.equal(statusOf("ready-changed")?.readiness?.source, "fresh");
+  // Change credentials between the approved subscription readiness and send.
+  // The test waits for the terminal before inspecting status and never cancels;
+  // rejection cannot depend on the application processing the status callback.
+  writeFileSync(join(root, ".codex", "auth.json"), '{"account":"api-key"}', { mode: 0o600 });
+  const beforeDenied = launchCounts();
+  const denied = await request({ id: "policy-denied", provider: "codex", method: "send_ready_with_policy", params: { turn, freshness: cached, allowed_sign_in: ["subscription"] } });
+  assert.equal(denied.event.reason, "SIGN_IN_POLICY_DENIED");
+  assert.equal(launchCounts().exec, beforeDenied.exec, "changed billing mode must not launch a generation");
+  assert.ok(!records.some(value => value.id === "policy-denied" && ["launched", "delta"].includes(value.event.type)));
+  writeFileSync(join(root, ".codex", "auth.json"), '{"account":"subscription"}', { mode: 0o600 });
   // The older sequence for comparison: a plain send that asks for Seatline's own sign-in check probes again inside the turn.
   await measure("send with check_sign_in (the older sequence)", { id: "send-checked", provider: "codex", method: "send", params: { ...turn, check_sign_in: true } });
   // Provider launches per step as [sign-in probes, model turns].

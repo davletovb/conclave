@@ -5,17 +5,17 @@ permissions:
   contents: read
 jobs:
   roundtrip:
-    # `current` is the Seatline revision Conclave is tested against, whose readiness API the app uses. `minimum` is the oldest companion it
-    # still works with: it predates that API, refuses the readiness methods, and the app falls back to status and send.
+    # Current provides the launch-policy gate. Legacy still answers status but
+    # must refuse protected generation without launching a prompt.
     name: roundtrip (${{ matrix.companion }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - companion: current
-            ref: 0cb105e4c4d753abf8fb305d8ccedeeb64dd0ef4
+            ref: a33a0c95bd00956abb3314c8b87a0151a127ef32
             arguments: ""
-          - companion: minimum
+          - companion: legacy
             ref: dc1086582c8b98498aa48dae91c8d174bc3cfc3c
             arguments: "--legacy"
     runs-on: ubuntu-latest

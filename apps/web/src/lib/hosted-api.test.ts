@@ -1,5 +1,9 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// These fixtures model a single browser tab without Web Locks. Newer Node
+// versions expose real process-wide locks, whose lifetime exceeds resetModules.
+beforeEach(() => { vi.stubGlobal("navigator", {}); });
 
 // Nothing is paired in these tests, so every real provider reports itself unavailable.
 async function hosted(mock: boolean) {

@@ -20,12 +20,12 @@ function companion(signIn?: string, options: { legacy?: boolean; age?: number; r
     async request(provider, method, params, emit) {
       calls.push({ provider, method, params });
       const readiness = { source: state.age ? "cached" : "fresh", age_ms: state.age };
-      if (options.legacy && ["readiness", "prepare", "send_ready"].includes(method)) throw new SeatlineFailure("INVALID_REQUEST");
+      if (options.legacy && ["readiness", "prepare", "send_ready_with_policy"].includes(method)) throw new SeatlineFailure("INVALID_REQUEST");
       if (method === "status") emit({ type: "status", status: ready(state.signIn) });
       if (method === "readiness" || method === "prepare") emit({ type: "status", status: ready(state.signIn, { readiness }) });
-      if (method === "send" || method === "send_ready") {
-        if (method === "send_ready") emit({ type: "status", status: ready(sentSignIn(), { readiness }) });
-        const refusal = method === "send_ready" ? state.refuse.shift() : undefined;
+      if (method === "send" || method === "send_ready_with_policy") {
+        if (method === "send_ready_with_policy") emit({ type: "status", status: ready(sentSignIn(), { readiness }) });
+        const refusal = method === "send_ready_with_policy" ? state.refuse.shift() : undefined;
         if (refusal) throw new SeatlineFailure(refusal);
         if (state.failSend) throw new SeatlineFailure(state.failSend);
         emit({ type: "delta", text: "Shared subscription response" });
@@ -41,6 +41,24 @@ const codex = (client: SeatlineClient, link?: SeatlineLink) => new SeatlineProvi
 afterEach(() => { vi.useRealTimers(); });
 
 describe("Conclave subscription use through Seatline", () => {
+  it.each([false, true])("keeps readiness reuse across the first 0 -> 1 handshake (prepared=%s)", async prepared => {
+    let generation = 0;
+    const f = companion("subscription");
+    const original = f.client.request.bind(f.client);
+    f.client.request = async (...args) => { if (generation === 0) generation = 1; await original(...args); };
+    const provider = codex(f.client, {generation: () => generation, congested: () => false});
+    if (prepared) expect(await provider.prepare()).toBe("prepared");
+    await ask(provider);
+    expect(f.methods()).toEqual([prepared ? "prepare" : "readiness", "send_ready_with_policy"]);
+    expect(f.calls.at(-1)?.params).toMatchObject({allowed_sign_in: ["subscription"], turn: {check_sign_in: false}});
+  });
+
+  it("requires an updated companion when readiness exists but the protected send method does not", async () => {
+    const f = companion("subscription", {failSend: "INVALID_REQUEST"});
+    await expect(ask(codex(f.client))).rejects.toThrow("Update your Seatline companion");
+    expect(f.methods()).toEqual(["readiness", "send_ready_with_policy"]);
+  });
+
   it("offers the real provider default when a CLI has no model catalogue", async () => {
     const { client, calls } = companion("subscription");
     const provider = codex(client);
@@ -50,7 +68,7 @@ describe("Conclave subscription use through Seatline", () => {
     expect(await provider.generate({ model: models[0].model, messages: [{ role: "user", content: "Hello" }] }))
       .toMatchObject({ provider: "openai", content: "Shared subscription response" });
     // The turn runs under the readiness just checked, so Seatline does not probe sign-in a second time inside it.
-    expect(calls.find(call => call.method === "send_ready")).toMatchObject({ provider: "codex", params: {
+    expect(calls.find(call => call.method === "send_ready_with_policy")).toMatchObject({ provider: "codex", params: {
       freshness: { mode: "cached", max_age_ms: 30000 },
       turn: { model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: false },
     } });
@@ -61,15 +79,17 @@ describe("Conclave subscription use through Seatline", () => {
     const provider = codex(client);
     expect(await provider.listModels()).toEqual([]);
     await expect(ask(provider)).rejects.toThrow("verified subscription");
-    expect(calls.some(call => call.method === "send" || call.method === "send_ready")).toBe(false);
+    expect(calls.some(call => call.method === "send" || call.method === "send_ready_with_policy")).toBe(false);
   });
 
   it("accepts the Google cloud account mode only for Google", async () => {
-    const { client } = companion("cloud");
+    const { client, calls } = companion("cloud");
     const google = new SeatlineProvider("google", "Google Gemini", "gemini", client);
     const openai = codex(client);
     expect(await google.status()).toMatchObject({ connected: true });
     expect(await openai.status()).toMatchObject({ connected: false });
+    await ask(google);
+    expect(calls.at(-1)?.params.allowed_sign_in).toEqual(["subscription", "cloud"]);
   });
 
   it("checks readiness once for several steps of a run, and again once the answer is stale or unusable", async () => {
@@ -78,7 +98,7 @@ describe("Conclave subscription use through Seatline", () => {
     await Promise.all([ask(provider), ask(provider), ask(provider)]);
     await ask(provider);
     expect(methods().filter(method => method === "readiness")).toHaveLength(1);
-    expect(methods().filter(method => method === "send_ready")).toHaveLength(4);
+    expect(methods().filter(method => method === "send_ready_with_policy")).toHaveLength(4);
     expect(methods()).not.toContain("status");
     expect(methods()).not.toContain("send");
   });
@@ -110,7 +130,7 @@ describe("Conclave subscription use through Seatline", () => {
     const client: SeatlineClient = {
       async request(_provider, method, _params, emit) {
         if (method === "readiness") emit({ type: "status", status: ready("subscription") });
-        if (method === "send_ready") { emit({ type: "queued" }); emit({ type: "status", status: ready("subscription") }); emit({ type: "delta", text: "done" }); }
+        if (method === "send_ready_with_policy") { emit({ type: "queued" }); emit({ type: "status", status: ready("subscription") }); emit({ type: "delta", text: "done" }); }
       },
     };
     const events: unknown[] = [];
@@ -145,7 +165,7 @@ describe("reusing Seatline's readiness", () => {
     const provider = codex(client);
     state.statusOnSend = "api_key"; // the account changed between the check and the send
     await expect(ask(provider)).rejects.toThrow("sign-in changed");
-    expect(calls.filter(call => call.method === "send_ready")).toHaveLength(1);
+    expect(calls.filter(call => call.method === "send_ready_with_policy")).toHaveLength(1);
   });
 
   it("repeats a send once, from a new check, when Seatline refuses before starting it; a second refusal is final", async () => {
@@ -153,15 +173,15 @@ describe("reusing Seatline's readiness", () => {
       const { client, calls } = companion("subscription", { refuse: [reason] });
       await expect(ask(codex(client))).resolves.toMatchObject({ content: "Shared subscription response" });
       expect(calls.map(call => [call.method, call.params.mode ?? call.params.freshness?.mode])).toEqual([
-        ["readiness", "cached"], ["send_ready", "cached"], ["readiness", "fresh"], ["send_ready", "cached"]]);
+        ["readiness", "cached"], ["send_ready_with_policy", "cached"], ["readiness", "fresh"], ["send_ready_with_policy", "cached"]]);
     }
     const twice = companion("subscription", { refuse: ["READINESS_CHANGED", "READINESS_CHANGED"] });
     await expect(ask(codex(twice.client))).rejects.toThrow("READINESS_CHANGED");
-    expect(twice.methods().filter(method => method === "send_ready")).toHaveLength(2);
+    expect(twice.methods().filter(method => method === "send_ready_with_policy")).toHaveLength(2);
     // Any other failure may have started the turn, so it is not repeated.
     const failed = companion("subscription", { failSend: "PROVIDER_FAILED" });
     await expect(ask(codex(failed.client))).rejects.toThrow("PROVIDER_FAILED");
-    expect(failed.methods().filter(method => method === "send_ready")).toHaveLength(1);
+    expect(failed.methods().filter(method => method === "send_ready_with_policy")).toHaveLength(1);
   });
 
   it("forgets what it knew after a failed turn, so the next step asks again (auth-failure recovery)", async () => {
@@ -179,16 +199,16 @@ describe("reusing Seatline's readiness", () => {
 });
 
 describe("a companion without the readiness API", () => {
-  it("is detected once, then served with status and send as before, with Seatline's own check inside each turn", async () => {
+  it("shows legacy status but refuses generation without companion policy enforcement", async () => {
     const { client, calls, methods } = companion("subscription", { legacy: true });
     const provider = codex(client);
-    await ask(provider); await ask(provider);
-    expect(methods()).toEqual(["readiness", "status", "send", "send"]);
-    for (const call of calls.filter(call => call.method === "send")) expect(call.params).toMatchObject({ check_sign_in: true, tools: "none", session: "ephemeral" });
+    await expect(ask(provider)).rejects.toThrow("Update your Seatline companion");
+    expect(methods()).toEqual(["readiness", "status"]);
+    expect(calls.some(call => call.method === "send" || call.method === "send_ready_with_policy")).toBe(false);
     // The other providers share what the companion has shown.
     const claude = new SeatlineProvider("anthropic", "Claude Code", "claude", client);
     await claude.status();
-    expect(methods().slice(4)).toEqual(["status"]);
+    expect(methods().slice(2)).toEqual(["status"]);
   });
 
   it("tries the API again after the companion reconnects, because it may have been updated", async () => {
@@ -197,18 +217,18 @@ describe("a companion without the readiness API", () => {
     const client: SeatlineClient = {
       async request(_provider, method, _params, emit) {
         calls.push(method);
-        if (legacy && ["readiness", "prepare", "send_ready"].includes(method)) throw new SeatlineFailure("INVALID_REQUEST");
+        if (legacy && ["readiness", "prepare", "send_ready_with_policy"].includes(method)) throw new SeatlineFailure("INVALID_REQUEST");
         if (["status", "readiness", "prepare"].includes(method)) emit({ type: "status", status: ready("subscription") });
-        if (method === "send_ready") emit({ type: "status", status: ready("subscription") });
-        if (method === "send" || method === "send_ready") emit({ type: "delta", text: "ok" });
+        if (method === "send_ready_with_policy") emit({ type: "status", status: ready("subscription") });
+        if (method === "send" || method === "send_ready_with_policy") emit({ type: "delta", text: "ok" });
       },
     };
     const provider = codex(client, link);
-    await ask(provider);
-    expect(calls).toEqual(["readiness", "status", "send"]);
+    await expect(ask(provider)).rejects.toThrow("Update your Seatline companion");
+    expect(calls).toEqual(["readiness", "status"]);
     generation = 2; legacy = false; calls.length = 0; // the companion reconnected, updated
     await provider.status({ fresh: true }); await ask(provider);
-    expect(calls).toEqual(["readiness", "send_ready"]);
+    expect(calls).toEqual(["readiness", "send_ready_with_policy"]);
   });
 
   it("does not fall back once the API has answered: an invalid request from it is a real failure", async () => {
@@ -235,7 +255,7 @@ describe("preparing the providers a run is likely to use", () => {
     expect(await provider.prepare()).toBe("prepared");
     expect(calls).toEqual([{ provider: "codex", method: "prepare", params: { mode: "cached", max_age_ms: 30000 } }]);
     await ask(provider);
-    expect(methods()).toEqual(["prepare", "send_ready"]); // no second check: the preparation was one
+    expect(methods()).toEqual(["prepare", "send_ready_with_policy"]); // no second check: the preparation was one
   });
 
   it("is best effort: throttled, never an error, and not at all for an older companion or one that is busy", async () => {
