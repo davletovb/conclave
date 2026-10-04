@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MAX_RUNNING_REQUESTS, SeatlineConnection, type SeatlineEnvironment, type SeatlineEvent } from "./companion";
+import { MAX_RUNNING_REQUESTS, SeatlineConnection, SeatlineFailure, failureReason, type SeatlineEnvironment, type SeatlineEvent } from "./companion";
 import { importKey, newNonce, openFrame, openHello, sealFrame, sealHello, type Epoch } from "./seatline-protocol";
 
 const KEY_BYTES = crypto.getRandomValues(new Uint8Array(32));
@@ -258,6 +258,55 @@ describe("Seatline connection, web protocol 2", () => {
     expect((await waiting).name).toBe("AbortError");
     expect(browserFrames()).toHaveLength(2);
     void first; void second;
+  });
+});
+
+describe("what the app can learn about its companion", () => {
+  it("rejects a failed request with Seatline's reason, as the message it always had and as a reason to branch on", async () => {
+    const { connection, keyPromise } = setup();
+    const helper = await companionOf(keyPromise);
+    const run = connection.request("codex", "readiness", { mode: "cached", max_age_ms: 30000 }, () => {}).then(() => undefined, error => error as unknown);
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { epoch, browserFrames } = await helper.answer(socket);
+    const request = await openFrame(helper.key, "browser", epoch, await until(() => browserFrames()[0], "request")) as { id: string; params: unknown };
+    expect(request.params).toEqual({ mode: "cached", max_age_ms: 30000 });
+    await helper.say(socket, epoch, 1, { id: request.id, event: { type: "failed", reason: "INVALID_REQUEST" } });
+    const error = await run;
+    expect(error).toBeInstanceOf(SeatlineFailure);
+    expect(error).toMatchObject({ message: "INVALID_REQUEST", reason: "INVALID_REQUEST" });
+    expect(failureReason(error)).toBe("INVALID_REQUEST");
+    // Code that stands in for the connection may throw a plain Error carrying the reason; a request that failed without one says so.
+    expect(failureReason(new Error("READINESS_CHANGED"))).toBe("READINESS_CHANGED");
+    expect(failureReason("not an error")).toBeUndefined();
+  });
+
+  it("counts handshakes, so what was learned about a companion is forgotten when it reconnects", async () => {
+    const { connection, keyPromise } = setup();
+    expect(connection.generation).toBe(0);
+    const helper = await companionOf(keyPromise);
+    const run = connection.request("codex", "status", null, () => {}).catch(() => {});
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    await helper.answer(socket);
+    await until(() => connection.generation === 1 || undefined, "the first handshake to complete");
+    socket.deliver({ type: "peer", connected: true }); // the companion reconnects through the same relay socket
+    await helper.answer(socket, socket.sent.length - 0 > 2 ? 3 : 1);
+    await until(() => connection.generation === 2 || undefined, "the second handshake to complete");
+    await run;
+  });
+
+  it("says when a request would have to wait for a running slot, so optional work can stay out of the way", async () => {
+    const { connection, keyPromise } = setup({ noticeMs: 1000 });
+    const helper = await companionOf(keyPromise);
+    expect(connection.congested).toBe(false);
+    const runs = [0, 1].map(index => connection.request("codex", "send", { index }, () => {}).catch(() => {}));
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { browserFrames } = await helper.answer(socket);
+    await until(() => browserFrames().length >= 2, "two requests on the wire");
+    expect(connection.congested).toBe(true);
+    void runs;
   });
 });
 

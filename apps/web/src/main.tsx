@@ -227,9 +227,26 @@ function App() {
     ? requiredParticipants(activeWorkflow)
     : minimumParticipants(mode);
   const participantShortfall = participants.length < neededParticipants;
+  // The providers a run is likely to use: the models the user chose, and the one that will synthesize. Only these are ever prepared.
+  const likelyProviders = useMemo(
+    () => [...new Set([...participants, ...(effectiveSynthesizer ? [effectiveSynthesizer] : [])]
+      .filter(model => model.source === "subscription").map(model => model.provider))].sort(),
+    [participants, effectiveSynthesizer],
+  );
   const expectedCalls = plannedCalls(mode, participants.length, maxRounds, activeWorkflow);
   const budgetShortfall = !participantShortfall && !workflowInvalid && expectedCalls > maxCalls;
   const canSubmit = Boolean(prompt.trim()) && !loading && !participantShortfall && !budgetShortfall && !workflowInvalid;
+  // Gets the likely providers ready (a readiness check: no prompt, no model turn) before the user has asked anything. It needs the shared
+  // companion, which keeps the answer for the run that follows; it is best effort and silent, so a failure shows nothing.
+  const prepareLikelyProviders = useCallback(() => {
+    if (usesCompanion && likelyProviders.length > 0) void api.prepareProviders(likelyProviders).catch(() => {});
+  }, [likelyProviders]);
+  // A provider the user adds to the selection is the next likely one. (The first selection is not prepared here: loading the catalogue just checked every provider.)
+  const likelyBefore = useRef<string[]>([]);
+  useEffect(() => {
+    const before = likelyBefore.current; likelyBefore.current = likelyProviders;
+    if (before.length > 0 && likelyProviders.some(id => !before.includes(id))) prepareLikelyProviders();
+  }, [likelyProviders, prepareLikelyProviders]);
 
   const priorMessages = useMemo(
     () => conversation?.messages.filter(
@@ -466,13 +483,13 @@ function App() {
     }
   }
 
-  async function loadModels(epoch: number) {
+  async function loadModels(epoch: number, options: { fresh?: boolean } = {}) {
     if (isCurrent(epoch)) {
       setModelsLoading(true);
       setModelsError("");
     }
     try {
-      const data = await api.models();
+      const data = await api.models(options);
       if (!isCurrent(epoch)) return;
       setModels(data);
       setSelected(current => (current.length > 0 ? current : initialSelection(data)));
@@ -484,13 +501,13 @@ function App() {
     }
   }
 
-  async function loadProviders(epoch: number) {
+  async function loadProviders(epoch: number, options: { fresh?: boolean } = {}) {
     if (isCurrent(epoch)) {
       setProvidersLoading(true);
       setProvidersError("");
     }
     try {
-      const data = await api.providers();
+      const data = await api.providers(options);
       if (isCurrent(epoch)) setProviders(data);
     } catch (cause) {
       if (!isCurrent(epoch)) return;
@@ -501,10 +518,10 @@ function App() {
     }
   }
 
-  async function refreshRuntimeCatalog(epoch: number) {
+  async function refreshRuntimeCatalog(epoch: number, options: { fresh?: boolean } = {}) {
     // Native runtime discovery can be slow. Keep it independent from
     // conversation/preset bootstrap so one status call cannot blank the setup.
-    await Promise.all([loadModels(epoch), loadProviders(epoch)]);
+    await Promise.all([loadModels(epoch, options), loadProviders(epoch, options)]);
     if (isCurrent(epoch)) await refreshLimits(epoch);
   }
 
@@ -1275,7 +1292,7 @@ function App() {
                 models={models}
                 modelsLoading={modelsLoading}
                 modelsError={modelsError}
-                onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current)}
+                onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true })}
                 selectedKeys={selected}
                 participants={participants}
                 onToggleModel={toggleModel}
@@ -1478,6 +1495,7 @@ function App() {
                   : "Ask the council…"}
               aria-describedby="composer-hint"
               onChange={event => setPrompt(event.target.value)}
+              onFocus={prepareLikelyProviders}
               onKeyDown={handlePromptKeyDown}
             />
 

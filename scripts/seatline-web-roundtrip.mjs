@@ -9,6 +9,8 @@ import { WebSocketServer, WebSocket } from "ws";
 import { importKey, seal, open, sealHello, openHello, newNonce } from "../cloudflare/crypto.mjs";
 
 const executable = resolve(process.argv[2]);
+// `--legacy`: the companion under test predates Seatline's readiness API, so the app must meet a refusal and fall back to status and send.
+const legacy = process.argv.includes("--legacy");
 // Provider workspaces require trusted ancestors; a shared /tmp cannot hold one.
 const root = mkdtempSync(join(process.cwd(), ".seatline-web-roundtrip-"));
 const certificate = join(root, "certificate.pem");
@@ -54,6 +56,8 @@ const relay = `https://127.0.0.1:${server.address().port}`;
 const providerDir = join(root, "providers"); mkdirSync(providerDir);
 const provider = join(providerDir, "codex");
 writeFileSync(provider, `#!/bin/sh
+# One line per launch, so the test can count the provider processes the companion starts.
+echo "$1" >> "$(dirname "$0")/launches"
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.1.0'; exit 0; fi
 if [ "$1" = "login" ]; then echo 'Logged in using ChatGPT'; exit 0; fi
 cat >/dev/null
@@ -118,6 +122,51 @@ try {
   assert.equal(status?.authentication, "authenticated", `Provider status: ${JSON.stringify(status)}`);
   assert.equal((await request({ id: "turn", provider: "codex", method: "send", params: { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: true } })).event.type, "completed");
   assert.ok(records.some(value => value.id === "turn" && value.event.type === "delta" && value.event.text.includes("Shared companion answer")));
+
+  // Seatline's readiness API over the same encrypted path: one provider probe serves a cached check, a preparation and a checked send,
+  // and a change to the account's files makes the next check a new one. Real provider launches, counted from the fake's own record.
+  const launched = name => (existsSync(join(providerDir, "launches")) ? readFileSync(join(providerDir, "launches"), "utf8").split("\n") : []).filter(line => line === name).length;
+  const statusOf = id => records.find(value => value.id === id && value.event.type === "status")?.event.status;
+  const cached = { mode: "cached", max_age_ms: 30000 };
+  const turn = { system: null, messages: [{ role: "user", text: "hello" }], model: null, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null, check_sign_in: false };
+  const steps = [];
+  const measure = async (name, value) => {
+    const before = { login: launched("login"), exec: launched("exec") };
+    const terminal = await request(value);
+    steps.push({ step: name, terminal: terminal.event.type, login: launched("login") - before.login, exec: launched("exec") - before.exec });
+    return terminal;
+  };
+  if (legacy) {
+    for (const method of ["readiness", "prepare"]) {
+      const refused = await request({ id: `legacy-${method}`, provider: "codex", method, params: cached });
+      assert.equal(refused.event.type, "failed"); assert.equal(refused.event.reason, "INVALID_REQUEST", `${method} must be refused as an unknown request`);
+    }
+    const refusedSend = await request({ id: "legacy-send-ready", provider: "codex", method: "send_ready", params: { turn, freshness: cached } });
+    assert.equal(refusedSend.event.reason, "INVALID_REQUEST");
+    // The fallback sequence works, and the connection survives the refusals.
+    assert.equal((await request({ id: "legacy-send", provider: "codex", method: "send", params: { ...turn, check_sign_in: true } })).event.type, "completed");
+    console.log("Older companion: readiness, prepare and send_ready are refused as invalid requests; status and send still work");
+  } else {
+  mkdirSync(join(root, ".codex"), { mode: 0o700 }); writeFileSync(join(root, ".codex", "auth.json"), '{"account":"first"}', { mode: 0o600 });
+  await measure("readiness fresh", { id: "ready-fresh", provider: "codex", method: "readiness", params: { mode: "fresh" } });
+  assert.equal(statusOf("ready-fresh")?.readiness?.source, "fresh");
+  await measure("readiness cached", { id: "ready-cached", provider: "codex", method: "readiness", params: cached });
+  assert.equal(statusOf("ready-cached")?.readiness?.source, "cached");
+  await measure("prepare cached", { id: "prepare", provider: "codex", method: "prepare", params: cached });
+  assert.equal(statusOf("prepare")?.readiness?.source, "cached");
+  await measure("send_ready cached", { id: "send-ready", provider: "codex", method: "send_ready", params: { turn, freshness: cached } });
+  assert.equal(records.find(value => value.id === "send-ready")?.event.type, "status", "a checked send reports the readiness it ran under before its turn");
+  assert.ok(records.some(value => value.id === "send-ready" && value.event.type === "delta" && value.event.text.includes("Shared companion answer")));
+  // An account or configuration change invalidates what was learned: the next cached check is a new one.
+  writeFileSync(join(root, ".codex", "auth.json"), '{"account":"second"}', { mode: 0o600 });
+  await measure("readiness cached after the account file changed", { id: "ready-changed", provider: "codex", method: "readiness", params: cached });
+  assert.equal(statusOf("ready-changed")?.readiness?.source, "fresh");
+  // The older sequence for comparison: a plain send that asks for Seatline's own sign-in check probes again inside the turn.
+  await measure("send with check_sign_in (the older sequence)", { id: "send-checked", provider: "codex", method: "send", params: { ...turn, check_sign_in: true } });
+  // Provider launches per step as [sign-in probes, model turns].
+  assert.deepEqual(steps.map(({ login, exec }) => [login, exec]), [[1, 0], [0, 0], [0, 0], [0, 1], [1, 0], [1, 1]], JSON.stringify(steps));
+  console.log("Readiness over protocol 2: one probe served a cached check, a preparation and a checked send; an account change made the next check new; the older send probed again inside its turn");
+  }
 
   // A repeated frame must not schedule another model call: the helper ends the connection instead.
   const count = records.length;
