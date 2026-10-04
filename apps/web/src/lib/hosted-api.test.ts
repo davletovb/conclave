@@ -69,6 +69,7 @@ describe("the app's own readiness controls", () => {
     vi.doMock("./companion", async () => {
       const actual = await vi.importActual<typeof import("./companion")>("./companion");
       class SeatlineClient {
+        tryPrepare(provider: string, params: unknown, emit: (event: any) => void) { return this.request(provider, "prepare", params, emit).then(() => true); }
         async request(provider: string, method: string, params: unknown, emit: (event: any) => void) {
           seen.push({ provider, method, params });
           if (options.legacy && ["readiness", "prepare"].includes(method)) throw new actual.SeatlineFailure("INVALID_REQUEST");

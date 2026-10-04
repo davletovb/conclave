@@ -79,18 +79,19 @@ export class SeatlineConnection {
   /** Whether a request made now would have to wait for one of the companion's running slots. */
   get congested() { return this.running >= MAX_RUNNING_REQUESTS || this.waiting.length > 0; }
 
-  /** Waits for one of the companion's running slots. The returned function gives it back, and is safe to call twice. */
+  private releaseSlot(): () => void {
+    let done = false;
+    return () => { if (done) return; done = true; this.running--; this.waiting.shift()?.start(); };
+  }
+
+  /** Reserve before connection/handshake work. The release is idempotent. */
   private acquire(notice: () => void, signal?: AbortSignal): Promise<() => void> {
-    const release = () => {
-      let done = false;
-      return () => { if (done) return; done = true; this.running--; this.waiting.shift()?.start(); };
-    };
-    if (this.running < MAX_RUNNING_REQUESTS && this.waiting.length === 0) { this.running++; return Promise.resolve(release()); }
+    if (this.running < MAX_RUNNING_REQUESTS && this.waiting.length === 0) { this.running++; return Promise.resolve(this.releaseSlot()); }
     return new Promise((resolve, reject) => {
       const ticker = setInterval(notice, this.env.queueNoticeMs ?? 20_000);
       const stop = () => { clearInterval(ticker); signal?.removeEventListener("abort", onAbort); };
       const waiter = {
-        start: () => { stop(); this.running++; resolve(release()); },
+        start: () => { stop(); this.running++; resolve(this.releaseSlot()); },
         cancel: (error: Error) => { stop(); reject(error); },
       };
       const onAbort = () => {
@@ -250,25 +251,38 @@ export class SeatlineConnection {
 
   async request(provider: string, method: string, params: unknown, emit: (event: SeatlineEvent) => void, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
-    await this.connect();
-    await this.ready();
-    if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
     const release = await this.acquire(() => emit({ type: "queued" }), signal);
-    if (signal?.aborted) { release(); throw new DOMException("Run cancelled", "AbortError"); }
-    if (this.pending.size >= 32) { release(); throw new Error("Seatline request queue is full"); }
-    const id = crypto.randomUUID();
-    return new Promise<void>((resolve, reject) => {
-      const abort = () => {
-        const item = this.pending.get(id); if (!item) return;
-        this.pending.delete(id); item.dispose(); reject(new DOMException("Run cancelled", "AbortError"));
-        void this.send({ id: crypto.randomUUID(), method: "cancel", target: id }).catch(() => {});
-      };
-      const timer = setTimeout(() => { abort(); }, 16 * 60_000);
-      const dispose = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); release(); };
-      this.pending.set(id, { resolve, reject, emit, dispose });
-      signal?.addEventListener("abort", abort, { once: true });
-      void this.send({ id, provider, method, params }).catch(error => { this.pending.delete(id); dispose(); reject(error); });
-    });
+    return this.requestAdmitted(provider, method, params, emit, release, signal);
+  }
+
+  /** Optional preparation never queues and leaves a foreground slot free, including before the first handshake. */
+  tryPrepare(provider: string, params: unknown, emit: (event: SeatlineEvent) => void): Promise<boolean> {
+    if (this.running >= MAX_RUNNING_REQUESTS - 1 || this.waiting.length > 0) return Promise.resolve(false);
+    this.running++;
+    return this.requestAdmitted(provider, "prepare", params, emit, this.releaseSlot()).then(() => true);
+  }
+
+  private async requestAdmitted(provider: string, method: string, params: unknown, emit: (event: SeatlineEvent) => void, release: () => void, signal?: AbortSignal): Promise<void> {
+    try {
+      if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
+      await this.connect();
+      await this.ready();
+      if (signal?.aborted) throw new DOMException("Run cancelled", "AbortError");
+      if (this.pending.size >= 32) throw new Error("Seatline request queue is full");
+      const id = crypto.randomUUID();
+      return await new Promise<void>((resolve, reject) => {
+        const abort = () => {
+          const item = this.pending.get(id); if (!item) return;
+          this.pending.delete(id); item.dispose(); reject(new DOMException("Run cancelled", "AbortError"));
+          void this.send({ id: crypto.randomUUID(), method: "cancel", target: id }).catch(() => {});
+        };
+        const timer = setTimeout(() => { abort(); }, 16 * 60_000);
+        const dispose = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); release(); };
+        this.pending.set(id, { resolve, reject, emit, dispose });
+        signal?.addEventListener("abort", abort, { once: true });
+        void this.send({ id, provider, method, params }).catch(error => { this.pending.delete(id); dispose(); reject(error); });
+      });
+    } finally { release(); }
   }
 
   disconnect() {
@@ -291,6 +305,8 @@ const seatline = new SeatlineConnection({
 
 /** The companion only exposes neutral Seatline provider operations. */
 export class SeatlineClient {
+  tryPrepare?: (provider: string, params: unknown, emit: (event: SeatlineEvent) => void) => Promise<boolean> =
+    (provider, params, emit) => seatline.tryPrepare(provider, params, emit);
   request(provider: string, method: string, params: unknown, emit: (event: SeatlineEvent) => void, signal?: AbortSignal): Promise<void> {
     return seatline.request(provider, method, params, emit, signal);
   }

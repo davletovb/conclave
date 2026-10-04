@@ -32,6 +32,7 @@ function companion(signIn?: string, options: { legacy?: boolean; age?: number; r
       }
     },
   };
+  client.tryPrepare = (provider, params, emit) => client.request(provider, "prepare", params, emit).then(() => true);
   return { client, calls, state, methods: () => calls.map(call => call.method) };
 }
 
@@ -288,6 +289,7 @@ describe("preparing the providers a run is likely to use", () => {
         if (method === "readiness" || method === "prepare") emit({ type: "status", status: ready("subscription") });
       },
     };
+    client.tryPrepare = (provider, params, emit) => client.request(provider, "prepare", params, emit).then(() => true);
     const provider = codex(client);
     expect(await provider.prepare()).toBe("skipped"); fail = false;
     expect(await provider.status()).toMatchObject({ connected: true });

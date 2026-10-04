@@ -13,7 +13,7 @@ jobs:
       matrix:
         include:
           - companion: current
-            ref: a33a0c95bd00956abb3314c8b87a0151a127ef32
+            ref: fdd237720a913963cb4df78817c41ee968a0ad2a
             arguments: ""
           - companion: legacy
             ref: dc1086582c8b98498aa48dae91c8d174bc3cfc3c

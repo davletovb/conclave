@@ -129,17 +129,20 @@ export class SeatlineProvider implements ProviderAdapter {
 
   /**
    * Gets the provider ready ahead of a run the user is likely to start: Seatline checks readiness and resolves the executable, with no
-   * prompt and no model turn. Best effort: it never throws, runs only when a running slot is free (so it cannot hold up a run), at most
+   * prompt and no model turn. Best effort: it never throws, reserves at most one optional slot while leaving a foreground slot free, at most
    * every ten seconds, and not at all for a companion without the readiness API. What it learns is kept for the run that follows.
    */
   async prepare(): Promise<"prepared" | "skipped"> {
     const now = Date.now(), known = this.companion;
     if (known.readiness === false || now - this.preparedAt < PREPARE_INTERVAL_MS || this.link?.congested()) return "skipped";
+    if (!this.client.tryPrepare) return "skipped";
+    const previousPreparation = this.preparedAt;
     this.preparedAt = now;
     let status: Status | undefined;
     let answered: ReturnType<typeof capability> | undefined;
     try {
-      await this.client.request(this.provider, "prepare", CACHED, event => { if (event.type === "status") { status = event.status; answered = this.companion; } });
+      const admitted = await this.client.tryPrepare(this.provider, CACHED, event => { if (event.type === "status") { status = event.status; answered = this.companion; } });
+      if (!admitted) { this.preparedAt = previousPreparation; return "skipped"; }
       if (answered && answered.generation !== this.link?.generation()) return "skipped";
       (answered ?? this.companion).readiness = true;
     } catch (error) {

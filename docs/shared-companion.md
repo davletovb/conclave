@@ -91,7 +91,7 @@ that and shows a waiting step as waiting rather than stalled.
 ## Provider readiness and preparation
 
 Conclave owns when to check a provider and what account it accepts; Seatline owns
-the readiness cache (its [readiness contract](https://github.com/davletovb/seatline/blob/a33a0c95bd00956abb3314c8b87a0151a127ef32/docs/readiness-and-preparation.md)).
+the readiness cache (its [readiness contract](https://github.com/davletovb/seatline/blob/fdd237720a913963cb4df78817c41ee968a0ad2a/docs/readiness-and-preparation.md)).
 
 - **Readiness, not a probe per step.** The app asks `readiness` (reusable for up
   to 30 seconds, Seatline's own ceiling) and sends each turn with `send_ready_with_policy`
@@ -125,9 +125,11 @@ the readiness cache (its [readiness contract](https://github.com/davletovb/seatl
   chosen models and of the one that will synthesize, never all four. Seatline
   resolves the executable and checks readiness; it runs no prompt, starts no
   model turn and keeps no process warm. It is best effort and silent: at most
-  every ten seconds for each provider, only while one of the companion's two
-  running slots is free (so it can never hold up a run), and a failure shows
-  nothing. Loading the catalogue already checks every provider, so the first
+  every ten seconds for each provider. A synchronous reservation before any
+  connection/handshake await admits at most one preparation, leaves the other
+  slot free for foreground work, and skips competing preparations without
+  queueing them. Foreground reservations are visible before the first handshake
+  too; failures release the optional slot and show nothing. Loading the catalogue already checks every provider, so the first
   selection is not prepared again.
 - **First handshake and reconnects.** Successful readiness/prepare capability
   detection is associated with the connection generation that delivered status,
@@ -136,7 +138,7 @@ the readiness cache (its [readiness contract](https://github.com/davletovb/seatl
   `send_ready_with_policy`; an unknown/unsupported method shows a companion-update
   message and never falls back to ordinary send. CI tests legacy refusal against
   `dc1086582c8b98498aa48dae91c8d174bc3cfc3c`, with zero turns, and the protected
-  contract at `a33a0c95bd00956abb3314c8b87a0151a127ef32` ([Seatline #11](https://github.com/davletovb/seatline/pull/11)).
+  contract at `fdd237720a913963cb4df78817c41ee968a0ad2a` ([Seatline #11](https://github.com/davletovb/seatline/pull/11)).
 
 What was measured, and what was not: `scripts/seatline-web-roundtrip.mjs` runs the
 real companion helper, the encrypted protocol 2 and a stand-in relay against a
@@ -164,3 +166,11 @@ preparation checks readiness but does not keep a model warm.
 
 Cloudflare deployment, native publisher signing and production origin/extension
 configuration are release steps. This change does not deploy or publish.
+
+Review follow-up validation: 133 web tests (including a four-provider burst
+before the first handshake, foreground admission and failed-reservation recovery),
+129 server tests, typecheck/build and the bundle boundary check. The first
+correction's encrypted current/legacy CI passed in run 37217535531; refreshed
+pin validation is recorded on PR #31. Seatline #11 must use a merge commit so
+its pinned commit remains reachable from main. Live cold/prepared/warm latency
+and Seatline slice E remain open.
