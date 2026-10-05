@@ -86,8 +86,71 @@ only copy: the app asks the browser to keep it and says so when the browser
 declines, so export conversations you want to keep.
 
 The companion runs two requests per app at a time, so the app sends no more than
-that and shows a waiting step as waiting rather than stalled. Provider status is
-checked once for several steps of a run.
+that and shows a waiting step as waiting rather than stalled.
+
+## Provider readiness and preparation
+
+Conclave owns when to check a provider and what account it accepts; Seatline owns
+the readiness cache (its [readiness contract](https://github.com/davletovb/seatline/blob/fdd237720a913963cb4df78817c41ee968a0ad2a/docs/readiness-and-preparation.md)).
+
+- **Readiness, not a probe per step.** The app asks `readiness` (reusable for up
+  to 30 seconds, Seatline's own ceiling) and sends each turn with `send_ready_with_policy`
+  under it, with `check_sign_in: false`, so Seatline does not run a second
+  sign-in probe inside every turn. An answer is reused here for a few seconds in
+  a burst of UI requests and up to 30 seconds across the steps of a run, but
+  never past the age of the evidence behind it: evidence 25 seconds old when
+  Seatline answered is reused here for five more seconds, not thirty, so the two
+  layers never add up to more than one window.
+- **Conclave's account rule stays Conclave's.** A subscription sign-in (or Google's
+  cloud account for Google) is required, from the readiness before a turn and
+  again inside the companion immediately before launch, using the supplied
+  `allowed_sign_in` list. A credential change to an API key fails with
+  `SIGN_IN_POLICY_DENIED` and zero turns even when client status is delayed.
+- **Account and configuration changes.** Seatline fingerprints the provider's
+  account and configuration files and drops what it knew when they change, and
+  after a turn that fails to authenticate. The app forgets its own answer after
+  any failed turn, so the next step asks again. A keyring change or a revocation
+  on the server cannot be seen locally: that is bounded only by the 30-second
+  window, and a turn that then fails to authenticate shows the usual sign-in
+  message.
+- **A send Seatline refuses before it starts.** If the evidence a send named has
+  changed or lapsed (`READINESS_CHANGED`, `READINESS_EXPIRED`,
+  `READINESS_UNVERIFIED`) nothing ran, so the step is repeated once from a new
+  check. Any other failure is final: the turn may have started.
+- **Retry means a new check.** The setup screen's Retry (after signing in, say)
+  asks for a new check instead of reusing a recent one; ordinary loads reuse
+  Seatline's cache. Concurrent requests for a new check share one.
+- **Preparation.** Focusing the prompt, and adding a provider to the selection,
+  asks Seatline to prepare the providers the run is likely to use: those of the
+  chosen models and of the one that will synthesize, never all four. Seatline
+  resolves the executable and checks readiness; it runs no prompt, starts no
+  model turn and keeps no process warm. It is best effort and silent: at most
+  every ten seconds for each provider. A synchronous reservation before any
+  connection/handshake await admits at most one preparation, leaves the other
+  slot free for foreground work, and skips competing preparations without
+  queueing them. Foreground reservations are visible before the first handshake
+  too; failures release the optional slot and show nothing. Loading the catalogue already checks every provider, so the first
+  selection is not prepared again.
+- **First handshake and reconnects.** Successful readiness/prepare capability
+  detection is associated with the connection generation that delivered status,
+  including the initial 0 → 1 handshake. A reconnect discards the old record.
+- **Older companions.** Setup can still read legacy `status`. Generation requires
+  `send_ready_with_policy`; an unknown/unsupported method shows a companion-update
+  message and never falls back to ordinary send. CI tests legacy refusal against
+  `dc1086582c8b98498aa48dae91c8d174bc3cfc3c`, with zero turns, and the protected
+  contract at `fdd237720a913963cb4df78817c41ee968a0ad2a` ([Seatline #11](https://github.com/davletovb/seatline/pull/11)).
+
+What was measured, and what was not: `scripts/seatline-web-roundtrip.mjs` runs the
+real companion helper, the encrypted protocol 2 and a stand-in relay against a
+shell `codex` that records every launch. One probe served a fresh readiness, a
+cached readiness, a preparation and a checked send (which ran its turn); after the
+account's file changed the next cached readiness was a new check (one probe);
+changing to an API key before the protected send was refused with zero turns; and
+a plain `send` with `check_sign_in: true`, which is what each step used to be,
+probed again and ran its turn. So a step inside the window now costs its turn and
+no probe, where it cost a probe each. These are launches of a stand-in provider on
+one machine: **there is no live measurement of latency, quota or sign-in behaviour
+for a real provider**, and the extra requests (a readiness check uses Seatline's separate bounded readiness allowance, and a relay round trip) are not timed here.
 
 Shared web search is not available in the hosted app: it needs a Conclave server
 with SearXNG behind it, and the setting says so instead of failing a run. The
@@ -98,7 +161,16 @@ labelled as a demo.
 Subscription sign-ins and Google's cloud-account sign-in are accepted. API-key
 and unknown sign-ins are refused. That check is Conclave's own: Seatline does not
 inspect sign-ins. Quota telemetry is unavailable through the shared adapters;
-provider limits still apply. Provider warming is unchanged.
+provider limits still apply. Seatline starts a provider process for each turn:
+preparation checks readiness but does not keep a model warm.
 
 Cloudflare deployment, native publisher signing and production origin/extension
 configuration are release steps. This change does not deploy or publish.
+
+Review follow-up validation: 133 web tests (including a four-provider burst
+before the first handshake, foreground admission and failed-reservation recovery),
+129 server tests, typecheck/build and the bundle boundary check. The first
+correction's encrypted current/legacy CI passed in run 37217535531; refreshed
+pin validation is recorded on PR #31. Seatline #11 must use a merge commit so
+its pinned commit remains reachable from main. Live cold/prepared/warm latency
+and Seatline slice E remain open.

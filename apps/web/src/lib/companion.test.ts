@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MAX_RUNNING_REQUESTS, SeatlineConnection, type SeatlineEnvironment, type SeatlineEvent } from "./companion";
+import { MAX_RUNNING_REQUESTS, SeatlineConnection, SeatlineFailure, failureReason, type SeatlineEnvironment, type SeatlineEvent } from "./companion";
 import { importKey, newNonce, openFrame, openHello, sealFrame, sealHello, type Epoch } from "./seatline-protocol";
 
 const KEY_BYTES = crypto.getRandomValues(new Uint8Array(32));
@@ -261,6 +261,55 @@ describe("Seatline connection, web protocol 2", () => {
   });
 });
 
+describe("what the app can learn about its companion", () => {
+  it("rejects a failed request with Seatline's reason, as the message it always had and as a reason to branch on", async () => {
+    const { connection, keyPromise } = setup();
+    const helper = await companionOf(keyPromise);
+    const run = connection.request("codex", "readiness", { mode: "cached", max_age_ms: 30000 }, () => {}).then(() => undefined, error => error as unknown);
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { epoch, browserFrames } = await helper.answer(socket);
+    const request = await openFrame(helper.key, "browser", epoch, await until(() => browserFrames()[0], "request")) as { id: string; params: unknown };
+    expect(request.params).toEqual({ mode: "cached", max_age_ms: 30000 });
+    await helper.say(socket, epoch, 1, { id: request.id, event: { type: "failed", reason: "INVALID_REQUEST" } });
+    const error = await run;
+    expect(error).toBeInstanceOf(SeatlineFailure);
+    expect(error).toMatchObject({ message: "INVALID_REQUEST", reason: "INVALID_REQUEST" });
+    expect(failureReason(error)).toBe("INVALID_REQUEST");
+    // Code that stands in for the connection may throw a plain Error carrying the reason; a request that failed without one says so.
+    expect(failureReason(new Error("READINESS_CHANGED"))).toBe("READINESS_CHANGED");
+    expect(failureReason("not an error")).toBeUndefined();
+  });
+
+  it("counts handshakes, so what was learned about a companion is forgotten when it reconnects", async () => {
+    const { connection, keyPromise } = setup();
+    expect(connection.generation).toBe(0);
+    const helper = await companionOf(keyPromise);
+    const run = connection.request("codex", "status", null, () => {}).catch(() => {});
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    await helper.answer(socket);
+    await until(() => connection.generation === 1 || undefined, "the first handshake to complete");
+    socket.deliver({ type: "peer", connected: true }); // the companion reconnects through the same relay socket
+    await helper.answer(socket, socket.sent.length - 0 > 2 ? 3 : 1);
+    await until(() => connection.generation === 2 || undefined, "the second handshake to complete");
+    await run;
+  });
+
+  it("says when a request would have to wait for a running slot, so optional work can stay out of the way", async () => {
+    const { connection, keyPromise } = setup({ noticeMs: 1000 });
+    const helper = await companionOf(keyPromise);
+    expect(connection.congested).toBe(false);
+    const runs = [0, 1].map(index => connection.request("codex", "send", { index }, () => {}).catch(() => {}));
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { browserFrames } = await helper.answer(socket);
+    await until(() => browserFrames().length >= 2, "two requests on the wire");
+    expect(connection.congested).toBe(true);
+    void runs;
+  });
+});
+
 describe("which mode the app runs in", () => {
   const modeWith = async (env: { DEV: boolean; relay?: string; api?: string }) => {
     vi.resetModules();
@@ -279,5 +328,56 @@ describe("which mode the app runs in", () => {
     ["a production build with neither is the hosted app, and says it needs a relay", { DEV: false }, true],
   ])("%s", async (_name, env, expected) => {
     expect(await modeWith(env)).toBe(expected);
+  });
+});
+
+
+describe("optional preparation admission", () => {
+  it("reserves once before handshake, skips a four-provider burst, and leaves foreground capacity", async () => {
+    const { connection, keyPromise } = setup();
+    const helper = await companionOf(keyPromise);
+    const optional = ["codex", "claude", "gemini", "grok"].map(provider => connection.tryPrepare(provider, {}, () => {}));
+    await expect(Promise.all(optional.slice(1))).resolves.toEqual([false, false, false]);
+    const foregroundEvents: SeatlineEvent[] = [];
+    const foreground = connection.request("codex", "send", {}, event => foregroundEvents.push(event));
+    const socket = await until(() => FakeSocket.all[0], "connection");
+    await helper.accept(socket);
+    const { epoch, browserFrames } = await helper.answer(socket);
+    await until(() => browserFrames().length === 2, "preparation and foreground request");
+    const requests = await Promise.all(browserFrames().map(frame => openFrame(helper.key, "browser", epoch, frame))) as Array<{id: string; method: string}>;
+    expect(requests.map(request => request.method).sort()).toEqual(["prepare", "send"]);
+    expect(foregroundEvents).toEqual([]);
+    const prep = requests.find(request => request.method === "prepare")!;
+    const send = requests.find(request => request.method === "send")!;
+    await helper.say(socket, epoch, 1, { id: send.id, event: { type: "completed" } }); await foreground;
+    await expect(connection.tryPrepare("grok", {}, () => {})).resolves.toBe(false);
+    await helper.say(socket, epoch, 2, { id: prep.id, event: { type: "completed" } });
+    await expect(optional[0]).resolves.toBe(true);
+    expect(browserFrames()).toHaveLength(2); // skipped preparation never queues later
+    const next = connection.tryPrepare("gemini", {}, () => {});
+    const frame = await until(() => browserFrames()[2], "later preparation");
+    const later = await openFrame(helper.key, "browser", epoch, frame) as {id: string};
+    await helper.say(socket, epoch, 3, {id: later.id, event: {type: "completed"}});
+    await expect(next).resolves.toBe(true); connection.close();
+  });
+
+  it("sees foreground reservations before handshake and releases optional capacity after failure", async () => {
+    const { connection, keyPromise } = setup();
+    const helper = await companionOf(keyPromise);
+    const first = connection.request("codex", "send", {}, () => {}).catch(error => error);
+    const second = connection.request("claude", "send", {}, () => {}).catch(error => error);
+    await expect(connection.tryPrepare("gemini", {}, () => {})).resolves.toBe(false);
+    const socket = await until(() => FakeSocket.all[0], "connection");
+    socket.close(); await Promise.all([first, second]);
+    const failed = connection.tryPrepare("codex", {}, () => {}).catch(error => error);
+    const next = await until(() => FakeSocket.all[1], "optional connection");
+    next.close(); expect(await failed).toBeInstanceOf(Error);
+    const recovered = connection.tryPrepare("codex", {}, () => {});
+    const final = await until(() => FakeSocket.all[2], "recovered connection");
+    await helper.accept(final); const {epoch, browserFrames} = await helper.answer(final);
+    const frame = await until(() => browserFrames()[0], "recovered preparation");
+    const request = await openFrame(helper.key, "browser", epoch, frame) as {id: string};
+    await helper.say(final, epoch, 1, {id: request.id, event: {type: "completed"}});
+    await expect(recovered).resolves.toBe(true); connection.close();
   });
 });

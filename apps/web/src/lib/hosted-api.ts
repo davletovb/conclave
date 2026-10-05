@@ -6,7 +6,7 @@ import { StateStore } from "../../../server/src/state/store";
 import { exportFilename, exportToMarkdown } from "../../../server/src/state/conversation-export";
 import { workflowPresets } from "../../../server/src/workflow-presets";
 import { BrowserStorage } from "./browser-storage";
-import { SeatlineClient } from "./companion";
+import { SeatlineClient, companionLink } from "./companion";
 import { SeatlineProvider } from "./seatline-provider";
 
 type Runtime = { manager: RunManager; mock: MockProvider; providers: SeatlineProvider[]; persistent: boolean };
@@ -40,10 +40,10 @@ async function initialize(): Promise<Runtime> {
     window.addEventListener("pagehide", release, { once: true });
   }
   const client = new SeatlineClient();
-  const providers = [new SeatlineProvider("openai", "OpenAI Codex", "codex", client),
-    new SeatlineProvider("anthropic", "Claude Code", "claude", client),
-    new SeatlineProvider("xai", "Grok", "grok", client),
-    new SeatlineProvider("google", "Google Gemini", "gemini", client)];
+  const providers = [new SeatlineProvider("openai", "OpenAI Codex", "codex", client, companionLink),
+    new SeatlineProvider("anthropic", "Claude Code", "claude", client, companionLink),
+    new SeatlineProvider("xai", "Grok", "grok", client, companionLink),
+    new SeatlineProvider("google", "Google Gemini", "gemini", client, companionLink)];
   const mock = new MockProvider();
   const registry = new Map<string, ProviderAdapter>([mock, ...providers].map(provider => [provider.id, provider]));
   const manager = new RunManager(new Orchestrator(registry), new StateStore("conclave", new BrowserStorage()));
@@ -93,8 +93,17 @@ export async function hostedFetch(path: string, init: RequestInit = {}): Promise
     const method = init.method?.toUpperCase() ?? "GET";
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     if (url.pathname === "/health") return json({ ok: true, persistent });
+    // `?fresh=1` is the user's own retry: ask for a new check instead of reusing a recent one.
+    const fresh = url.searchParams.get("fresh") === "1";
+    if (url.pathname === "/providers/prepare" && method === "POST") {
+      // The providers a run is likely to use, named by the app's own UI. Best effort: nothing here can fail a request or show an error.
+      const named = (body as { providers?: unknown } | undefined)?.providers;
+      if (!Array.isArray(named) || named.length > providers.length || named.some(id => typeof id !== "string")) return json({ error: "Name the providers to prepare" }, 400);
+      const wanted = providers.filter(provider => named.includes(provider.id));
+      return json({ providers: await Promise.all(wanted.map(async provider => ({ id: provider.id, outcome: await provider.prepare() }))) });
+    }
     if (url.pathname === "/providers") {
-      const status: ProviderStatus[] = await Promise.all(providers.map(provider => provider.status()));
+      const status: ProviderStatus[] = await Promise.all(providers.map(provider => provider.status({ fresh })));
       return json(mockEnabled ? [...status, { id: "mock", label: "Mock provider (scripted demo, not a model)", available: true, connected: true, authMode: "mock" }] : status);
     }
     if (url.pathname === "/provider-limits") return json(await Promise.all(providers.map(provider => provider.limits())));
@@ -102,7 +111,7 @@ export async function hostedFetch(path: string, init: RequestInit = {}): Promise
       const fallback = mockEnabled ? await mock.listModels() : [];
       const names = ["mock-gpt", "mock-claude", "mock-grok", "mock-gemini"];
       const catalog = await Promise.all(providers.map(async (provider, index) => {
-        const models = await provider.listModels().catch(() => []);
+        const models = await provider.listModels({ fresh }).catch(() => []);
         return models.length || !mockEnabled ? models : fallback.filter(model => model.model === names[index]);
       }));
       return json(catalog.flat());

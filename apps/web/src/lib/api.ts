@@ -51,8 +51,15 @@ function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
 export const api = {
   /** `persistent: false` means the browser did not promise to keep the hosted app's history. */
   health: () => get<{ ok: boolean; persistent?: boolean }>("/health"),
-  models: () => get<ModelRef[]>("/models"),
-  providers: () => get<ProviderStatus[]>("/providers"),
+  /** `fresh`: the user asked for a new check (a retry after signing in), so the companion's recent answer is not reused. */
+  models: (options: { fresh?: boolean } = {}) => get<ModelRef[]>(`/models${options.fresh ? "?fresh=1" : ""}`),
+  providers: (options: { fresh?: boolean } = {}) => get<ProviderStatus[]>(`/providers${options.fresh ? "?fresh=1" : ""}`),
+  /** Gets the named providers ready for a run the user is likely to start. Best effort, only with the shared companion, and never an error. */
+  prepareProviders: (providers: string[]) => get<{ providers: Array<{ id: string; outcome: "prepared" | "skipped" }> }>("/providers/prepare", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ providers }),
+  }),
   limits: () => get<ProviderLimitSnapshot[]>("/provider-limits"),
   presets: () => get<WorkflowPreset[]>("/workflow-presets"),
 
