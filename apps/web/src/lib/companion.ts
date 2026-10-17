@@ -19,11 +19,9 @@ export type CompanionState =
 
 /** The close code the relay gives a browser for a pairing it no longer has (cloudflare/worker.mjs). */
 const PAIRING_GONE = 4410;
-const PAIRING_EXPIRED = "Your Seatline pairing has expired. Connect Seatline again.";
-const NOT_PAIRED = "This browser is not connected to Seatline yet. Use Connect Seatline.";
-/** What Seatline's connect page posts to the window that opened it (`companion/src/connect.rs` in Seatline). */
-const PAIRING_MESSAGE = "seatline-pairing";
-export const DEFAULT_LOCAL_PORT = 27183;
+const PAIRING_EXPIRED = "Your Seatline link has expired. Run `seatline-companion link conclave --open`, or paste a new link.";
+const NOT_PAIRED = "This browser is not linked to Seatline yet. Run `seatline-companion link conclave --open`, or paste its link.";
+
 /** Seatline's readiness record, present on explicit readiness and preparation results: `source` is `fresh`, `cached` or `shared`; `age_ms` how old the verified evidence is. */
 export type SeatlineReadiness = { source: string; age_ms: number };
 export type SeatlineEvent = { type: string; text?: string; reason?: string; status?: { availability: string; authentication: string; sign_in?: string; models: Array<{id:string;label:string}>; readiness?: SeatlineReadiness }; usage?: {input_tokens?:number;output_tokens?:number} };
@@ -65,18 +63,8 @@ export type SeatlineEnvironment = {
   connectTimeoutMs?: number;
   /** How often a request waiting for a free slot says so, so the caller can tell it is not stuck. */
   queueNoticeMs?: number;
-  /** This website's origin, which Seatline hands a pairing to. */
+  /** This website's origin, which a pasted link must be for. */
   origin?: string;
-  /** The app name Seatline authorized this website under. */
-  app?: string;
-  /** The loopback port of Seatline's web service. */
-  localPort?: number;
-  /** Opens Seatline's connect page in a window of its own. Called within the user's click, or the browser blocks it. */
-  openWindow?: (url: string) => { closed: boolean; close: () => void } | null;
-  /** Listens for messages posted to this window, until the returned function is called. */
-  listen?: (listener: (event: { origin: string; source: unknown; data: unknown }) => void) => () => void;
-  /** How long the connect page has to hand over a pairing. */
-  pairTimeoutMs?: number;
 };
 
 /**
@@ -107,6 +95,8 @@ export class SeatlineConnection {
   private readonly waiting: Array<{ start: () => void; cancel: (error: Error) => void }> = [];
   private handshakes = 0;
   private current: CompanionState | undefined;
+  /** The relay channel of the pairing this tab uses. */
+  private inUse: string | undefined;
   private readonly listeners = new Set<() => void>();
 
   constructor(private readonly env: SeatlineEnvironment) {}
@@ -193,44 +183,43 @@ export class SeatlineConnection {
     return pair;
   }
 
-  /**
-   * Gets this website's pairing from Seatline on this computer: opens Seatline's connect page in a window of its own, which posts
-   * the pairing back to this window and closes. Must be called within the user's click: the window is opened before anything is
-   * awaited. Chrome lets a website open such a window without its local network prompt; Safari opens it too.
-   */
-  pairLocally(): Promise<void> {
-    const relay = this.relayOrigin();
-    const { origin, openWindow, listen } = this.env;
-    if (!relay || !origin || !openWindow || !listen) return Promise.reject(new Error("This build cannot connect to Seatline on this computer."));
-    const local = `http://127.0.0.1:${this.env.localPort ?? DEFAULT_LOCAL_PORT}`;
-    const url = `${local}/connect?${new URLSearchParams({ app: this.env.app ?? "conclave", origin, relay })}`;
-    const popup = openWindow(url);
-    if (!popup) return Promise.reject(new Error("The browser blocked Seatline's window. Allow pop-ups for this site, then try again."));
-    return new Promise<void>((resolve, reject) => {
-      const finish = (error?: Error) => {
-        clearTimeout(timer); clearInterval(watch); stop();
-        try { popup.close(); } catch { /* already closed */ }
-        if (error) reject(error); else resolve();
-      };
-      const timer = setTimeout(() => finish(new Error("Seatline did not answer. Make sure Seatline is installed and running on this computer, then try again.")), this.env.pairTimeoutMs ?? 20_000);
-      // Closing the window by hand is an answer too.
-      const watch = setInterval(() => { if (popup.closed) finish(new Error("The Seatline window was closed before it connected.")); }, 500);
-      const stop = listen(event => {
-        if (event.origin !== local || event.source !== popup) return;
-        const data = event.data as Partial<Pair> & { type?: unknown; version?: unknown; error?: unknown; message?: unknown } | null;
-        if (!data || data.type !== PAIRING_MESSAGE || data.version !== 1) return;
-        if (typeof data.error === "string") { finish(new Error(typeof data.message === "string" ? data.message : "Seatline could not connect this site.")); return; }
-        const pair = { id: data.id, token: data.token, key: data.key, relay: data.relay };
-        if (!validPair(pair) || pair.relay !== relay) { finish(new Error("Seatline sent a pairing this site cannot use.")); return; }
-        this.adopt(pair);
-        finish();
-      });
-    });
+  /** The pairing in a link `seatline-companion link` printed (or just its `id:token:key` part), or nothing when it holds none. */
+  static parseLink(text: string): Omit<Pair, "relay"> | undefined {
+    const value = text.trim();
+    const fragment = value.includes("#") ? new URLSearchParams(value.slice(value.indexOf("#") + 1)).get("seatline") : value;
+    const [id, token, key, extra] = (fragment ?? "").split(":");
+    const pair = { id, token, key };
+    return extra === undefined && validPair(pair) ? pair : undefined;
+  }
+
+  /** Links this browser with a link `seatline-companion link` printed, pasted by the user. */
+  linkWith(text: string) {
+    const pair = SeatlineConnection.parseLink(text);
+    if (!pair) throw new Error("That is not a Seatline link. Paste the whole link `seatline-companion link conclave` printed.");
+    const origin = text.trim().startsWith("https://") ? new URL(text.trim()).origin : undefined;
+    if (origin && this.env.origin && origin !== this.env.origin) throw new Error(`That link is for ${origin}, not this site.`);
+    this.adopt({ ...pair, relay: this.relayOrigin() });
+  }
+
+  /** Another tab of this site kept a new pairing (a link opened there): use it here too. */
+  adoptStored() {
+    const saved = this.env.storage.getItem(STORAGE);
+    let pair: Pair | undefined;
+    try { pair = saved ? JSON.parse(saved) : undefined; } catch { pair = undefined; }
+    if (!validPair(pair) || pair.id === this.inUse) return;
+    this.adopt(pair);
+  }
+
+  /** Takes a pairing link from the address, if the page was opened with one, before anything else needs it. */
+  takeLinkFromAddress() {
+    if (!new URLSearchParams(this.env.hash().slice(1)).has("seatline")) return;
+    try { this.pairing(); } catch { /* an invalid link: the state says what is missing */ }
   }
 
   /** Keeps `pair` and starts over with it: whatever ran under the previous one is interrupted. */
   private adopt(pair: Pair) {
     this.env.storage.setItem(STORAGE, JSON.stringify(pair));
+    this.inUse = pair.id;
     this.env.storage.removeItem(LEGACY_STORAGE);
     const previous = this.socket; this.socket = undefined;
     this.fail(new Error("Seatline pairing changed; the request was interrupted"));
@@ -299,6 +288,7 @@ export class SeatlineConnection {
     const relay = new URL(this.env.relayUrl);
     if (relay.protocol !== "https:") throw new Error("Seatline relay must use HTTPS");
     const pair = this.pairing();
+    this.inUse = pair.id;
     const endpoint = new URL(`/channels/${pair.id}/browser`, relay); endpoint.protocol = "wss:";
     this.key = await importKey(b64(pair.key));
     // Share connection creation across concurrent catalogue/bootstrap requests.
@@ -444,7 +434,6 @@ export class SeatlineConnection {
   close() { this.socket?.close(); }
 }
 
-const localPort = Number(import.meta.env.VITE_SEATLINE_LOCAL_PORT) || DEFAULT_LOCAL_PORT;
 const app = (import.meta.env.VITE_SEATLINE_APP as string | undefined) || "conclave";
 
 // Pairings used to live in the tab's session storage, so every new tab had to pair again. Keep one made that way.
@@ -463,28 +452,19 @@ const seatline = new SeatlineConnection({
   hash: () => location.hash,
   clearFragment: () => history.replaceState(null, "", location.pathname + location.search),
   get origin() { return typeof location === "undefined" ? undefined : location.origin; },
-  app,
-  localPort,
-  openWindow: url => window.open(url, "seatline-connect", "popup,width=480,height=560"),
-  listen: listener => {
-    const handle = (event: MessageEvent) => listener(event);
-    window.addEventListener("message", handle);
-    return () => window.removeEventListener("message", handle);
-  },
 });
 
 /** What someone setting up Seatline for this site needs to know. */
 export const companionSetup = {
   app,
-  localPort,
   get origin() { return typeof location === "undefined" ? "" : location.origin; },
   relay: (() => { try { return relayUrl ? new URL(relayUrl).origin : ""; } catch { return ""; } })(),
 };
 
 export const companionState = () => seatline.state;
 export const subscribeCompanion = (listener: () => void) => seatline.subscribe(listener);
-/** Connects this browser to Seatline on this computer. Call it from the user's click. */
-export const connectCompanion = () => seatline.pairLocally();
+/** Links this browser with a pasted `seatline-companion link` link. */
+export const linkCompanion = (text: string) => seatline.linkWith(text);
 
 /** The companion only exposes neutral Seatline provider operations. */
 export class SeatlineClient {
@@ -505,6 +485,9 @@ export const companionLink: SeatlineLink = { generation: () => seatline.generati
 export function disconnectCompanion() { seatline.disconnect(); }
 
 if (typeof window !== "undefined") {
+  // A link opened in this browser lands in a new tab, which keeps the pairing even when this tab runs the app; this tab takes it up.
+  seatline.takeLinkFromAddress();
+  window.addEventListener("storage", event => { if (event.key === STORAGE && event.newValue) seatline.adoptStored(); });
   window.addEventListener("pagehide", () => seatline.close());
   window.addEventListener("pageshow", event => {if (event.persisted) location.reload();});
 }

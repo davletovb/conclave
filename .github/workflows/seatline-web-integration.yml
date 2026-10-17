@@ -13,7 +13,7 @@ jobs:
       matrix:
         include:
           - companion: current
-            ref: 89aa95b9ddd44269edf816baa9d869ee9714273d
+            ref: 10a1e5b44007a835ef6aa3f318056af87a4bd58d
             arguments: ""
           - companion: legacy
             ref: dc1086582c8b98498aa48dae91c8d174bc3cfc3c
@@ -38,6 +38,6 @@ jobs:
       - run: rustup toolchain install stable --profile minimal
       - run: cargo +stable build --manifest-path seatline-runtime/Cargo.toml --locked -p seatline-companion
       - run: node scripts/seatline-web-roundtrip.mjs seatline-runtime/target/debug/seatline-companion ${{ matrix.arguments }}
-      # The background web service and its connect page, which only the current companion has.
+      # Linked browsers and the background web service, which only the current companion has.
       - if: matrix.companion == 'current'
         run: node scripts/seatline-web-connect.mjs seatline-runtime/target/debug/seatline-companion

@@ -24,21 +24,24 @@ pass through the encrypted web connection.
 
 1. Build the web app with `VITE_SEATLINE_RELAY=https://YOUR_RELAY pnpm --filter @conclave/web build` and deploy `apps/web/dist` to Cloudflare Pages.
 2. Set your website's exact origin in `APP_ORIGINS` in `cloudflare/wrangler.jsonc` (for example `{"conclave":["https://conclave.example.com"]}`) and deploy the relay with `wrangler deploy`. The relay needs both Durable Object bindings in that file, `CHANNELS` and `LIMITERS`; without `LIMITERS` it refuses to create pairings.
-3. On the user's machine, once: install Seatline (a companion with the web service, Seatline `89aa95b` or later) and authorize Conclave. The website and relay must be bare `https://` origins:
+3. On the user's machine, once: install Seatline (Seatline `10a1e5b` or later), authorize Conclave, and link the browser. The website and relay must be bare `https://` origins:
 
 ```sh
 seatline-companion install
 seatline-companion authorize conclave codex,claude,gemini,grok https://YOUR_CONCLAVE --relay=https://YOUR_RELAY
+seatline-companion link conclave --open
 ```
 
-That is the whole setup. `authorize` registers Seatline's web service to start at
-login, and from then on the user opens the website and clicks **Connect
-Seatline** once; the browser keeps the pairing, so later visits, reloads and new
-tabs connect on their own. Nothing has to stay open in a terminal. The banner
-shows these two commands, filled in for the site, under "Setting up Seatline for
-the first time?". Users need no Node installation and no per-app companion
-executable. Future web apps implement the same neutral protocol and keep their
-product policy in their own code.
+`authorize` registers Seatline's web service to start at login. `link` makes a
+pairing for one browser and prints its link; `--open` opens it in the default
+browser, and for any other browser the link is pasted into the banner's box. The
+browser keeps the pairing, and the web service keeps Seatline's side of it
+connected, so from then on the site connects whenever it is opened, after
+reloads, in new tabs and after restarts, with nothing to click. Nothing has to
+stay open in a terminal, and Seatline opens no port on the user's machine. The
+banner shows these commands, filled in for the site. Users need no Node
+installation and no per-app companion executable. Future web apps implement the
+same neutral protocol and keep their product policy in their own code.
 
 `seatline-companion pair conclave https://YOUR_RELAY https://YOUR_CONCLAVE --open`
 still works for a one-off pairing without the web service.
@@ -47,40 +50,31 @@ Which build talks to what is decided when the app is built. A build with
 `VITE_SEATLINE_RELAY` uses the companion. A production build with neither that
 nor `VITE_CONCLAVE_API` is the hosted app and reports that it needs a relay. A
 build with `VITE_CONCLAVE_API` keeps using that standalone server.
-`VITE_SEATLINE_LOCAL_PORT` (default 27183) and `VITE_SEATLINE_APP` (default
-`conclave`) must match the Seatline web service's port and the app name used
-with `authorize`.
+`VITE_SEATLINE_APP` (default `conclave`) must match the app name used with
+`authorize`.
 
 ## The connection
 
-**Connect Seatline** opens Seatline's connect page,
-`http://127.0.0.1:27183/connect?app=conclave&origin=…&relay=…`, in a small
-window. Seatline answers it only for an authorized origin and relay, posts the
-website's standing pairing back to the Conclave window (addressed to its exact
-origin) and closes. Conclave accepts the message only from that page, in the
-window it opened, for its own relay. The page is a top-level window rather than
-a request from the page, because browsers treat those differently:
+The site never talks to the local machine directly; every frame goes through the
+relay. That is also why it works the same in every browser: Chrome 147 and later
+block a public site's `fetch` or WebSocket to `127.0.0.1` unless the user grants
+"Apps on device" (Local Network Access), and Safari blocks them outright as mixed
+content. Measured with Chrome 147 against the built site treated as a public
+origin (`--ip-address-space-overrides`), the real Seatline web service and a
+stand-in relay; Safari was not available to test.
 
-| Browser | `fetch` or WebSocket from the site to `127.0.0.1` | The connect window |
-| --- | --- | --- |
-| Chrome 147 and later | Blocked unless the user grants "Apps on device" (Local Network Access) | Allowed, no prompt |
-| Safari | Blocked as mixed content | Allowed |
-
-So the site never talks to the local machine directly: after the handshake every
-frame goes through the relay, as before. Measured with Chrome 147 against the
-built site treated as a public origin (`--ip-address-space-overrides`), the real
-Seatline web service and a stand-in relay; Safari was not available to test.
-
-If Seatline is not running, the window shows the browser's connection error and
-Conclave says after 20 seconds that Seatline did not answer. If the pairing
-lapsed, the relay closes the browser's connection with code 4410 and Conclave
-forgets it and offers Connect Seatline again; if Seatline is not connected to the
-relay, the banner says so and offers Retry.
+A link opened in another tab of the same browser (as `link --open` does while
+Conclave is already open) is kept by that tab and taken up by the tab that runs
+the app. If Seatline is not running, the relay reports its helper missing and the
+banner says so, with how to start it and Retry. If the pairing lapsed, the relay
+closes the browser's connection with code 4410 and Conclave forgets it and asks
+for a new link.
 
 A pairing is scoped to the exact origin, and uses distinct helper and browser
 credentials. It lasts seven days from the last time Seatline connected to the
 relay: the relay renews it (at most once an hour) whenever the helper side
-connects or pings, so it lapses only after a week without Seatline running. The
+connects or pings, so it lapses only after a week without Seatline running.
+`seatline-companion unlink conclave` ends every link at once. The
 encryption key is generated locally and never sent to the relay. The browser
 keeps the pairing in local storage for the site's origin; a pairing link's
 fragment is cleared immediately. Cloudflare can observe connection timing and
@@ -98,8 +92,7 @@ protocol 2 cannot connect; the site says the companion did not answer.
 
 The pairing is a session credential: whoever holds it (relay id, browser token
 and key) can take over the browser side of the pairing for as long as it lasts.
-A pairing link (`pair`, or the connect page opened without a window to post to)
-carries it in the address; keep such a link private, and note that browsers may
+A link carries it in the address; keep such a link private, and note that browsers may
 keep the address, fragment included, in local or synced history until the page
 has cleared it. Script injection on the website's origin can read it from local
 storage, as it could read the link. **Disconnect** forgets the browser's copy.

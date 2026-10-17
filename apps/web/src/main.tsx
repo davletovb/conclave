@@ -21,7 +21,7 @@ import type {
   WorkflowGraph,
   WorkflowPreset,
 } from "@conclave/core";
-import { companionSetup, companionState, connectCompanion, disconnectCompanion, subscribeCompanion, usesCompanion } from "./lib/companion";
+import { companionSetup, companionState, disconnectCompanion, linkCompanion, subscribeCompanion, usesCompanion } from "./lib/companion";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
 import { answerPhase, finalAnswerStepId, followDistance } from "./lib/final-step";
 import { collapsePrompt } from "./lib/text";
@@ -156,7 +156,6 @@ function App() {
   const [providersError, setProvidersError] = useState("");
   const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);
   const companion = useSyncExternalStore(subscribeCompanion, companionState);
-  const [pairing, setPairing] = useState(false);
   const [pairingError, setPairingError] = useState("");
   const [workflowPresets, setWorkflowPresets] = useState<WorkflowPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState("");
@@ -1214,15 +1213,11 @@ function App() {
       <div className="workspace">
         {usesCompanion && <CompanionBanner
           state={companion}
-          pairing={pairing}
           error={pairingError}
           setup={companionSetup}
-          onConnect={() => {
-            setPairingError(""); setPairing(true);
-            // Opened within this click, or the browser blocks Seatline's window.
-            connectCompanion()
-              .catch(cause => setPairingError(cause instanceof Error ? cause.message : "Seatline did not connect."))
-              .finally(() => setPairing(false));
+          onLink={text => {
+            try { linkCompanion(text); setPairingError(""); }
+            catch (cause) { setPairingError(cause instanceof Error ? cause.message : "That link did not work."); }
           }}
           onRetry={() => { setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true }); }}
           onDisconnect={() => { disconnectCompanion(); setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current); }}
@@ -1314,7 +1309,7 @@ function App() {
                 models={models}
                 modelsLoading={modelsLoading}
                 modelsError={usesCompanion && models.length === 0 && (companion.kind === "unpaired" || companion.kind === "unavailable")
-                  ? "Connect Seatline above to use your subscription models." : modelsError}
+                  ? "Link this browser to Seatline (above) to use your subscription models." : modelsError}
                 providerNotes={usesCompanion && companion.kind === "connected" ? providers.filter(provider => provider.id !== "mock" && !provider.connected) : []}
                 onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true })}
                 selectedKeys={selected}
