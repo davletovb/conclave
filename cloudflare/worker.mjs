@@ -1,10 +1,18 @@
 const MAX_MESSAGE = 768 * 1024;
+// A pairing lasts this long after its helper was last connected, so it lives for as long as the user's Seatline
+// keeps connecting and lapses a week after it stops. The renewal is written at most once an hour, however often
+// the helper pings.
+const PAIRING_TTL_MS = 7 * 24 * 60 * 60_000;
+const RENEW_EVERY_MS = 60 * 60_000;
 // Pairing is open to anyone who can reach the relay: the helper is not a browser and cannot prove who it is,
-// and each pairing creates a Durable Object that lives 24 hours. So creating pairings is rate-limited, per
-// client address and per app, by a limiter object that ships with the relay.
+// and each pairing creates a Durable Object that lives until its pairing lapses. So creating pairings is
+// rate-limited, per client address and per app, by a limiter object that ships with the relay.
 const PAIR_WINDOW_MS = 60_000;
 const PAIRS_PER_CLIENT = 6;
 const PAIRS_PER_APP = 60;
+// The close code a browser gets for a pairing the relay no longer has. A browser cannot read the HTTP status of
+// a refused WebSocket, only a close code, and the app must tell "pair again" apart from "Seatline is not running".
+export const PAIRING_GONE = 4410;
 const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 const token = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const equal = (a, b) => typeof a === "string" && a.length === 64 && typeof b === "string" && b.length === 64
@@ -42,7 +50,7 @@ export default {
       const id = token();
       const credentials = { helper: token(), browser: token() };
       const stub = env.CHANNELS.get(env.CHANNELS.idFromName(id));
-      await stub.fetch(new Request("https://internal/init", { method: "POST", body: JSON.stringify({ app: input.app, origin: input.origin, credentials, expires: Date.now() + 24 * 60 * 60_000 }) }));
+      await stub.fetch(new Request("https://internal/init", { method: "POST", body: JSON.stringify({ app: input.app, origin: input.origin, credentials, expires: Date.now() + PAIRING_TTL_MS }) }));
       return Response.json({ id, ...credentials }, { headers: { "cache-control": "no-store" } });
     }
     const route = /^\/channels\/([a-f0-9]{64})\/(browser|helper)$/.exec(url.pathname);
@@ -78,8 +86,14 @@ export class Channel {
       return new Response("Created");
     }
     const pair = await this.state.storage.get("pair");
-    if (!pair || pair.expires <= Date.now()) return new Response("Pairing expired", { status: 410 });
     const role = url.pathname.endsWith("/helper") ? "helper" : "browser";
+    if (!pair || pair.expires <= Date.now()) {
+      // The helper keeps the HTTP refusal it has always understood as final.
+      if (role === "helper") return new Response("Pairing expired", { status: 410 });
+      const [client, server] = Object.values(new WebSocketPair());
+      server.accept(); server.close(PAIRING_GONE, "Pairing expired");
+      return new Response(null, { status: 101, webSocket: client });
+    }
     if (role === "browser" && request.headers.get("origin") !== pair.origin) return new Response("Origin refused", { status: 403 });
     const existing = this.state.getWebSockets(role);
     // Allow one unauthenticated replacement, with a short authentication deadline.
@@ -107,9 +121,14 @@ export class Channel {
       const peers = this.state.getWebSockets(attachment.role === "helper" ? "browser" : "helper").filter(ws => ws.deserializeAttachment()?.authorized);
       socket.send(JSON.stringify({ type: "ready", peer: peers.length > 0 }));
       for (const peer of peers) peer.send(JSON.stringify({ type: "peer", connected: true }));
+      if (attachment.role === "helper") await this.renew(pair);
       return;
     }
-    if (value.type === "ping") { socket.send('{"type":"pong"}'); return; }
+    if (value.type === "ping") {
+      socket.send('{"type":"pong"}');
+      if (attachment.role === "helper") await this.renew(pair);
+      return;
+    }
     if (value.type !== "data" || typeof value.body !== "string" || typeof value.iv !== "string" || !Number.isSafeInteger(value.seq)) { socket.close(1008, "Invalid envelope"); return; }
     if (Date.now() - attachment.window >= 1000) { attachment.window = Date.now(); attachment.bytes = 0; }
     attachment.bytes += message.length;
@@ -128,6 +147,17 @@ export class Channel {
     }
   }
   async webSocketError(socket) { socket.close(1011, "Connection failed"); }
+  /** The helper is connected: the pairing lasts another full term from now. */
+  async renew(pair) {
+    const now = Date.now(), previous = pair.expires;
+    if (previous - now > PAIRING_TTL_MS - RENEW_EVERY_MS) return;
+    pair.expires = now + PAIRING_TTL_MS;
+    await this.state.storage.put("pair", pair);
+    // Move the expiry alarm. An earlier one is the deadline of an unauthenticated socket, and it reschedules
+    // expiry itself when it fires.
+    const alarm = await this.state.storage.getAlarm();
+    if (alarm === null || alarm >= previous) await this.state.storage.setAlarm(pair.expires);
+  }
   async alarm() {
     const pair = await this.state.storage.get("pair");
     if (!pair || pair.expires <= Date.now()) {

@@ -19,7 +19,12 @@ test("pairing admits only configured app origins and bounds chunked bodies", asy
   let created = 0;
   const env = { LIMITERS: limiters(), APP_ORIGINS: JSON.stringify({ conclave: [approved] }), CHANNELS: {
     idFromName: id => id,
-    get: () => ({ async fetch(input) { created++; const saved = await input.json(); assert.equal(saved.origin, approved); return new Response("Created"); } }),
+    get: () => ({ async fetch(input) {
+      created++; const saved = await input.json(); assert.equal(saved.origin, approved);
+      // A new pairing gets a full week; renewal (below) keeps it from lapsing while it is used.
+      assert.ok(Math.abs(saved.expires - (Date.now() + 7 * 24 * 60 * 60_000)) < 5_000);
+      return new Response("Created");
+    } }),
   } };
   assert.equal((await worker.fetch(request(null), env)).status, 400);
   assert.equal((await worker.fetch(request({ app: "conclave", origin: "https://other.test" }), env)).status, 403);
@@ -90,12 +95,58 @@ function socket(role) {
   };
 }
 
-function channel(sockets, saved = pair) {
+function channel(sockets, saved = pair, log = { puts: [], alarms: [] }) {
+  let alarm = saved?.expires ?? null;
   return new Channel({
-    storage: { get: async () => saved, setAlarm: async () => {}, deleteAll: async () => {} },
+    storage: { get: async () => saved, put: async (key, value) => void log.puts.push(structuredClone(value)),
+      getAlarm: async () => alarm, setAlarm: async at => { alarm = at; log.alarms.push(at); }, deleteAll: async () => {} },
     getWebSockets: role => sockets.filter(ws => ws.readyState === 1 && (!role || ws.deserializeAttachment().role === role)),
   });
 }
+
+test("a pairing is renewed for a week while its helper is connected, at most once an hour", async () => {
+  const week = 7 * 24 * 60 * 60_000;
+  const lapsing = structuredClone({ ...pair, expires: Date.now() + 60 * 60_000 });
+  const log = { puts: [], alarms: [] };
+  const helper = socket("helper"); const relay = channel([helper], lapsing, log);
+  await relay.webSocketMessage(helper, JSON.stringify({ type: "auth", token: pair.credentials.helper }));
+  assert.equal(log.puts.length, 1);
+  assert.ok(Math.abs(log.puts[0].expires - (Date.now() + week)) < 5_000);
+  assert.deepEqual(log.alarms, [log.puts[0].expires], "the expiry alarm moves with it");
+  // Pings come every few seconds; the renewal is not written again within the hour.
+  for (let i = 0; i < 5; i++) await relay.webSocketMessage(helper, '{"type":"ping"}');
+  assert.equal(log.puts.length, 1);
+  assert.equal(helper.sent.filter(frame => frame === '{"type":"pong"}').length, 5);
+  // A browser's activity does not keep a pairing whose Seatline is gone.
+  const browserLog = { puts: [], alarms: [] };
+  const browser = socket("browser");
+  const quiet = channel([browser], structuredClone({ ...pair, expires: Date.now() + 60_000 }), browserLog);
+  await quiet.webSocketMessage(browser, JSON.stringify({ type: "auth", token: pair.credentials.browser }));
+  await quiet.webSocketMessage(browser, '{"type":"ping"}');
+  assert.equal(browserLog.puts.length, 0);
+});
+
+test("a browser is told with a close code that its pairing is gone; the helper keeps its HTTP refusal", async () => {
+  const closed = [];
+  const NodeResponse = globalThis.Response;
+  globalThis.WebSocketPair = class { constructor() { return { 0: { client: true }, 1: { accept() {}, close: (code, reason) => closed.push({ code, reason }) } }; } };
+  // Node's Response cannot carry a 101; the Workers runtime's can.
+  globalThis.Response = class extends NodeResponse {
+    constructor(body, init) { if (init?.status === 101) { super(null); this.upgrade = init; } else super(body, init); }
+  };
+  try {
+    for (const saved of [null, { ...pair, expires: Date.now() - 1 }]) {
+      const relay = channel([], saved);
+      const browser = await relay.fetch(new Request("https://relay.test/channels/id/browser", { headers: { origin: approved } }));
+      assert.equal(browser.upgrade?.status, 101);
+      assert.deepEqual(closed.pop(), { code: 4410, reason: "Pairing expired" });
+      assert.equal((await relay.fetch(new Request("https://relay.test/channels/id/helper"))).status, 410);
+    }
+  } finally {
+    globalThis.Response = NodeResponse;
+    delete globalThis.WebSocketPair;
+  }
+});
 
 test("channel checks browser origin, role credentials, and pairing expiry", async () => {
   const browser = socket("browser"); const relay = channel([browser]);
