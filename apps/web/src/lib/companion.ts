@@ -32,10 +32,13 @@ type Pending = { resolve: () => void; reject: (error: Error) => void; emit: (eve
 // only lives as long as the handshake it belongs to.
 const STORAGE = "conclave.seatline.pair.v2";
 const LEGACY_STORAGE = "conclave.seatline.pair.v1";
-const relayUrl = import.meta.env.VITE_SEATLINE_RELAY as string | undefined;
+const configuredRelay = import.meta.env.VITE_SEATLINE_RELAY as string | undefined;
 // A build with a relay talks to the shared companion. So does a production build that names no
 // standalone server; one that sets VITE_CONCLAVE_API keeps using that server, as before.
-export const usesCompanion = Boolean(relayUrl) || (!import.meta.env.DEV && !import.meta.env.VITE_CONCLAVE_API);
+export const usesCompanion = Boolean(configuredRelay) || (!import.meta.env.DEV && !import.meta.env.VITE_CONCLAVE_API);
+// Without a configured relay, the hosted app uses the one its own site serves (public/_worker.js): a
+// same-origin connection, which no browser treats as third-party.
+const relayUrl = configuredRelay || (usesCompanion && typeof location !== "undefined" ? location.origin : undefined);
 
 const SOCKET_OPEN = 1; // WebSocket.OPEN
 

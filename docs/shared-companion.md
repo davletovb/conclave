@@ -22,13 +22,13 @@ pass through the encrypted web connection.
 
 ## Deploy
 
-1. Build the web app with `VITE_SEATLINE_RELAY=https://YOUR_RELAY pnpm --filter @conclave/web build` and deploy `apps/web/dist` to Cloudflare Pages.
-2. Set your website's exact origin in `APP_ORIGINS` in `cloudflare/wrangler.jsonc` (for example `{"conclave":["https://conclave.example.com"]}`) and deploy the relay with `wrangler deploy`. The relay needs both Durable Object bindings in that file, `CHANNELS` and `LIMITERS`; without `LIMITERS` it refuses to create pairings.
-3. On the user's machine, once: install Seatline (Seatline `bf07713` or later), authorize Conclave, and link the browser. The website and relay must be bare `https://` origins:
+1. Set your website's exact origin in `APP_ORIGINS` in `cloudflare/wrangler.jsonc` (for example `{"conclave":["https://conclave.example.com"]}`) and deploy the relay with `wrangler deploy`. The relay needs both Durable Object bindings in that file, `CHANNELS` and `LIMITERS`; without `LIMITERS` it refuses to create pairings.
+2. Build the web app with `pnpm --filter @conclave/web build` and deploy `apps/web/dist` to Cloudflare Pages. In the Pages project's settings, add a service binding named `RELAY` to the `seatline-relay` Worker. The site's `_worker.js` (from `apps/web/public`) forwards `/pair` and `/channels/*` to it, so the relay is reached at the website's own origin; every other path is served as a static file. Without the binding those two paths answer `503`.
+3. On the user's machine, once: install Seatline (Seatline `bf07713` or later), authorize Conclave, and link the browser. The website (which is also the relay) must be a bare `https://` origin:
 
 ```sh
 seatline-companion install
-seatline-companion authorize conclave codex,claude,gemini,grok https://YOUR_CONCLAVE --relay=https://YOUR_RELAY
+seatline-companion authorize conclave codex,claude,gemini,grok https://YOUR_CONCLAVE --relay=https://YOUR_CONCLAVE
 seatline-companion link conclave --open
 ```
 
@@ -43,20 +43,22 @@ banner shows these commands, filled in for the site. Users need no Node
 installation and no per-app companion executable. Future web apps implement the
 same neutral protocol and keep their product policy in their own code.
 
-`seatline-companion pair conclave https://YOUR_RELAY https://YOUR_CONCLAVE --open`
+`seatline-companion pair conclave https://YOUR_CONCLAVE https://YOUR_CONCLAVE --open`
 still works for a one-off pairing without the web service.
 
-Which build talks to what is decided when the app is built. A build with
-`VITE_SEATLINE_RELAY` uses the companion. A production build with neither that
-nor `VITE_CONCLAVE_API` is the hosted app and reports that it needs a relay. A
-build with `VITE_CONCLAVE_API` keeps using that standalone server.
+Which build talks to what is decided when the app is built. A production build
+without `VITE_CONCLAVE_API` is the hosted app: it uses the companion through the
+relay at its own origin, or at `VITE_SEATLINE_RELAY` when that is set (a
+separate relay domain works, but some browsers and extensions block a site's
+connection to a second domain, so the same-origin relay is the default). A build
+with `VITE_CONCLAVE_API` keeps using that standalone server.
 `VITE_SEATLINE_APP` (default `conclave`) must match the app name used with
 `authorize`.
 
 ## The connection
 
 The site never talks to the local machine directly; every frame goes through the
-relay. That is also why it works the same in every browser: Chrome 147 and later
+relay, which it reaches at its own origin. That is also why it works the same in every browser: Chrome 147 and later
 block a public site's `fetch` or WebSocket to `127.0.0.1` unless the user grants
 "Apps on device" (Local Network Access), and Safari blocks them outright as mixed
 content. Measured with Chrome 147 against the built site treated as a public
