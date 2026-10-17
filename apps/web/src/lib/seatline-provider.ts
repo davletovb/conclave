@@ -24,6 +24,28 @@ type Freshness = typeof CACHED | typeof NEW_CHECK;
 const REFUSED_BEFORE_START = new Set(["READINESS_CHANGED", "READINESS_EXPIRED", "READINESS_UNVERIFIED"]);
 
 type Status = NonNullable<SeatlineEvent["status"]>;
+
+/** How to sign each provider's CLI in, for the message that asks the user to. */
+const SIGN_IN: Record<string, string> = { codex: "codex login", claude: "claude auth login", gemini: "agy", grok: "grok login" };
+
+/**
+ * Why a provider cannot be used, in words the user can act on, or nothing when it can. Seatline reports whether the CLI is there,
+ * whether it is signed in and what kind of sign-in it is; Conclave accepts subscription sign-ins (and Google's cloud account).
+ */
+export function unusableReason(provider: string, label: string, state: Status, accepted: (mode?: string) => boolean): string | undefined {
+  const signIn = SIGN_IN[provider] ? `\`${SIGN_IN[provider]}\`` : "the provider's CLI";
+  if (state.availability === "not_found") return `${label} is not installed on this computer, or Seatline cannot find it.`;
+  if (state.authentication === "unauthenticated") return `Signed out. Sign in with ${signIn} on this computer, then retry.`;
+  if (state.authentication !== "authenticated") {
+    return state.availability === "available"
+      ? "Seatline could not confirm the sign-in: the check did not finish. Retry; if it keeps happening, update Seatline."
+      : `Seatline could not run ${label} to check it. Make sure it starts from a terminal, then retry.`;
+  }
+  if (accepted(state.sign_in)) return undefined;
+  if (state.sign_in === "api_key") return `Signed in with an API key. Conclave uses subscription sign-ins: sign in with ${signIn}.`;
+  if (state.sign_in === "cloud") return `Signed in through a cloud provider. Conclave uses subscription sign-ins: sign in with ${signIn}.`;
+  return `Signed in, but Seatline cannot tell whether it is a subscription. Update Seatline, or sign in again with ${signIn}.`;
+}
 /** A provider's status and when the evidence behind it was observed: now, minus the age Seatline reports. */
 type Reading = { status: Status; observedAt: number };
 
@@ -59,15 +81,20 @@ export class SeatlineProvider implements ProviderAdapter {
     let answered: ReturnType<typeof capability> | undefined;
     const take = (event: SeatlineEvent) => { if (event.type === "status") { status = event.status; answered = this.companion; } };
     let known = this.companion;
-    if (known.readiness !== false) {
+    for (let attempt = 0; known.readiness !== false; attempt++) {
       try {
-        await this.client.request(this.provider, "readiness", freshness, take);
+        status = undefined; answered = undefined;
+        await this.client.request(this.provider, "readiness", attempt === 0 ? freshness : NEW_CHECK, take);
         // The first request may complete the 0 -> 1 handshake. Remember the
         // capability on the connection that answered, including reconnects.
         known = answered ?? this.companion;
         known.readiness = true;
+        break;
       }
       catch (error) {
+        // The evidence changed while it was being checked: a CLI that writes its own account file while it is checked (Claude, the
+        // first time) does that. Nothing ran; one new check settles it.
+        if (attempt === 0 && REFUSED_BEFORE_START.has(failureReason(error) ?? "")) continue;
         // An older companion answers a method it does not know as an invalid request. Once the API has answered, that is a real failure.
         known = this.companion;
         if (known.readiness === true || failureReason(error) !== "INVALID_REQUEST") throw error;
@@ -105,9 +132,9 @@ export class SeatlineProvider implements ProviderAdapter {
     try {
       const { status: state } = await this.state(options.fresh ? FRESH : STATE_REUSE_MS);
       return { id: this.id, label: this.label, available: state.availability === "available",
-        connected: state.authentication === "authenticated" && this.acceptedSignIn(state.sign_in),
+        connected: this.usable(state),
         authMode: state.sign_in,
-        message: this.acceptedSignIn(state.sign_in) ? undefined : "Sign in to the provider CLI with your subscription account." };
+        message: unusableReason(this.provider, this.label, state, mode => this.acceptedSignIn(mode)) };
     } catch (error) {
       return { id: this.id, label: this.label, available: false, connected: false,
         message: error instanceof Error ? error.message : "Seatline unavailable" };

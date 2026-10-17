@@ -1,6 +1,6 @@
 import React from "react";
 import { usesCompanion } from "../lib/companion";
-import type { ModelRef, OrchestrationMode } from "@conclave/core";
+import type { ModelRef, OrchestrationMode, ProviderStatus } from "@conclave/core";
 import {
   Icon,
   ModelIdentity,
@@ -41,6 +41,8 @@ type SetupProps = {
   modelsLoading: boolean;
   modelsError: string;
   onRetryModels: () => void;
+  /** Providers that cannot be used now, each with what to do about it. */
+  providerNotes?: ProviderStatus[];
   selectedKeys: string[];
   participants: ModelRef[];
   onToggleModel: (model: ModelRef) => void;
@@ -59,7 +61,7 @@ type SetupProps = {
 
 export function RunSetup(props: SetupProps) {
   const {
-    mode, modes, fresh, onModeChange, models, modelsLoading, modelsError, onRetryModels,
+    mode, modes, fresh, onModeChange, models, modelsLoading, modelsError, onRetryModels, providerNotes = [],
     selectedKeys, participants, onToggleModel, synthesizerKey, onSynthesizerChange, effectiveSynthesizer,
     maxCalls, onMaxCallsChange, maxRounds, onMaxRoundsChange, expectedCalls, requiredParticipants,
     loading, workflowSlot,
@@ -132,7 +134,7 @@ export function RunSetup(props: SetupProps) {
         {models.length === 0 && (
           <div className="notice">
             <Icon name={modelsLoading ? "info" : "alert"} size={14} />
-            <span>{modelsLoading ? "Checking your subscription models…" : modelsError || "No models available from the local server."}</span>
+            <span>{modelsLoading ? "Checking your subscription models…" : modelsError || (usesCompanion ? "None of your subscription models is ready yet." : "No models available from the local server.")}</span>
             {!modelsLoading && <button type="button" className="btn" onClick={onRetryModels}>Retry</button>}
           </div>
         )}
@@ -159,6 +161,14 @@ export function RunSetup(props: SetupProps) {
             );
           })}
         </div>
+
+        {providerNotes.length > 0 && !modelsLoading && (
+          <ul className="provider-notes" aria-label="Providers that are not ready">
+            {providerNotes.map(provider => (
+              <li key={provider.id}><b>{provider.label}</b>{provider.message ?? "Not ready."}</li>
+            ))}
+          </ul>
+        )}
 
         {participants.length > 0 && (
           <div className="roster">

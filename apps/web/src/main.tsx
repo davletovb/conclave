@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   Conversation,
@@ -21,7 +21,7 @@ import type {
   WorkflowGraph,
   WorkflowPreset,
 } from "@conclave/core";
-import { usesCompanion, disconnectCompanion } from "./lib/companion";
+import { companionSetup, companionState, connectCompanion, disconnectCompanion, subscribeCompanion, usesCompanion } from "./lib/companion";
 import { api, readJson, saveBlob, sleep } from "./lib/api";
 import { answerPhase, finalAnswerStepId, followDistance } from "./lib/final-step";
 import { collapsePrompt } from "./lib/text";
@@ -42,6 +42,7 @@ import {
   modelKey,
   synthesizerRole,
 } from "./ui/primitives";
+import { CompanionBanner } from "./ui/companion-banner";
 import { Rail } from "./ui/rail";
 import { RunSetup } from "./ui/setup";
 import { ShortcutsDialog } from "./ui/shortcuts-dialog";
@@ -154,6 +155,9 @@ function App() {
   const [providersLoading, setProvidersLoading] = useState(true);
   const [providersError, setProvidersError] = useState("");
   const [providerLimits, setProviderLimits] = useState<ProviderLimitSnapshot[]>([]);
+  const companion = useSyncExternalStore(subscribeCompanion, companionState);
+  const [pairing, setPairing] = useState(false);
+  const [pairingError, setPairingError] = useState("");
   const [workflowPresets, setWorkflowPresets] = useState<WorkflowPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [workflowText, setWorkflowText] = useState("");
@@ -276,6 +280,13 @@ function App() {
     if (!usesCompanion) return;
     void api.health().then(health => setHistoryUnprotected(health.persistent === false)).catch(() => {});
   }, []);
+
+  // Once Seatline answers (after connecting, or coming back), the catalogue that could not load before can.
+  const companionBefore = useRef(companion.kind);
+  useEffect(() => {
+    const before = companionBefore.current; companionBefore.current = companion.kind;
+    if (usesCompanion && companion.kind === "connected" && before !== "connected") void refreshRuntimeCatalog(viewEpochRef.current);
+  }, [companion.kind]);
 
   useEffect(() => {
     const epoch = beginViewOperation();
@@ -1201,10 +1212,21 @@ function App() {
       />
 
       <div className="workspace">
-        {usesCompanion && <div className="banner" role="status">
-          <p>Use your shared Seatline companion. Open Conclave from Seatline to pair this browser.</p>
-          <button type="button" className="btn btn-ghost" onClick={() => { disconnectCompanion(); location.reload(); }}>Disconnect</button>
-        </div>}
+        {usesCompanion && <CompanionBanner
+          state={companion}
+          pairing={pairing}
+          error={pairingError}
+          setup={companionSetup}
+          onConnect={() => {
+            setPairingError(""); setPairing(true);
+            // Opened within this click, or the browser blocks Seatline's window.
+            connectCompanion()
+              .catch(cause => setPairingError(cause instanceof Error ? cause.message : "Seatline did not connect."))
+              .finally(() => setPairing(false));
+          }}
+          onRetry={() => { setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true }); }}
+          onDisconnect={() => { disconnectCompanion(); setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current); }}
+        />}
         {usesCompanion && historyUnprotected && <div className="banner" data-tone="warn" role="status">
           <Icon name="alert" size={14} className="banner-icon" />
           <p>Your browser has not promised to keep Conclave's history, which lives only in this browser. Export the conversations you want to keep.</p>
@@ -1291,7 +1313,9 @@ function App() {
                 onModeChange={selectMode}
                 models={models}
                 modelsLoading={modelsLoading}
-                modelsError={modelsError}
+                modelsError={usesCompanion && models.length === 0 && (companion.kind === "unpaired" || companion.kind === "unavailable")
+                  ? "Connect Seatline above to use your subscription models." : modelsError}
+                providerNotes={usesCompanion && companion.kind === "connected" ? providers.filter(provider => provider.id !== "mock" && !provider.connected) : []}
                 onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true })}
                 selectedKeys={selected}
                 participants={participants}

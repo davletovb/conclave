@@ -9,11 +9,12 @@ const ID = "a".repeat(64), TOKEN = "b".repeat(64);
 class FakeSocket {
   static all: FakeSocket[] = [];
   readyState = 1; bufferedAmount = 0;
-  onopen?: () => void; onclose?: () => void; onerror?: () => void; onmessage?: (message: { data: string }) => void;
+  onopen?: () => void; onerror?: () => void; onmessage?: (message: { data: string }) => void;
   sent: any[] = []; closedWith: number | undefined; closed = false;
   constructor(readonly url: URL) { FakeSocket.all.push(this); }
   send(data: string) { this.sent.push(JSON.parse(data)); }
-  close(code?: number) { if (this.closed) return; this.closed = true; this.closedWith = code; this.readyState = 3; this.onclose?.(); }
+  onclose?: (event?: { code?: number; reason?: string }) => void;
+  close(code?: number, reason?: string) { if (this.closed) return; this.closed = true; this.closedWith = code; this.readyState = 3; this.onclose?.({ code, reason }); }
   deliver(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
 }
 
@@ -24,17 +25,18 @@ async function until<T>(check: () => T | undefined | false, what: string): Promi
 }
 
 /** A pairing, a connection to it, and a stand-in for the companion at the other end of the relay. */
-function setup(options: { timeoutMs?: number; noticeMs?: number } = {}) {
+function setup(options: { timeoutMs?: number; noticeMs?: number; linked?: boolean; env?: Partial<SeatlineEnvironment> } = {}) {
   FakeSocket.all = [];
   const stored = new Map<string, string>();
   const env: SeatlineEnvironment = {
     relayUrl: "https://relay.test",
     openSocket: url => new FakeSocket(url) as unknown as WebSocket,
     storage: { getItem: k => stored.get(k) ?? null, setItem: (k, v) => void stored.set(k, v), removeItem: k => void stored.delete(k) },
-    hash: () => `#seatline=${ID}:${TOKEN}:${base64url(KEY_BYTES)}`,
+    hash: () => options.linked === false ? "" : `#seatline=${ID}:${TOKEN}:${base64url(KEY_BYTES)}`,
     clearFragment: () => {},
     connectTimeoutMs: options.timeoutMs ?? 2000,
     queueNoticeMs: options.noticeMs,
+    ...options.env,
   };
   const connection = new SeatlineConnection(env);
   const keyPromise = importKey(KEY_BYTES);
@@ -83,7 +85,7 @@ describe("Seatline connection, web protocol 2", () => {
     await done;
     expect(events).toEqual([{ type: "delta", text: "Hello" }]);
     // The saved pairing holds no sequence counters: they only live inside a handshake.
-    expect(JSON.parse(stored.get("conclave.seatline.pair.v2")!)).toEqual({ id: ID, token: TOKEN, key: base64url(KEY_BYTES) });
+    expect(JSON.parse(stored.get("conclave.seatline.pair.v2")!)).toEqual({ id: ID, token: TOKEN, key: base64url(KEY_BYTES), relay: "https://relay.test" });
   });
 
   it.each([
@@ -379,5 +381,142 @@ describe("optional preparation admission", () => {
     const request = await openFrame(helper.key, "browser", epoch, frame) as {id: string};
     await helper.say(final, epoch, 1, {id: request.id, event: {type: "completed"}});
     await expect(recovered).resolves.toBe(true); connection.close();
+  });
+});
+
+describe("where this tab stands with Seatline", () => {
+  it("is unpaired with no pairing, and says how to connect when asked for anything", async () => {
+    const { connection } = setup({ linked: false });
+    expect(connection.state).toEqual({ kind: "unpaired" });
+    await expect(connection.request("codex", "status", null, () => {})).rejects.toThrow(/Connect Seatline/);
+    expect(FakeSocket.all).toHaveLength(0);
+  });
+
+  it("goes from connecting to connected through the handshake, and tells its listeners", async () => {
+    const { connection, keyPromise } = setup();
+    const helper = await companionOf(keyPromise);
+    const seen: string[] = [];
+    connection.subscribe(() => seen.push(connection.state.kind));
+    expect(connection.state.kind).toBe("connecting");
+    const done = connection.request("codex", "status", null, () => {});
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { epoch, browserFrames } = await helper.answer(socket);
+    await until(() => connection.state.kind === "connected", "the handshake");
+    const request = await openFrame(helper.key, "browser", epoch, await until(() => browserFrames()[0], "request")) as { id: string };
+    await helper.say(socket, epoch, 1, { id: request.id, event: { type: "completed" } });
+    await done;
+    expect(seen).toEqual(["connected"]);
+  });
+
+  it("waits while the relay says Seatline is not there, then says Seatline is not answering", async () => {
+    const { connection } = setup({ timeoutMs: 80 });
+    const failed = connection.request("codex", "status", null, () => {}).then(() => undefined, error => error as Error);
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    socket.onopen?.(); socket.deliver({ type: "ready", peer: false });
+    await until(() => connection.state.kind === "waiting", "the waiting state");
+    expect((await failed)?.message).toMatch(/isn't answering from this computer/);
+    expect(connection.state).toMatchObject({ kind: "unavailable", message: expect.stringMatching(/running/) });
+  });
+
+  it("forgets a pairing the relay no longer has, and says to connect again", async () => {
+    const { connection, stored } = setup();
+    const failed = connection.request("codex", "status", null, () => {}).then(() => undefined, error => error as Error);
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    expect(stored.has("conclave.seatline.pair.v2")).toBe(true);
+    socket.close(4410, "Pairing expired");
+    expect((await failed)?.message).toMatch(/expired/);
+    expect(stored.has("conclave.seatline.pair.v2")).toBe(false);
+    expect(connection.state).toMatchObject({ kind: "unpaired", message: expect.stringMatching(/expired/) });
+  });
+
+  it("is unavailable, not unpaired, when the relay cannot be reached", async () => {
+    const { connection, stored } = setup();
+    const failed = connection.request("codex", "status", null, () => {}).then(() => undefined, error => error as Error);
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    socket.close(1006);
+    expect((await failed)?.message).toMatch(/Can't reach the Seatline relay/);
+    expect(stored.has("conclave.seatline.pair.v2")).toBe(true);
+    expect(connection.state.kind).toBe("unavailable");
+  });
+
+  it("drops a kept pairing made at another relay", async () => {
+    const { connection, stored } = setup({ linked: false });
+    stored.set("conclave.seatline.pair.v2", JSON.stringify({ id: ID, token: TOKEN, key: base64url(KEY_BYTES), relay: "https://old-relay.test" }));
+    await expect(connection.request("codex", "status", null, () => {})).rejects.toThrow(/Connect Seatline/);
+    expect(stored.size).toBe(0);
+  });
+});
+
+describe("connecting this browser to Seatline on this computer", () => {
+  const LOCAL = "http://127.0.0.1:27183";
+  function local(options: { blocked?: boolean; pairTimeoutMs?: number } = {}) {
+    const opened: string[] = [];
+    const popup = { closed: false, close() { this.closed = true; } };
+    let listener: ((event: { origin: string; source: unknown; data: unknown }) => void) | undefined;
+    const harness = setup({ linked: false, env: {
+      origin: "https://conclave.test", app: "conclave", localPort: 27183, pairTimeoutMs: options.pairTimeoutMs ?? 2000,
+      openWindow: url => { opened.push(url); return options.blocked ? null : popup; },
+      listen: next => { listener = next; return () => { listener = undefined; }; },
+    } });
+    const post = (data: unknown, origin = LOCAL, source: unknown = popup) => listener?.({ origin, source, data });
+    return { ...harness, opened, popup, post, listening: () => Boolean(listener) };
+  }
+  const pairing = { type: "seatline-pairing", version: 1, app: "conclave", relay: "https://relay.test", id: ID, token: TOKEN, key: base64url(KEY_BYTES) };
+
+  it("opens Seatline's page for this site and relay, keeps the pairing it posts back, and connects", async () => {
+    const { connection, stored, opened, popup, post, keyPromise } = local();
+    const helper = await companionOf(keyPromise);
+    const done = connection.pairLocally();
+    const url = new URL(opened[0]);
+    expect(url.origin).toBe(LOCAL);
+    expect(url.pathname).toBe("/connect");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ app: "conclave", origin: "https://conclave.test", relay: "https://relay.test" });
+    post(pairing);
+    await done;
+    expect(popup.closed).toBe(true);
+    expect(JSON.parse(stored.get("conclave.seatline.pair.v2")!)).toEqual({ id: ID, token: TOKEN, key: base64url(KEY_BYTES), relay: "https://relay.test" });
+    // It connects at once, so the app can show it before anything is asked.
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    await helper.answer(socket);
+    await until(() => connection.state.kind === "connected", "the handshake");
+  });
+
+  it("listens only to Seatline's page in the window it opened", async () => {
+    const { connection, stored, post, listening } = local({ pairTimeoutMs: 150 });
+    const done = connection.pairLocally().then(() => undefined, error => error as Error);
+    post(pairing, "https://attacker.test");
+    post(pairing, "http://localhost:27183");
+    post(pairing, LOCAL, { other: "window" });
+    post({ ...pairing, version: 2 });
+    expect(stored.size).toBe(0);
+    expect((await done)?.message).toMatch(/did not answer/);
+    expect(listening()).toBe(false);
+  });
+
+  it("refuses a pairing for another relay or a malformed one", async () => {
+    for (const bad of [{ ...pairing, relay: "https://elsewhere.test" }, { ...pairing, id: "x" }, { ...pairing, key: "short" }]) {
+      const { connection, stored, post } = local();
+      const done = connection.pairLocally().then(() => undefined, error => error as Error);
+      post(bad);
+      expect((await done)?.message).toMatch(/cannot use/);
+      expect(stored.size).toBe(0);
+    }
+  });
+
+  it("passes on what Seatline says when it could not pair", async () => {
+    const { connection, post } = local();
+    const done = connection.pairLocally();
+    post({ type: "seatline-pairing", version: 1, error: "relay_unavailable", message: "Seatline could not get a pairing from the relay." });
+    await expect(done).rejects.toThrow("Seatline could not get a pairing from the relay.");
+  });
+
+  it("says when the browser blocked the window, or the user closed it", async () => {
+    await expect(local({ blocked: true }).connection.pairLocally()).rejects.toThrow(/blocked/);
+    const { connection, popup } = local();
+    const done = connection.pairLocally();
+    popup.closed = true;
+    await expect(done).rejects.toThrow(/closed/);
   });
 });

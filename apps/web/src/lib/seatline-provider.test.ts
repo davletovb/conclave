@@ -295,3 +295,50 @@ describe("preparing the providers a run is likely to use", () => {
     expect(await provider.status()).toMatchObject({ connected: true });
   });
 });
+
+describe("why a provider cannot be used", () => {
+  const claudeWith = (status: Status) => new SeatlineProvider("anthropic", "Claude Code", "claude", {
+    async request(_provider, _method, _params, emit) { emit({ type: "status", status }); },
+  } as SeatlineClient);
+
+  it.each([
+    ["not installed", { availability: "not_found", authentication: "unknown" }, /not installed on this computer/],
+    ["signed out", { authentication: "unauthenticated", sign_in: undefined }, /Signed out\. Sign in with `claude auth login`/],
+    ["a check that did not finish", { authentication: "unknown", sign_in: undefined }, /could not confirm the sign-in/],
+    ["a CLI that would not run", { availability: "unavailable", authentication: "unknown", sign_in: undefined }, /could not run Claude Code/],
+    ["an API key", { sign_in: "api_key" }, /Signed in with an API key/],
+    ["a cloud provider", { sign_in: "cloud" }, /through a cloud provider/],
+    ["an unrecognised sign-in", { sign_in: "unknown" }, /cannot tell whether it is a subscription/],
+  ] as const)("says so for %s", async (_name, extra, reason) => {
+    const status = await claudeWith(ready("subscription", extra as Partial<Status>)).status();
+    expect(status.connected).toBe(false);
+    expect(status.message).toMatch(reason);
+  });
+
+  it("says nothing for a usable subscription sign-in", async () => {
+    expect(await claudeWith(ready("subscription")).status()).toMatchObject({ connected: true, message: undefined });
+  });
+
+  it("checks once more when the evidence changed while it was checked, as a CLI writing its own account file does", async () => {
+    const f = companion("subscription");
+    const original = f.client.request.bind(f.client);
+    let refused = false;
+    f.client.request = async (provider, method, params, emit) => {
+      await original(provider, method, params, emit);
+      if (method === "readiness" && !refused) { refused = true; throw new SeatlineFailure("READINESS_CHANGED"); }
+    };
+    expect(await codex(f.client).status()).toMatchObject({ connected: true });
+    expect(f.calls.map(call => [call.method, call.params?.mode])).toEqual([["readiness", "cached"], ["readiness", "fresh"]]);
+  });
+
+  it("does not check a third time when the evidence keeps changing", async () => {
+    const f = companion("subscription");
+    const original = f.client.request.bind(f.client);
+    f.client.request = async (provider, method, params, emit) => {
+      await original(provider, method, params, emit);
+      if (method === "readiness") throw new SeatlineFailure("READINESS_CHANGED");
+    };
+    expect(await codex(f.client).status()).toMatchObject({ connected: false, message: "READINESS_CHANGED" });
+    expect(f.methods()).toEqual(["readiness", "readiness"]);
+  });
+});

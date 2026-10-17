@@ -236,7 +236,7 @@ export function Rail(props: RailProps) {
       ? `${connected.map(runtimeName).join(" · ")} connected`
       : providers.length === 0
         ? "Runtime status unavailable"
-        : "Subscription runtimes offline · mocks active";
+        : providers.some(provider => provider.id === "mock") ? "Subscription runtimes offline · mocks active" : "Subscription runtimes offline";
   const runtimeDetail = providersLoading
     ? "Checking local subscription runtimes…"
     : providersError || subscription
@@ -341,7 +341,8 @@ export function Rail(props: RailProps) {
             {subscription.map(provider => (
               <React.Fragment key={provider.id}>
                 <dt>{runtimeName(provider)}</dt>
-                <dd title={provider.message}>{provider.connected ? "connected" : provider.available ? "signed out" : "not installed"}</dd>
+                <dd>{provider.connected ? "connected" : provider.available ? "not ready" : "unavailable"}</dd>
+                {!provider.connected && provider.message && <dd className="kv-note">{provider.message}</dd>}
               </React.Fragment>
             ))}
             {subscription.length === 0 && !providersError && <dd style={{ gridColumn: "1 / -1" }}>{runtimeDetail}</dd>}
