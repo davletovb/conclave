@@ -36,14 +36,13 @@ function get<T>(path: string, init?: RequestInit) {
 }
 
 function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
-  // Shared web search needs a Conclave server with SearXNG behind it, which the hosted app does not have.
-  const enabled = !usesCompanion && localStorage.getItem("conclave.webSearch") === "shared";
+  const enabled = usesCompanion && localStorage.getItem("conclave.webSearch") === "native";
   if (!enabled) return body;
   return {
     ...body,
     request: {
       ...body.request,
-      webSearch: body.request.webSearch ?? { mode: "shared", maxResults: 6 },
+      webSearch: { mode: "native" },
     },
   };
 }

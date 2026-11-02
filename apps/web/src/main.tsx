@@ -31,6 +31,7 @@ import { parseWorkflow, requiredParticipants, serializeWorkflow } from "./lib/wo
 import { CouncilWork } from "./ui/council";
 import { RunInspector } from "./ui/inspector";
 import { Markdown } from "./ui/markdown";
+import { SourceLinks } from "./ui/sources";
 import { CommandPalette, type Command } from "./ui/palette";
 import {
   Icon,
@@ -786,7 +787,7 @@ function App() {
 
     if (streamEvent.type === "step_retrying") {
       setCompletedStepIds(current => current.filter(id => id !== streamEvent.stepId));
-      setLiveSteps(current => current.map(step => (step.id === streamEvent.stepId ? { ...step, content: "" } : step)));
+      setLiveSteps(current => current.map(step => (step.id === streamEvent.stepId ? { ...step, content: "", sources: [] } : step)));
       return;
     }
 
@@ -800,6 +801,14 @@ function App() {
       setLiveSteps(current => current.map(step => (step.id === streamEvent.stepId
         ? { ...step, content: step.content + streamEvent.delta }
         : step)));
+      return;
+    }
+
+    if (streamEvent.type === "citation" && streamEvent.url) {
+      setLiveSteps(current => current.map(step => {
+        if (step.id !== streamEvent.stepId || step.sources?.some(source => source.url === streamEvent.url)) return step;
+        return { ...step, sources: [...(step.sources ?? []), { url: streamEvent.url!, title: streamEvent.title }] };
+      }));
       return;
     }
 
@@ -1417,6 +1426,7 @@ function App() {
                 <div className="answer-body">
                   <Markdown content={result ? result.final : finalStep!.content} />
                 </div>
+                <SourceLinks sources={displayedSteps.flatMap(step => step.sources ?? [])} />
               </section>
             )}
 

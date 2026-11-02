@@ -1,34 +1,22 @@
-# Shared web search
+# Native web search through Seatline
 
-Conclave can perform one provider-independent web search before a persistent run and give every selected model the same evidence packet. This keeps Compare, Panel, Debate, Judge, Consensus, Research Council, and custom workflows grounded in the same retrieved material instead of relying on provider-specific browsing behavior.
+Conclave no longer uses a separate SearXNG instance. Web search is optional and is executed using each selected model provider's native search tools through Seatline, as in TabBeam.
 
-## Configure SearXNG
+## Setup
 
-Run or use a SearXNG instance whose `/search` endpoint allows JSON output, then start Conclave with:
+Connect the hosted Conclave web app to Seatline, using the shared companion setup. In **Run configuration → Web evidence**, enable **Native web search**. The selection is stored in local browser settings for subsequent runs.
 
-```bash
-export CONCLAVE_SEARXNG_URL=http://127.0.0.1:8080
-pnpm dev
-```
+No search-engine API key, separate search server, or `CONCLAVE_SEARXNG_URL` is needed. Search is currently supported by Seatline adapters for Codex, Claude, and Gemini when their runtime advertises `web_search: true`; the current Grok runtime reports it unsupported. The standalone Fastify provider adapters do not use Seatline's search policy, so search is unavailable with those adapters.
 
-Optional search timeout, in milliseconds:
+## Execution
 
-```bash
-export CONCLAVE_SEARCH_TIMEOUT_MS=12000
-```
+- Each model step gets `native_web_search` as its Seatline tool policy instead of `none`. The companion enforces sign-in policy as before.
+- Search runs via the model provider, so sources and research paths **can differ between models**. This intentionally replaces the previous identical shared-evidence packet. If identical input sources are required for an experiment, a separate future evidence-collection phase would be needed.
+- Seatline emits normalized source events. Conclave accepts HTTP(S) URLs, deduplicates them per step, and surfaces them as citation events in the persisted run stream.
+- The provider must advertise native web-search capability, and a search turn without usable sources fails explicitly instead of being represented as a grounded answer.
+- Search may increase latency and provider usage; no external search engine is billed by Conclave.
+- Search result text is untrusted external content. Seatline's native search policy isolates non-search tools, but answers and citations still require scrutiny; cited URLs are not automatically independently verified.
 
-In **Run configuration → Web evidence**, turn on **Shared web search**. New runs then request up to six normalized results by default.
+## Compatibility
 
-## Behavior
-
-- Search happens on the Conclave server before any model call is started.
-- If search is unavailable, times out, or returns no usable results, the run is rejected before subscription-backed model calls are consumed.
-- The resolved evidence is stored inside the persistent run request. Resuming a failed/interrupted/cancelled run therefore reuses the original evidence rather than searching a newer web.
-- The visible user message remains the original prompt; search snippets are injected only as a system-context evidence packet at execution time.
-- All selected models receive the same packet.
-- Retrieved snippets are explicitly marked as **untrusted external content**. Models are instructed to ignore instructions contained inside snippets/pages and treat the material only as evidence.
-- Result URLs are limited to HTTP(S), fragments are removed, duplicate URLs are collapsed, and snippets/titles are length-bounded before entering model context.
-
-## Current scope
-
-The first implementation intentionally supports only **shared search**. It does not enable each provider runtime's native browsing tools. A future independent-research mode can add agent-directed follow-up searches without changing the model-provider abstraction.
+Older saved SearXNG evidence packets remain readable and are still injected as historical evidence when resuming a run that already stored one; no SearXNG requests can be made. New requests selecting legacy `shared` mode are rejected with a migration message. The old search provider implementation, test suite, and environment variable are removed.

@@ -24,7 +24,7 @@ const NOT_PAIRED = "This browser is not linked to Seatline yet. Run `seatline-co
 
 /** Seatline's readiness record, present on explicit readiness and preparation results: `source` is `fresh`, `cached` or `shared`; `age_ms` how old the verified evidence is. */
 export type SeatlineReadiness = { source: string; age_ms: number };
-export type SeatlineEvent = { type: string; text?: string; reason?: string; status?: { availability: string; authentication: string; sign_in?: string; models: Array<{id:string;label:string}>; readiness?: SeatlineReadiness }; usage?: {input_tokens?:number;output_tokens?:number} };
+export type SeatlineEvent = { type: string; text?: string; reason?: string; source?: { id: string; backend_id: string; title: string; url: string; snippet: string }; status?: { availability: string; authentication: string; sign_in?: string; capabilities?: { web_search?: boolean | "unknown" }; models: Array<{id:string;label:string}>; readiness?: SeatlineReadiness }; usage?: {input_tokens?:number;output_tokens?:number} };
 type Packet = {id: string; event: SeatlineEvent};
 type Pending = { resolve: () => void; reject: (error: Error) => void; emit: (event: SeatlineEvent) => void; dispose: () => void };
 

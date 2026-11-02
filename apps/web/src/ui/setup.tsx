@@ -67,7 +67,7 @@ export function RunSetup(props: SetupProps) {
     loading, workflowSlot,
   } = props;
   const [webSearchEnabled, setWebSearchEnabled] = React.useState(
-    () => !usesCompanion && localStorage.getItem("conclave.webSearch") === "shared",
+    () => usesCompanion && localStorage.getItem("conclave.webSearch") === "native",
   );
 
   const meta = (id: OrchestrationMode) => modes.find(item => item.id === id)!;
@@ -92,7 +92,7 @@ export function RunSetup(props: SetupProps) {
   const toggleWebSearch = () => {
     const next = !webSearchEnabled;
     setWebSearchEnabled(next);
-    if (next) localStorage.setItem("conclave.webSearch", "shared");
+    if (next) localStorage.setItem("conclave.webSearch", "native");
     else localStorage.removeItem("conclave.webSearch");
   };
 
@@ -212,21 +212,19 @@ export function RunSetup(props: SetupProps) {
       <div className="section">
         <header>
           <span className="eyebrow">Web evidence</span>
-          <span className="num">{usesCompanion ? "UNAVAILABLE" : webSearchEnabled ? "ON" : "OFF"}</span>
+          <span className="num">{!usesCompanion ? "UNAVAILABLE" : webSearchEnabled ? "ON" : "OFF"}</span>
         </header>
         <button
           type="button"
           className="mode"
           aria-pressed={webSearchEnabled}
-          disabled={loading || usesCompanion}
+          disabled={loading || !usesCompanion}
           onClick={toggleWebSearch}
         >
-          <strong>Shared web search</strong>
-          <span>
-            {usesCompanion
-              ? "Not available in the hosted app: shared search needs a Conclave server with SearXNG behind it."
-              : "Search once before the run and give every selected model the same SearXNG evidence packet. Requires CONCLAVE_SEARXNG_URL on the server."}
-          </span>
+          <strong>Native web search</strong>
+          <span>{usesCompanion
+            ? "Let each model use its Seatline provider’s web search. Codex, Claude and Gemini support it; Grok does not. Sources may differ."
+            : "Use the hosted Seatline connection to enable native search; standalone local provider adapters do not support it."}</span>
         </button>
       </div>
 

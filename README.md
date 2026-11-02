@@ -6,9 +6,9 @@ Conclave is a local-first multi-model reasoning environment where GPT, Claude, G
 
 It is not primarily a model switcher. The point is to make **comparison, disagreement, critique, synthesis, delegation, and verification** first-class parts of the reasoning process while keeping the underlying model work visible.
 
-Conclave runs locally and is designed around subscription-backed provider runtimes rather than direct model API-key integrations. Optional shared web search can give every participating model the same retrieved evidence before a run starts.
+Conclave runs locally and is designed around subscription-backed provider runtimes rather than direct model API-key integrations. Optional native web search lets supported Seatline-backed models retrieve and cite their own sources.
 
-> **Status:** actively developed personal project. The web app, persistent run system, four provider adapters, orchestration modes, custom workflows, and shared web search are implemented.
+> **Status:** actively developed personal project. The web app, persistent run system, four provider adapters, orchestration modes, custom workflows, and Seatline-native web search are implemented.
 
 ## Why Conclave
 
@@ -19,7 +19,7 @@ Conclave makes that process explicit.
 - **Independent first passes** preserve different model perspectives before synthesis.
 - **Structured orchestration** defines who answers, critiques, judges, revises, routes, or synthesizes.
 - **Visible council work** keeps intermediate reasoning products inspectable instead of hiding them behind one final answer.
-- **Shared evidence** can ground every model in the same web-search results.
+- **Native web search** lets each supported model retrieve and cite web sources through Seatline.
 - **Local persistence** keeps conversations, run history, partial output, and inspection data on the machine running Conclave.
 - **Subscription-first adapters** reuse supported local provider runtimes and their existing account sign-ins.
 
@@ -29,7 +29,7 @@ Conclave makes that process explicit.
 | --- | --- |
 | Multi-model runs | Use OpenAI, Anthropic, xAI, and Google models in one conversation |
 | 12 orchestration modes | Compare, debate, synthesize, critique, judge, route, red-team, plan, and build custom workflows |
-| Shared web evidence | Search once through SearXNG and give every selected model the same evidence packet |
+| Native web search | Let supported Seatline-backed models search independently and report source citations |
 | Persistent runs | Refresh or close the browser without cancelling work already owned by the local server |
 | Streaming | See model output and final answers arrive incrementally |
 | Partial-failure recovery | Preserve useful sibling results when one provider fails, with bounded retry for transient failures |
@@ -74,34 +74,24 @@ Conclave ships with twelve built-in ways to organize model work:
 
 Multi-stage modes are bounded before execution. Debate, for example, allows 1–3 critique rounds, and every run is checked against its call budget before provider work begins.
 
-## Shared web evidence
+## Native web search
 
-Conclave can perform one provider-independent web search before a persistent run. The retrieved results are normalized into a single evidence packet and injected into every selected model as system context.
+Hosted Conclave uses the existing Seatline companion. Enable **Native web search** in Run configuration to let each selected model step use its provider's native browsing tool. Codex, Claude, and Gemini advertise native search in supported Seatline versions; Grok currently does not. Selected models can retrieve different sources. The shared SearXNG server and its configuration have been removed; new runs never fetch through a separate search provider.
 
-That matters for multi-model work: Compare, Debate, Judge, Consensus, Research Council, and custom workflows can reason over the **same retrieved material** instead of each provider seeing a different browsing environment—or none at all.
+Search is strictly opt-in, requires an authenticated supported Seatline adapter, and fails instead of silently returning an ungrounded answer. Source URLs are emitted as run citations. Older saved shared-evidence runs remain readable and can reuse their stored evidence without starting a fresh external search.
 
-Search currently uses SearXNG and is deliberately separate from provider-native browsing tools.
+The old standalone Fastify provider adapters do not implement this Seatline tool policy; use the hosted Seatline mode for native search.
 
-See **[Shared web search](docs/web-search.md)** for setup and behavior.
+See **[Native web search](docs/web-search.md)** for details.
 
 ## How it works
 
-```text
-                         optional
-                      ┌───────────┐
-                      │  SearXNG  │
-                      └─────┬─────┘
-                            │ shared evidence
-                            ▼
-┌──────────────┐      ┌───────────────┐      ┌─────────────────────┐
-│ React + Vite │ ───► │ Fastify server│ ───► │ Orchestration engine │
-│     web UI   │      │  + run store  │      └──────────┬──────────┘
-└──────────────┘      └───────────────┘                 │
-                                                        │
-                    ┌───────────────────────────────────┼───────────────┐
-                    ▼                                   ▼               ▼
-              Codex runtime                       Claude Code       Grok / Gemini
-```
+\`\`\`text
+Hosted browser UI → Orchestrator + browser run store → Seatline companion
+                                                      ↳ Codex native web search
+                                                      ↳ Claude native web search
+                                                      ↳ Gemini native web search
+\`\`\`
 
 The browser never talks directly to provider runtimes. The local server owns provider processes, orchestration, persistence, cancellation, retries, search evidence, and the normalized event stream consumed by the UI.
 
@@ -169,16 +159,9 @@ Complete Google sign-in in Antigravity, then restart Conclave.
 
 For installation details and the exact authentication boundary used by each adapter, see **[Provider runtimes](docs/providers.md)**.
 
-### Optional: enable shared web search
+### Optional: enable native web search
 
-Run a SearXNG instance with JSON search enabled, then:
-
-```bash
-export CONCLAVE_SEARXNG_URL=http://127.0.0.1:8080
-pnpm dev
-```
-
-Enable **Shared web search** in Run configuration → Web evidence.
+Connect the hosted Conclave app to Seatline, then enable **Native web search** under Run configuration → Web evidence. No additional search engine provider or API key is required. Unsupported model runtimes are rejected explicitly.
 
 ## The interface
 
@@ -286,7 +269,7 @@ GitHub Actions runs the same verification gates on pull requests.
 
 - **[Provider runtimes](docs/providers.md)** — provider installation, subscription authentication, runtime boundaries, models, cancellation, and quota visibility
 - **[Runtime and architecture](docs/runtime.md)** — persistence, streaming events, budgets, retries, API endpoints, environment configuration, and run lifecycle
-- **[Shared web search](docs/web-search.md)** — SearXNG configuration, shared evidence behavior, and current search scope
+- **[Native web search](docs/web-search.md)** — Seatline search policy, source citations, and provider support
 
 ## Project direction
 

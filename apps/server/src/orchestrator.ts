@@ -10,6 +10,7 @@ import type {
   ProviderAdapter,
   ProviderResponse,
   ProviderStreamEvent,
+  SourceCitation,
   RunBudget,
   RunUsage,
   StepFailure,
@@ -49,6 +50,7 @@ type RunContext = {
   usage: RunUsage;
   stepUsage: Map<string, { inputTokens: number; outputTokens: number }>;
   plannedCallsRemaining: number;
+  nativeWebSearch: boolean;
 };
 
 type ExecuteStepOptions = {
@@ -411,6 +413,14 @@ export class Orchestrator {
   }
 
   validateRequest(request: OrchestrationRequest) {
+    if (request.webSearch?.mode === "native") {
+      const selected = [...request.participants, ...(request.synthesizer ? [request.synthesizer] : [])];
+      for (const model of selected) {
+        if (this.adapterFor(model).nativeWebSearch !== true) {
+          throw new Error(`${model.label} does not support Seatline native web search. Disable search or choose a Seatline model with search support.`);
+        }
+      }
+    }
     this.validateShape(request);
     this.enforceBudget(request);
   }
@@ -573,6 +583,7 @@ export class Orchestrator {
               { role: "user", content: spec.prompt },
             ],
             signal: controller.signal,
+            nativeWebSearch: context.nativeWebSearch,
           },
           (event) => {
             if (settled) return;
@@ -647,12 +658,23 @@ export class Orchestrator {
       }
 
       let emittedText = false;
+      const sources: SourceCitation[] = [];
+      const seenSourceUrls = new Set<string>();
       try {
         const response = await this.generateWithStallWatchdog(
           spec,
           context,
           (event) => {
             if (event.type === "text_delta" && event.delta) emittedText = true;
+            if (event.type === "citation" && event.url) {
+              try {
+                const url = new URL(event.url);
+                if ((url.protocol === "https:" || url.protocol === "http:") && !seenSourceUrls.has(url.href)) {
+                  seenSourceUrls.add(url.href);
+                  sources.push({ url: url.href, title: event.title });
+                }
+              } catch { /* Ignore invalid URLs from providers. */ }
+            }
             this.mapProviderEvent(context, spec.id, event);
           },
         );
@@ -674,6 +696,7 @@ export class Orchestrator {
           kind: spec.kind,
           model: spec.model,
           content: response.content,
+          ...(sources.length ? { sources } : {}),
           dependsOn: spec.dependsOn,
           final: spec.final,
         };
@@ -1040,6 +1063,7 @@ ${transcript(steps)}`;
       usage: emptyRunUsage(),
       stepUsage: new Map(),
       plannedCallsRemaining: 0,
+      nativeWebSearch: request.webSearch?.mode === "native",
     };
 
     context.emit?.({ type: "run_started", runId, mode: request.mode });

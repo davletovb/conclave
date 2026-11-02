@@ -3,6 +3,7 @@ import type { OrchestrationStep, RunInspection } from "@conclave/core";
 import { stepStatus } from "../lib/step-status";
 import { collapseStepOutput, formatDuration, previewLine } from "../lib/text";
 import { Markdown } from "./markdown";
+import { SourceLinks } from "./sources";
 import { Icon, Keys, ProviderMark, providerClass, stepKindLabel } from "./primitives";
 
 function StepBody({ step, expanded }: { step: OrchestrationStep; expanded: boolean }) {
@@ -35,6 +36,7 @@ function StepBody({ step, expanded }: { step: OrchestrationStep; expanded: boole
           </>
         )
         : <p style={{ margin: 0, color: "var(--ink-4)" }}>Waiting for the first tokens…</p>}
+      <SourceLinks sources={step.sources} />
     </div>
   );
 }

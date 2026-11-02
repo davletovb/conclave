@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ModelRef, ProviderRequest, WorkflowGraph } from "@conclave/core";
+import type { ModelRef, ProviderEventSink, ProviderRequest, WorkflowGraph } from "@conclave/core";
 import { MockProvider } from "../providers/mock.js";
 import { Orchestrator } from "../orchestrator.js";
 import { FileStateStore } from "./file-store.js";
@@ -434,5 +434,42 @@ describe("RunManager", () => {
     })).rejects.toThrow(/node must be an object/i);
 
     expect(await manager.listConversations()).toEqual([]);
+  });
+});
+
+
+describe("persisted native search source inspection", () => {
+  class CitingMockProvider extends MockProvider {
+    readonly nativeWebSearch = true;
+
+    override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+      expect(request.nativeWebSearch).toBe(true);
+      emit?.({ type: "citation", url: "https://example.org/study", title: "Study" });
+      return super.generate(request);
+    }
+  }
+
+  it("stores source links on the final result and reconstructs them from the event log", async () => {
+    const { manager, store } = await makeManager(new CitingMockProvider());
+    const started = await manager.start({
+      request: {
+        mode: "single",
+        prompt: "Find evidence",
+        participants: [participant],
+        webSearch: { mode: "native" },
+      },
+    });
+    const finished = await waitForTerminal(manager, started.runId);
+    const expected = [{ url: "https://example.org/study", title: "Study" }];
+    expect(finished.status).toBe("completed");
+    expect(finished.result?.steps[0].sources).toEqual(expected);
+
+    const records = await store.readRunEvents(started.runId);
+    expect(records.some(record => record.event.type === "citation")).toBe(true);
+    expect(records.find(record => record.event.type === "run_completed"))
+      .toMatchObject({ event: { result: { steps: [{ sources: expected }] } } });
+
+    const inspection = await manager.inspect(started.runId);
+    expect(inspection?.attempts.at(-1)?.steps[0].sources).toEqual(expected);
   });
 });
