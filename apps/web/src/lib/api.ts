@@ -36,7 +36,7 @@ function get<T>(path: string, init?: RequestInit) {
 }
 
 function withWebSearchPreference(body: StartRunRequest): StartRunRequest {
-  const enabled = localStorage.getItem("conclave.webSearch") === "native";
+  const enabled = usesCompanion && localStorage.getItem("conclave.webSearch") === "native";
   if (!enabled) return body;
   return {
     ...body,
