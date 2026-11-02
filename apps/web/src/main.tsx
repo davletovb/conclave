@@ -149,7 +149,6 @@ function App() {
   /* ---------------------------------------------------------------- state */
   const [models, setModels] = useState<ModelRef[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
-  const [historyUnprotected, setHistoryUnprotected] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [providersLoading, setProvidersLoading] = useState(true);
@@ -275,11 +274,6 @@ function App() {
   const modeLabel = modes.find(item => item.id === mode)?.label ?? mode;
 
   /* ------------------------------------------------------------ effects */
-  useEffect(() => {
-    if (!usesCompanion) return;
-    void api.health().then(health => setHistoryUnprotected(health.persistent === false)).catch(() => {});
-  }, []);
-
   // Once Seatline answers (after connecting, or coming back), the catalogue that could not load before can.
   const companionBefore = useRef(companion.kind);
   useEffect(() => {
@@ -1202,16 +1196,8 @@ function App() {
         providersLoading={providersLoading}
         providersError={providersError}
         limits={providerLimits}
-        busy={loading}
-        theme={theme}
-        onToggleTheme={() => setTheme(current => (current === "dark" ? "light" : "dark"))}
-        onShowShortcuts={() => setShortcutsOpen(true)}
-        onCollapse={() => setRailOpen(false)}
-        onOpenPalette={() => setPaletteOpen(true)}
-      />
-
-      <div className="workspace">
-        {usesCompanion && <CompanionBanner
+        seatlineState={usesCompanion ? companion : undefined}
+        seatlineControls={usesCompanion ? <CompanionBanner
           state={companion}
           error={pairingError}
           setup={companionSetup}
@@ -1221,11 +1207,16 @@ function App() {
           }}
           onRetry={() => { setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true }); }}
           onDisconnect={() => { disconnectCompanion(); setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current); }}
-        />}
-        {usesCompanion && historyUnprotected && <div className="banner" data-tone="warn" role="status">
-          <Icon name="alert" size={14} className="banner-icon" />
-          <p>Your browser has not promised to keep Conclave's history, which lives only in this browser. Export the conversations you want to keep.</p>
-        </div>}
+        /> : null}
+        busy={loading}
+        theme={theme}
+        onToggleTheme={() => setTheme(current => (current === "dark" ? "light" : "dark"))}
+        onShowShortcuts={() => setShortcutsOpen(true)}
+        onCollapse={() => setRailOpen(false)}
+        onOpenPalette={() => setPaletteOpen(true)}
+      />
+
+      <div className="workspace">
         <header className="topbar">
           {!railOpen && (
             <button type="button" className="btn btn-ghost btn-icon" onClick={() => setRailOpen(true)} aria-label="Show conversation rail">
@@ -1309,7 +1300,7 @@ function App() {
                 models={models}
                 modelsLoading={modelsLoading}
                 modelsError={usesCompanion && models.length === 0 && (companion.kind === "unpaired" || companion.kind === "unavailable")
-                  ? "Link this browser to Seatline (above) to use your subscription models." : modelsError}
+                  ? "Open Seatline settings in the sidebar to link this browser and use your subscription models." : modelsError}
                 providerNotes={usesCompanion && companion.kind === "connected" ? providers.filter(provider => provider.id !== "mock" && !provider.connected) : []}
                 onRetryModels={() => void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true })}
                 selectedKeys={selected}
