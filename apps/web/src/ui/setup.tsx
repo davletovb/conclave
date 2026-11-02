@@ -67,7 +67,7 @@ export function RunSetup(props: SetupProps) {
     loading, workflowSlot,
   } = props;
   const [webSearchEnabled, setWebSearchEnabled] = React.useState(
-    () => localStorage.getItem("conclave.webSearch") === "native",
+    () => usesCompanion && localStorage.getItem("conclave.webSearch") === "native",
   );
 
   const meta = (id: OrchestrationMode) => modes.find(item => item.id === id)!;
@@ -212,17 +212,19 @@ export function RunSetup(props: SetupProps) {
       <div className="section">
         <header>
           <span className="eyebrow">Web evidence</span>
-          <span className="num">{webSearchEnabled ? "ON" : "OFF"}</span>
+          <span className="num">{!usesCompanion ? "UNAVAILABLE" : webSearchEnabled ? "ON" : "OFF"}</span>
         </header>
         <button
           type="button"
           className="mode"
           aria-pressed={webSearchEnabled}
-          disabled={loading}
+          disabled={loading || !usesCompanion}
           onClick={toggleWebSearch}
         >
           <strong>Native web search</strong>
-          <span>Let each model search the web using its own Seatline provider tools. Available with supported Seatline models; sources may differ between models.</span>
+          <span>{usesCompanion
+            ? "Let each model use its Seatline provider’s web search. Codex, Claude and Gemini support it; Grok does not. Sources may differ."
+            : "Use the hosted Seatline connection to enable native search; standalone local provider adapters do not support it."}</span>
         </button>
       </div>
 
