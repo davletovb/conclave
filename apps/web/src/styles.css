@@ -422,6 +422,20 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color
   width: 100%;
 }
 .runtime:hover { background: var(--panel); }
+.runtime-copy { display: grid; gap: 3px; min-width: 0; }
+.runtime-copy strong { color: var(--ink-2); font-weight: 600; }
+.runtime-details { display: grid; gap: 12px; min-height: 0; max-height: min(52vh, 460px); overflow-y: auto; overscroll-behavior: contain; padding: 2px 8px 8px; scrollbar-width: thin; }
+.rail-seatline { display: grid; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line-soft); min-width: 0; }
+.rail-seatline .banner.companion { padding: 0; border: 0; background: transparent; gap: 7px; align-items: flex-start; font-size: 11px; }
+.rail-seatline .banner.companion > p { flex: 1 1 0; min-width: 0; }
+.rail-seatline .banner-icon { display: none; }
+.rail-seatline .banner-body { flex: 1 1 100%; gap: 8px; }
+.rail-seatline .banner-actions { flex: 1 1 100%; margin-left: 0; justify-content: flex-start; }
+.rail-seatline .banner .btn { min-height: 30px; margin-left: 0; }
+.rail-seatline .banner-link { flex-direction: column; width: 100%; max-width: none; }
+.rail-seatline .banner-link .control { width: 100%; }
+.rail-seatline .banner-command { width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rail-seatline .banner-help pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .beacon { width: 7px; height: 7px; margin-top: 4px; flex: 0 0 auto; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .beacon[data-state="idle"] { background: var(--ink-4); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink-4) 16%, transparent); }
 .beacon[data-state="busy"] { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: breathe 1.8s var(--ease) infinite; }
