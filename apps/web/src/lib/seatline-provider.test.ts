@@ -6,7 +6,7 @@ type Status = NonNullable<SeatlineEvent["status"]>;
 type Call = { provider: string; method: string; params: any };
 
 const ready = (signIn: string | undefined, extra: Partial<Status> = {}): Status =>
-  ({ availability: "available", authentication: "authenticated", sign_in: signIn, models: [], ...extra });
+  ({ availability: "available", authentication: "authenticated", sign_in: signIn, models: [], capabilities: { web_search: true }, ...extra });
 
 /**
  * A companion at the other end. `legacy` is one that predates Seatline's readiness API: it refuses those methods as an unknown request.
@@ -340,5 +340,45 @@ describe("why a provider cannot be used", () => {
     };
     expect(await codex(f.client).status()).toMatchObject({ connected: false, message: "READINESS_CHANGED" });
     expect(f.methods()).toEqual(["readiness", "readiness"]);
+  });
+});
+
+
+describe("Seatline provider-native web search", () => {
+  it("enables native web search and forwards validated sources as citations", async () => {
+    const f = companion("subscription");
+    const original = f.client.request.bind(f.client);
+    f.client.request = async (provider, method, params, emit, signal) => {
+      await original(provider, method, params, emit, signal);
+      if (method === "send_ready_with_policy") {
+        emit({ type: "source", source: { id: "1", backend_id: "codex", title: "Primary", url: "https://example.com/report", snippet: "Evidence" } });
+        emit({ type: "source", source: { id: "2", backend_id: "codex", title: "Unsafe", url: "javascript:alert(1)", snippet: "" } });
+      }
+    };
+    const events: unknown[] = [];
+    await codex(f.client).generate({ model: "seatline:default", messages: [{ role: "user", content: "Find sources" }], nativeWebSearch: true }, event => events.push(event));
+    expect(f.calls.at(-1)?.params.turn.tools).toBe("native_web_search");
+    expect(events).toContainEqual({ type: "citation", url: "https://example.com/report", title: "Primary" });
+    expect(events.filter((event: any) => event.type === "citation")).toHaveLength(1);
+  });
+
+  it("refuses unsupported providers before dispatching a search turn", async () => {
+    const calls: string[] = [];
+    const client: SeatlineClient = {
+      async request(_provider, method, _params, emit) {
+        calls.push(method);
+        if (method === "readiness") emit({ type: "status", status: ready("subscription", { capabilities: { web_search: false } }) });
+      },
+    };
+    await expect(codex(client).generate({ model: "any", messages: [{ role: "user", content: "Search" }], nativeWebSearch: true }))
+      .rejects.toThrow("does not advertise native web search");
+    expect(calls).toEqual(["readiness"]);
+  });
+
+  it("does not treat search output without sources as grounded", async () => {
+    const f = companion("subscription");
+    await expect(codex(f.client).generate({ model: "any", messages: [{ role: "user", content: "Search" }], nativeWebSearch: true }))
+      .rejects.toThrow("no usable sources");
+    expect(f.calls.at(-1)?.params.turn.tools).toBe("native_web_search");
   });
 });
