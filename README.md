@@ -159,16 +159,9 @@ Complete Google sign-in in Antigravity, then restart Conclave.
 
 For installation details and the exact authentication boundary used by each adapter, see **[Provider runtimes](docs/providers.md)**.
 
-### Optional: enable shared web search
+### Optional: enable native web search
 
-Run a SearXNG instance with JSON search enabled, then:
-
-```bash
-export CONCLAVE_SEARXNG_URL=http://127.0.0.1:8080
-pnpm dev
-```
-
-Enable **Shared web search** in Run configuration → Web evidence.
+Connect the hosted Conclave app to Seatline, then enable **Native web search** under Run configuration → Web evidence. No additional search engine provider or API key is required. Unsupported model runtimes are rejected explicitly.
 
 ## The interface
 
@@ -276,7 +269,7 @@ GitHub Actions runs the same verification gates on pull requests.
 
 - **[Provider runtimes](docs/providers.md)** — provider installation, subscription authentication, runtime boundaries, models, cancellation, and quota visibility
 - **[Runtime and architecture](docs/runtime.md)** — persistence, streaming events, budgets, retries, API endpoints, environment configuration, and run lifecycle
-- **[Shared web search](docs/web-search.md)** — SearXNG configuration, shared evidence behavior, and current search scope
+- **[Native web search](docs/web-search.md)** — Seatline search policy, source citations, and provider support
 
 ## Project direction
 
