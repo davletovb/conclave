@@ -218,6 +218,8 @@ export interface OrchestrationStep {
   kind: OrchestrationStepKind;
   model: ModelRef;
   content: string;
+  /** Citations returned by this step's provider-native browsing. Persisted in the run result. */
+  sources?: SourceCitation[];
   dependsOn?: string[];
   /**
    * This step's output is the run's final answer. Set by the orchestrator on
