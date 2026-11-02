@@ -68,6 +68,7 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
       const existing = steps.get(event.stepId) ?? { id: event.stepId, dependsOn: [], status: "running" as const };
       existing.attempts = event.attempt;
       existing.error = event.message;
+      existing.sources = [];
       retryUsageBase.set(event.stepId, {
         inputTokens: existing.inputTokens ?? 0,
         outputTokens: existing.outputTokens ?? 0,
@@ -94,6 +95,17 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
       if (event.inputTokens !== undefined) step.inputTokens = base.inputTokens + event.inputTokens;
       if (event.outputTokens !== undefined) step.outputTokens = base.outputTokens + event.outputTokens;
       steps.set(event.stepId, step);
+    } else if (event.type === "citation" && event.url) {
+      const existing = steps.get(event.stepId) ?? { id: event.stepId, dependsOn: [], status: "running" as const };
+      // Persisted events may predate the current source-link validator.
+      try {
+        const url = new URL(event.url);
+        if ((url.protocol === "http:" || url.protocol === "https:")
+          && !existing.sources?.some(source => source.url === url.href)) {
+          existing.sources = [...(existing.sources ?? []), { url: url.href, title: event.title }];
+        }
+      } catch { /* Ignore unsafe URLs from older events. */ }
+      steps.set(event.stepId, existing);
     } else if (event.type === "step_completed") {
       const existing = steps.get(event.step.id) ?? {
         id: event.step.id,
@@ -104,6 +116,8 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
       existing.model = event.step.model;
       existing.dependsOn = [...(event.step.dependsOn ?? existing.dependsOn)];
       existing.status = "completed";
+      // Completed steps carry sources on newer runs. Legacy records may only have citation events.
+      if (event.step.sources?.length) existing.sources = event.step.sources;
       existing.completedAt = record.at;
       existing.durationMs = durationMs(existing.startedAt, record.at);
       steps.set(event.step.id, existing);
