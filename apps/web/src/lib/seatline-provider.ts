@@ -62,8 +62,11 @@ function capability(client: object, link?: SeatlineLink) {
 }
 
 export class SeatlineProvider implements ProviderAdapter {
+  readonly nativeWebSearch = true;
   constructor(readonly id: Exclude<ProviderId, "mock">, readonly label: string,
     private readonly provider: string, private readonly client: SeatlineClient, private readonly link?: SeatlineLink) {}
+
+  private searchSupported(state: Status) { return state.capabilities?.web_search === true; }
 
   private usable(state: Status) { return state.authentication === "authenticated" && this.acceptedSignIn(state.sign_in); }
 
@@ -133,6 +136,7 @@ export class SeatlineProvider implements ProviderAdapter {
       const { status: state } = await this.state(options.fresh ? FRESH : STATE_REUSE_MS);
       return { id: this.id, label: this.label, available: state.availability === "available",
         connected: this.usable(state),
+        webSearch: this.searchSupported(state),
         authMode: state.sign_in,
         message: unusableReason(this.provider, this.label, state, mode => this.acceptedSignIn(mode)) };
     } catch (error) {
@@ -192,22 +196,37 @@ export class SeatlineProvider implements ProviderAdapter {
     let reading = await this.state(PREFLIGHT_REUSE_MS);
     if (!this.usable(reading.status)) reading = await this.state(FRESH);
     if (request.signal?.aborted) throw new Error("Run cancelled");
+    if (request.nativeWebSearch && !this.searchSupported(reading.status)) {
+      throw new Error(`${this.label} does not advertise native web search through Seatline. Disable Web search or choose a supported model.`);
+    }
     if (!this.usable(reading.status)) {
       throw new Error("A verified subscription sign-in is required. Sign in to your provider CLI.");
     }
     const turn = {
       system: [request.system, ...request.messages.filter(m => m.role === "system").map(m => m.content)].filter(Boolean).join("\n\n") || null,
       messages: request.messages.filter(m => m.role !== "system").map(m => ({ role: m.role, text: m.content })),
-      model: request.model === DEFAULT_MODEL ? null : request.model, tools: "none", session: "ephemeral", continuation: null, cleanup_group: null,
+      model: request.model === DEFAULT_MODEL ? null : request.model, tools: request.nativeWebSearch ? "native_web_search" : "none", session: "ephemeral", continuation: null, cleanup_group: null,
     };
     for (let attempt = 0; ; attempt++) {
       let content = "";
+      let sourceCount = 0;
+      const seenSources = new Set<string>();
       const onEvent = (event: SeatlineEvent) => {
         // Waiting for one of the companion's slots: tell the run, which counts it as activity, not a stall.
         if (event.type === "queued") emit?.({ type: "status", message: "Waiting for your Seatline companion to finish other requests" });
         // The status a checked send reports is the one it ran under; Conclave's own account rule applies to it too.
         if (event.type === "status" && !this.acceptedSignIn(event.status?.sign_in)) throw new Error("Provider sign-in changed; subscription account required");
         if (event.type === "delta" && event.text) { content += event.text; emit?.({ type: "text_delta", delta: event.text }); }
+        if (event.type === "source" && request.nativeWebSearch && event.source) {
+          try {
+            const url = new URL(event.source.url);
+            if (["https:", "http:"].includes(url.protocol) && !seenSources.has(url.href)) {
+              seenSources.add(url.href);
+              sourceCount += 1;
+              emit?.({ type: "citation", url: url.href, title: event.source.title });
+            }
+          } catch { /* Discard malformed provider URLs. */ }
+        }
         if (event.type === "usage") emit?.({ type: "usage", inputTokens: event.usage?.input_tokens, outputTokens: event.usage?.output_tokens });
       };
       try {
@@ -234,6 +253,7 @@ export class SeatlineProvider implements ProviderAdapter {
         }
         throw error;
       }
+      if (request.nativeWebSearch && sourceCount === 0) throw new Error("Native web search returned no usable sources.");
       if (!content.trim()) throw new Error("Provider completed without a text response");
       return { provider: this.id, model: request.model, content, latencyMs: Date.now() - startedAt };
     }
