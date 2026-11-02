@@ -1207,7 +1207,7 @@ function App() {
           }}
           onRetry={() => { setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current, { fresh: true }); }}
           onDisconnect={() => { disconnectCompanion(); setPairingError(""); void refreshRuntimeCatalog(viewEpochRef.current); }}
-        />}
+        /> : null}
         busy={loading}
         theme={theme}
         onToggleTheme={() => setTheme(current => (current === "dark" ? "light" : "dark"))}
