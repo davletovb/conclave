@@ -350,7 +350,7 @@ export class RunManager {
   private normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
     const legacyRounds = request.maxRounds;
     // Historical SearXNG-backed runs retain their stored evidence, but must not invoke any new external search.
-    const legacy = Boolean(request.webSearchEvidence && request.webSearch?.mode === "shared");
+    const legacy = Boolean(request.webSearchEvidence && (request.webSearch as { mode: string } | undefined)?.mode === "shared");
     return {
       ...request,
       ...(legacy ? { webSearch: undefined } : {}),
