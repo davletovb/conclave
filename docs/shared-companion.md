@@ -202,8 +202,7 @@ no probe, where it cost a probe each. These are launches of a stand-in provider 
 one machine: **there is no live measurement of latency, quota or sign-in behaviour
 for a real provider**, and the extra requests (a readiness check uses Seatline's separate bounded readiness allowance, and a relay round trip) are not timed here.
 
-Shared web search is not available in the hosted app: it needs a Conclave server
-with SearXNG behind it, and the setting says so instead of failing a run. The
+Native web search is available in the hosted app through supported Seatline provider runtimes. Unsupported providers fail clearly instead of falling back to ungrounded answers. The
 scripted mock provider is not offered either, so it cannot stand in for a real
 model that is not signed in; a build made with `VITE_CONCLAVE_MOCK=1` offers it,
 labelled as a demo.
