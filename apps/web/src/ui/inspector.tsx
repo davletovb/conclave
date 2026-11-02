@@ -2,6 +2,7 @@ import React from "react";
 import type { OrchestrationMode, RunInspection } from "@conclave/core";
 import { formatDuration, relativeTime } from "../lib/text";
 import { Icon, Layer } from "./primitives";
+import { SourceLinks } from "./sources";
 
 export function RunInspector({
   inspection,
@@ -85,6 +86,7 @@ export function RunInspector({
                     <div className="ispect-step-meta num"><span>after → {step.dependsOn.join(" · ")}</span></div>
                   )}
                   {step.error && <p className="ispect-error">{step.error}</p>}
+                  <SourceLinks sources={step.sources} />
                 </div>
               ))}
             </div>
