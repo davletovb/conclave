@@ -1,4 +1,5 @@
 import React from "react";
+import { usesCompanion } from "../lib/companion";
 import type { ModelRef, OrchestrationMode, ProviderStatus } from "@conclave/core";
 import {
   Icon,
