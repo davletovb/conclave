@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { ConversationExportFormat, ConversationSummary, ProviderLimitSnapshot, ProviderStatus } from "@conclave/core";
+import type { CompanionState } from "../lib/companion";
 import { formatWindow, recencyBucket, relativeTime, searchTerms } from "../lib/text";
 import { Highlighted, Icon, Keys, Menu } from "./primitives";
 
@@ -20,6 +21,8 @@ type RailProps = {
   providersLoading: boolean;
   providersError: string;
   limits: ProviderLimitSnapshot[];
+  seatlineState?: CompanionState;
+  seatlineControls?: React.ReactNode;
   busy: boolean;
   theme: "dark" | "light";
   onToggleTheme: () => void;
@@ -223,7 +226,7 @@ export function Rail(props: RailProps) {
   const {
     conversations, activeId, activeRunning, query, searching, onQueryChange, onOpen, onNew,
     onRename, onDelete, onExport, searchRef, providers, providersLoading, providersError,
-    limits, busy, theme, onToggleTheme, onShowShortcuts, onCollapse, onOpenPalette,
+    limits, seatlineState, seatlineControls, busy, theme, onToggleTheme, onShowShortcuts, onCollapse, onOpenPalette,
   } = props;
 
   const [runtimeOpen, setRuntimeOpen] = useState(false);
@@ -237,6 +240,15 @@ export function Rail(props: RailProps) {
       : providers.length === 0
         ? "Runtime status unavailable"
         : providers.some(provider => provider.id === "mock") ? "Subscription runtimes offline · mocks active" : "Subscription runtimes offline";
+  const seatlineStatus = seatlineState
+    ? {
+        connected: "connected",
+        connecting: "connecting…",
+        waiting: "waiting…",
+        unpaired: "not linked",
+        unavailable: "unavailable",
+      }[seatlineState.kind]
+    : undefined;
   const runtimeDetail = providersLoading
     ? "Checking local subscription runtimes…"
     : providersError || subscription
@@ -329,24 +341,39 @@ export function Rail(props: RailProps) {
         <button
           type="button"
           className="runtime"
+          aria-controls={runtimeOpen ? "runtime-details" : undefined}
           aria-expanded={runtimeOpen}
           onClick={() => setRuntimeOpen(open => !open)}
         >
-          <span className="beacon" data-state={busy ? "busy" : connected.length > 0 ? "ready" : "idle"} />
-          <span>{runtimeLabel}</span>
+          <span className="beacon" data-state={busy || seatlineState?.kind === "connecting" || seatlineState?.kind === "waiting"
+            ? "busy"
+            : seatlineState ? seatlineState.kind === "connected" ? "ready" : "idle"
+            : connected.length > 0 ? "ready" : "idle"} />
+          <span className="runtime-copy">
+            {seatlineStatus && <strong>Seatline · {seatlineStatus}</strong>}
+            <span>{runtimeLabel}</span>
+          </span>
         </button>
         {runtimeOpen && (
-          <dl className="kv">
-            {providersError && <dd style={{ gridColumn: "1 / -1", textAlign: "left", color: "var(--danger)" }}>{providersError}</dd>}
-            {subscription.map(provider => (
-              <React.Fragment key={provider.id}>
-                <dt>{runtimeName(provider)}</dt>
-                <dd>{provider.connected ? "connected" : provider.available ? "not ready" : "unavailable"}</dd>
-                {!provider.connected && provider.message && <dd className="kv-note">{provider.message}</dd>}
-              </React.Fragment>
-            ))}
-            {subscription.length === 0 && !providersError && <dd style={{ gridColumn: "1 / -1" }}>{runtimeDetail}</dd>}
-          </dl>
+          <div className="runtime-details" id="runtime-details">
+            {seatlineControls && (
+              <section className="rail-seatline" aria-label="Seatline settings">
+                <span className="eyebrow">Seatline settings</span>
+                {seatlineControls}
+              </section>
+            )}
+            <dl className="kv">
+              {providersError && <dd style={{ gridColumn: "1 / -1", textAlign: "left", color: "var(--danger)" }}>{providersError}</dd>}
+              {subscription.map(provider => (
+                <React.Fragment key={provider.id}>
+                  <dt>{runtimeName(provider)}</dt>
+                  <dd>{provider.connected ? "connected" : provider.available ? "not ready" : "unavailable"}</dd>
+                  {!provider.connected && provider.message && <dd className="kv-note">{provider.message}</dd>}
+                </React.Fragment>
+              ))}
+              {subscription.length === 0 && !providersError && <dd style={{ gridColumn: "1 / -1" }}>{runtimeDetail}</dd>}
+            </dl>
+          </div>
         )}
         <div className="rail-foot-row">
           <button
