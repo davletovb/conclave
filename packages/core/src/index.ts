@@ -51,6 +51,8 @@ export interface ProviderStatus {
   connected: boolean;
   authMode?: string;
   planType?: string;
+  /** Seatline's reported native browsing capability; absent for older adapters. */
+  webSearch?: boolean;
   message?: string;
 }
 
@@ -58,6 +60,8 @@ export interface ProviderRequest {
   model: string;
   messages: ChatMessage[];
   system?: string;
+  /** Request provider-native web search. Never silently downgrade to an offline answer. */
+  nativeWebSearch?: boolean;
   signal?: AbortSignal;
 }
 
@@ -81,6 +85,8 @@ export type ProviderEventSink = (event: ProviderStreamEvent) => void;
 export interface ProviderAdapter {
   readonly id: ProviderId;
   readonly label: string;
+  /** Whether this adapter can forward native-search policy (provider support is checked at runtime). */
+  readonly nativeWebSearch?: boolean;
   listModels(): Promise<ModelRef[]>;
   generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse>;
   limits?(): Promise<ProviderLimitSnapshot>;
@@ -93,19 +99,12 @@ export interface RunBudget {
   maxRounds?: number;
 }
 
-export type WebSearchTimeRange = "day" | "week" | "month" | "year";
-
 export interface WebSearchConfig {
-  /** Shared search runs once before orchestration so every model sees identical evidence. */
-  mode: "shared";
-  /** Number of normalized search results injected into the shared evidence packet. */
-  maxResults?: number;
-  /** Optional SearXNG language code, for example en, uz, or all. */
-  language?: string;
-  /** Optional freshness window supported by the configured SearXNG engines. */
-  timeRange?: WebSearchTimeRange;
+  /** Each model step uses Seatline's own search-only tool policy. */
+  mode: "native";
 }
 
+/** Legacy saved search results: retained for displaying/resuming pre-migration runs. */
 export interface WebSearchResult {
   title: string;
   url: string;
@@ -119,13 +118,6 @@ export interface WebSearchEvidence {
   query: string;
   searchedAt: string;
   results: WebSearchResult[];
-}
-
-export interface WebSearchStatus {
-  provider: "searxng";
-  configured: boolean;
-  available: boolean;
-  message?: string;
 }
 
 export type WorkflowModelSelector =
@@ -195,9 +187,9 @@ export interface OrchestrationRequest {
   /** @deprecated Prefer budget.maxRounds. Retained for compatibility. */
   maxRounds?: number;
   budget?: RunBudget;
-  /** Optional server-owned web retrieval performed once before orchestration. */
+  /** Optional Seatline provider-native web search for model steps. */
   webSearch?: WebSearchConfig;
-  /** Server-resolved shared evidence. Clients should not populate this directly. */
+  /** @deprecated Read-only SearXNG evidence from runs created before migration. */
   webSearchEvidence?: WebSearchEvidence;
   /** Server-injected prior conversation context. Clients normally omit this. */
   history?: ChatMessage[];
