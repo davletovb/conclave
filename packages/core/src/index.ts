@@ -359,6 +359,7 @@ export interface RunStepInspection {
   inputTokens?: number;
   outputTokens?: number;
   attempts?: number;
+  sources?: SourceCitation[];
   error?: string;
 }
 
