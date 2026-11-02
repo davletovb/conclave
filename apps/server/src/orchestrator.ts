@@ -10,6 +10,7 @@ import type {
   ProviderAdapter,
   ProviderResponse,
   ProviderStreamEvent,
+  SourceCitation,
   RunBudget,
   RunUsage,
   StepFailure,
@@ -657,12 +658,23 @@ export class Orchestrator {
       }
 
       let emittedText = false;
+      const sources: SourceCitation[] = [];
+      const seenSourceUrls = new Set<string>();
       try {
         const response = await this.generateWithStallWatchdog(
           spec,
           context,
           (event) => {
             if (event.type === "text_delta" && event.delta) emittedText = true;
+            if (event.type === "citation" && event.url) {
+              try {
+                const url = new URL(event.url);
+                if ((url.protocol === "https:" || url.protocol === "http:") && !seenSourceUrls.has(url.href)) {
+                  seenSourceUrls.add(url.href);
+                  sources.push({ url: url.href, title: event.title });
+                }
+              } catch { /* Ignore invalid URLs from providers. */ }
+            }
             this.mapProviderEvent(context, spec.id, event);
           },
         );
@@ -684,6 +696,7 @@ export class Orchestrator {
           kind: spec.kind,
           model: spec.model,
           content: response.content,
+          ...(sources.length ? { sources } : {}),
           dependsOn: spec.dependsOn,
           final: spec.final,
         };
