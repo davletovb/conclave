@@ -65,6 +65,12 @@ export interface ProviderRequest {
   signal?: AbortSignal;
 }
 
+/** A URL sourced from provider-native web search; only HTTP(S) URLs may be displayed. */
+export interface SourceCitation {
+  url: string;
+  title?: string;
+}
+
 export interface ProviderResponse {
   provider: ProviderId;
   model: string;
