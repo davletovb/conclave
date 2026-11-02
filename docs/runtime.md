@@ -9,7 +9,7 @@ apps/
   web/       React + Vite interface
     src/lib/ pure UI/application logic
     src/ui/  reading surface, rail, setup, workflow editor, palette
-  server/    Fastify runtime, persistence, search, providers, orchestration
+  server/    Fastify runtime, persistence, legacy evidence, providers, orchestration
 packages/
   core/      shared provider, workflow, event, and orchestration contracts
 docs/        focused technical documentation
@@ -26,7 +26,7 @@ The local Fastify server owns:
 - provider status and model discovery;
 - provider child processes;
 - orchestration;
-- shared web-search resolution;
+- run orchestration (native web search is delegated to Seatline in hosted mode);
 - persistent conversations and runs;
 - event logs;
 - retries and stall detection;
