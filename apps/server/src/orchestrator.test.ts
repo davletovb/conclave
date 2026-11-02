@@ -613,3 +613,48 @@ describe("final step marking", () => {
     expect(started.indexOf(announced[0])).toBe(started.length - 1);
   });
 });
+
+
+describe("native source propagation", () => {
+  class SearchingMockProvider extends MockProvider {
+    readonly nativeWebSearch = true;
+    nativeSearchRequested = false;
+
+    override async generate(request: ProviderRequest, emit?: ProviderEventSink) {
+      this.nativeSearchRequested = request.nativeWebSearch === true;
+      emit?.({ type: "citation", url: "https://example.org/research", title: "Primary research" });
+      emit?.({ type: "citation", url: "https://example.org/research", title: "Repeated research" });
+      emit?.({ type: "citation", url: "javascript:alert(1)", title: "Unsafe" });
+      return super.generate(request);
+    }
+  }
+
+  it("keeps sanitized sources in step and completed run results", async () => {
+    const sourceProvider = new SearchingMockProvider();
+    const engine = new Orchestrator(new Map([[sourceProvider.id, sourceProvider]]));
+    const events: OrchestrationStreamEvent[] = [];
+    const result = await engine.run({
+      mode: "single",
+      prompt: "Find current evidence",
+      participants: [participants[0]],
+      webSearch: { mode: "native" },
+    }, { runId: "native-source-test", emit: event => events.push(event) });
+
+    expect(sourceProvider.nativeSearchRequested).toBe(true);
+    const expected = [{ url: "https://example.org/research", title: "Primary research" }];
+    expect(result.steps[0].sources).toEqual(expected);
+    expect(events.find(event => event.type === "step_completed"))
+      .toMatchObject({ step: { sources: expected } });
+    expect(events.find(event => event.type === "run_completed"))
+      .toMatchObject({ result: { steps: [{ sources: expected }] } });
+  });
+
+  it("rejects providers without the Seatline-native tool policy before dispatch", () => {
+    expect(() => orchestrator.validateRequest({
+      mode: "single",
+      prompt: "Search",
+      participants: [participants[0]],
+      webSearch: { mode: "native" },
+    })).toThrow("does not support Seatline native web search");
+  });
+});
