@@ -49,6 +49,7 @@ type RunContext = {
   usage: RunUsage;
   stepUsage: Map<string, { inputTokens: number; outputTokens: number }>;
   plannedCallsRemaining: number;
+  nativeWebSearch: boolean;
 };
 
 type ExecuteStepOptions = {
@@ -411,6 +412,14 @@ export class Orchestrator {
   }
 
   validateRequest(request: OrchestrationRequest) {
+    if (request.webSearch?.mode === "native") {
+      const selected = [...request.participants, ...(request.synthesizer ? [request.synthesizer] : [])];
+      for (const model of selected) {
+        if (this.adapterFor(model).nativeWebSearch !== true) {
+          throw new Error(`${model.label} does not support Seatline native web search. Disable search or choose a Seatline model with search support.`);
+        }
+      }
+    }
     this.validateShape(request);
     this.enforceBudget(request);
   }
@@ -573,6 +582,7 @@ export class Orchestrator {
               { role: "user", content: spec.prompt },
             ],
             signal: controller.signal,
+            nativeWebSearch: context.nativeWebSearch,
           },
           (event) => {
             if (settled) return;
@@ -1040,6 +1050,7 @@ ${transcript(steps)}`;
       usage: emptyRunUsage(),
       stepUsage: new Map(),
       plannedCallsRemaining: 0,
+      nativeWebSearch: request.webSearch?.mode === "native",
     };
 
     context.emit?.({ type: "run_started", runId, mode: request.mode });
