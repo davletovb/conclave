@@ -42,6 +42,17 @@ const relayUrl = configuredRelay || (usesCompanion && typeof location !== "undef
 
 const SOCKET_OPEN = 1; // WebSocket.OPEN
 
+/** The largest frame the relay forwards (cloudflare/worker.mjs). */
+const MAX_FRAME = 768 * 1024;
+/**
+ * How much the tab holds of frames it received and has not decrypted yet. They are decrypted one after another, and a turn that
+ * streams quickly, or two at once, deliver hundreds of small deltas together, so the bound is on what they hold, not on how many
+ * there are: a few seconds of a fast answer is far inside it. Each frame counts at least FRAME_COST, so a flood of tiny frames is
+ * bounded too. Only a relay or companion that floods the tab goes past it, and the connection is then dropped.
+ */
+const MAX_PENDING_BYTES = 16 * 1024 * 1024;
+const FRAME_COST = 1024;
+
 /** A frame the relay lost, repeated or replayed. The connection is dropped and re-established. */
 class ProtocolError extends Error {}
 
@@ -92,7 +103,8 @@ export class SeatlineConnection {
   private received = 0;
   private outgoing = Promise.resolve();
   private incoming = Promise.resolve();
-  private inbound = 0;
+  /** What received frames that are not decrypted yet hold (see MAX_PENDING_BYTES). */
+  private pendingBytes = 0;
   private readonly pending = new Map<string, Pending>();
   private running = 0;
   private readonly waiting: Array<{ start: () => void; cancel: (error: Error) => void }> = [];
@@ -312,7 +324,10 @@ export class SeatlineConnection {
       }, this.env.connectTimeoutMs ?? 15_000);
       current.onopen = () => current.send(JSON.stringify({ type: "auth", token: pair.token }));
       current.onmessage = message => {
-        if (typeof message.data !== "string" || message.data.length > 768 * 1024 || ++this.inbound > 128) { current.close(1008); this.inbound--; return; }
+        if (typeof message.data !== "string" || message.data.length > MAX_FRAME) { current.close(1008); return; }
+        const cost = Math.max(message.data.length, FRAME_COST);
+        if (this.pendingBytes + cost > MAX_PENDING_BYTES) { current.close(1008); return; }
+        this.pendingBytes += cost;
         this.incoming = this.incoming.then(async () => {
           if (current !== this.socket) return;
           const envelope = JSON.parse(message.data);
@@ -341,7 +356,7 @@ export class SeatlineConnection {
           // the generic close that follows.
           if (!settled) reject(broken);
           current.close(1008);
-        }).finally(() => this.inbound--);
+        }).finally(() => { this.pendingBytes -= cost; });
       };
       current.onclose = (event?: { code?: number; reason?: string }) => {
         clearTimeout(timer);
