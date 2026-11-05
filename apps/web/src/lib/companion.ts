@@ -53,6 +53,20 @@ const MAX_FRAME = 768 * 1024;
 const MAX_PENDING_BYTES = 16 * 1024 * 1024;
 const FRAME_COST = 1024;
 
+/**
+ * How often the tab tells the relay it is still there. Cloudflare closes a WebSocket that carries nothing in either direction for a
+ * while (about 100 seconds), and a step can be silent for longer than that: a model that reasons, or searches, before it answers sends
+ * nothing until it is done, and once the other steps of a run have finished nothing else crosses the connection either. The relay answers
+ * each ping with a pong (cloudflare/worker.mjs), as it answers Seatline's own.
+ */
+const HEARTBEAT_MS = 30_000;
+/**
+ * Pings in a row that nothing answered, after which the connection is taken to be dead (a computer that slept, a changed network) and
+ * dropped, so a step fails and can be retried instead of waiting on a connection that will never deliver. Counted in pings rather than
+ * time: a background tab's timers can be held back, and a late timer is not a silent relay.
+ */
+const UNANSWERED_PINGS = 3;
+
 /** A frame the relay lost, repeated or replayed. The connection is dropped and re-established. */
 class ProtocolError extends Error {}
 
@@ -77,6 +91,8 @@ export type SeatlineEnvironment = {
   connectTimeoutMs?: number;
   /** How often a request waiting for a free slot says so, so the caller can tell it is not stuck. */
   queueNoticeMs?: number;
+  /** How often the open connection is kept alive with a ping (HEARTBEAT_MS unless a test says otherwise). */
+  heartbeatMs?: number;
   /** This website's origin, which a pasted link must be for. */
   origin?: string;
 };
@@ -322,8 +338,25 @@ export class SeatlineConnection {
           : "Seatline did not answer. Update Seatline on this computer (it must speak web protocol 2), then retry.");
         reject(failure); current.close();
       }, this.env.connectTimeoutMs ?? 15_000);
-      current.onopen = () => current.send(JSON.stringify({ type: "auth", token: pair.token }));
+      // Anything the relay sends answers the pings sent before it.
+      let unanswered = 0;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      current.onopen = () => {
+        current.send(JSON.stringify({ type: "auth", token: pair.token }));
+        // The relay reads the authentication first, so it answers every ping that follows.
+        heartbeat = setInterval(() => {
+          if (current.readyState !== SOCKET_OPEN) return;
+          if (unanswered >= UNANSWERED_PINGS) {
+            failure ??= new Error("The connection to Seatline stopped responding");
+            current.close();
+            return;
+          }
+          unanswered++;
+          current.send(JSON.stringify({ type: "ping" }));
+        }, this.env.heartbeatMs ?? HEARTBEAT_MS);
+      };
       current.onmessage = message => {
+        unanswered = 0;
         if (typeof message.data !== "string" || message.data.length > MAX_FRAME) { current.close(1008); return; }
         const cost = Math.max(message.data.length, FRAME_COST);
         if (this.pendingBytes + cost > MAX_PENDING_BYTES) { current.close(1008); return; }
@@ -359,7 +392,7 @@ export class SeatlineConnection {
         }).finally(() => { this.pendingBytes -= cost; });
       };
       current.onclose = (event?: { code?: number; reason?: string }) => {
-        clearTimeout(timer);
+        clearTimeout(timer); clearInterval(heartbeat);
         // The relay no longer has this pairing: keeping it would only fail again.
         const gone = event?.code === PAIRING_GONE || (event?.code === 1008 && event.reason === "Pairing expired");
         if (gone && this.env.storage.getItem(STORAGE)?.includes(pair.id)) this.env.storage.removeItem(STORAGE);

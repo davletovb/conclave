@@ -197,6 +197,49 @@ describe("Seatline connection, web protocol 2", () => {
     expect(text.join("")).toBe(Array.from({ length: burst }, (_, i) => `${i} `).join(""));
   });
 
+  /** Only the heartbeat's interval runs on a fake clock, so a slow machine setting up the connection cannot look like a silent relay. */
+  async function quietConnection() {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const { connection, keyPromise } = setup({ env: { heartbeatMs: 30_000 } });
+    const helper = await companionOf(keyPromise);
+    const outcome = connection.request("codex", "send", {}, () => {}).then(() => undefined, error => error as Error);
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { epoch, browserFrames } = await helper.answer(socket);
+    const request = await openFrame(helper.key, "browser", epoch, await until(() => browserFrames()[0], "request")) as { id: string };
+    const pings = () => socket.sent.filter(frame => frame.type === "ping").length;
+    return { helper, socket, epoch, request, outcome, pings };
+  }
+
+  it("keeps a connection that carries no answer for a long while alive with pings the relay answers", async () => {
+    // A model that reasons before it answers sends nothing for minutes; Cloudflare closes a WebSocket that carries nothing.
+    try {
+      const { helper, socket, epoch, request, outcome, pings } = await quietConnection();
+      // Ten minutes without an answer, well past the point at which unanswered pings would end it: the relay answers each one.
+      for (let beat = 1; beat <= 20; beat++) {
+        vi.advanceTimersByTime(30_000);
+        expect(pings()).toBe(beat);
+        socket.deliver({ type: "pong" });
+      }
+      expect(socket.closed).toBe(false);
+      await helper.say(socket, epoch, 1, { id: request.id, event: { type: "completed" } });
+      expect(await outcome).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("drops a connection whose pings go unanswered, so the step fails instead of waiting for ever", async () => {
+    try {
+      const { socket, outcome, pings } = await quietConnection();
+      // Nothing comes back: a computer that slept, a network that changed. Three pings go unanswered, then the connection is dropped.
+      vi.advanceTimersByTime(3 * 30_000);
+      expect(pings()).toBe(3);
+      expect(socket.closed).toBe(false);
+      vi.advanceTimersByTime(30_000);
+      expect(socket.closed).toBe(true);
+      expect((await outcome)?.message).toMatch(/stopped responding/);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("drops the connection when what waits to be decrypted is a flood, not a burst", async () => {
     const { connection, keyPromise } = setup();
     const helper = await companionOf(keyPromise);

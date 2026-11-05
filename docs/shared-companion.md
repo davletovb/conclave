@@ -72,6 +72,16 @@ banner says so, with how to start it and Retry. If the pairing lapsed, the relay
 closes the browser's connection with code 4410 and Conclave forgets it and asks
 for a new link.
 
+Cloudflare closes a WebSocket that carries nothing in either direction for a
+while (about 100 seconds), and a step can be that quiet: a model that reasons or
+searches before it answers sends nothing until it is done. Seatline pings the
+relay every 15 seconds from its side; the tab pings every 30 seconds from its
+own, and the relay answers each ping. Before this, a long, quiet step failed with
+"Seatline connection closed" (and again when retried). Three pings in a row that
+nothing answers mean the connection is dead (a computer that slept, a changed
+network): the tab drops it and the step fails with "The connection to Seatline
+stopped responding", instead of waiting on it.
+
 A pairing is scoped to the exact origin, and uses distinct helper and browser
 credentials. It lasts seven days from the last time Seatline connected to the
 relay: the relay renews it (at most once an hour) whenever the helper side

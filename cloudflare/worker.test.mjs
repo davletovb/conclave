@@ -124,6 +124,8 @@ test("a pairing is renewed for a week while its helper is connected, at most onc
   await quiet.webSocketMessage(browser, JSON.stringify({ type: "auth", token: pair.credentials.browser }));
   await quiet.webSocketMessage(browser, '{"type":"ping"}');
   assert.equal(browserLog.puts.length, 0);
+  // It is still answered: the browser's heartbeat keeps an otherwise quiet connection open (Cloudflare closes idle WebSockets).
+  assert.ok(browser.sent.includes('{"type":"pong"}'));
 });
 
 test("a browser is told with a close code that its pairing is gone; the helper keeps its HTTP refusal", async () => {
