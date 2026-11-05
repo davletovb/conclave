@@ -24,7 +24,7 @@ pass through the encrypted web connection.
 
 1. Set your website's exact origin in `APP_ORIGINS` in `cloudflare/wrangler.jsonc` (for example `{"conclave":["https://conclave.example.com"]}`) and deploy the relay with `wrangler deploy`. The relay needs both Durable Object bindings in that file, `CHANNELS` and `LIMITERS`; without `LIMITERS` it refuses to create pairings.
 2. Build the web app with `pnpm --filter @conclave/web build` and deploy `apps/web/dist` to Cloudflare Pages. In the Pages project's settings, add a service binding named `RELAY` to the `seatline-relay` Worker. The site's `_worker.js` (from `apps/web/public`) forwards `/pair` and `/channels/*` to it, so the relay is reached at the website's own origin; every other path is served as a static file. Without the binding those two paths answer `503`.
-3. On the user's machine, once: install Seatline (Seatline `bf07713` or later), authorize Conclave, and link the browser. The website (which is also the relay) must be a bare `https://` origin:
+3. On the user's machine, once: install Seatline (Seatline `0b11364` or later), authorize Conclave, and link the browser. The website (which is also the relay) must be a bare `https://` origin:
 
 ```sh
 seatline-companion install
