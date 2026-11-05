@@ -1041,7 +1041,9 @@ select.control { padding-right: 24px; appearance: none; background-image: linear
 }
 .drawer-head h2, .modal-head h2 { margin: 0; font: 550 13px/1.3 var(--font-ui); }
 .drawer-head .spacer, .modal-head .spacer { flex: 1; }
-.drawer-body { overflow-y: auto; padding: 14px 16px 26px; display: grid; gap: 12px; align-content: start; }
+/* Rows as tall as their content. With plain auto rows, a scroll container's grid fits its rows into its own height, and a child that
+   clips (an attempt card, overflow: hidden) is squeezed to fit and cut off instead of making the drawer scroll. */
+.drawer-body { overflow-y: auto; padding: 14px 16px 26px; display: grid; grid-auto-rows: max-content; gap: 12px; align-content: start; }
 
 .modal {
   position: fixed;
