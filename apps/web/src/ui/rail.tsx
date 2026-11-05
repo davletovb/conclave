@@ -233,9 +233,13 @@ export function Rail(props: RailProps) {
   const terms = searchTerms(query);
   const subscription = providers.filter(provider => provider.id !== "mock");
   const connected = subscription.filter(provider => provider.connected);
-  const runtimeLabel = providersLoading
-    ? "Checking runtimes…"
-    : connected.length > 0
+  // Cached provider statuses do not prove that the transport is currently reachable.
+  const seatlineReady = !seatlineState || seatlineState.kind === "connected";
+  const runtimeLabel = !seatlineReady
+    ? "Runtime status unverified"
+    : providersLoading
+      ? "Checking runtimes…"
+      : connected.length > 0
       ? `${connected.map(runtimeName).join(" · ")} connected`
       : providers.length === 0
         ? "Runtime status unavailable"
@@ -345,10 +349,10 @@ export function Rail(props: RailProps) {
           aria-expanded={runtimeOpen}
           onClick={() => setRuntimeOpen(open => !open)}
         >
-          <span className="beacon" data-state={busy || seatlineState?.kind === "connecting" || seatlineState?.kind === "waiting"
-            ? "busy"
-            : seatlineState ? seatlineState.kind === "connected" ? "ready" : "idle"
-            : connected.length > 0 ? "ready" : "idle"} />
+          <span className="beacon" data-state={seatlineState
+            ? seatlineState.kind === "connecting" || seatlineState.kind === "waiting" ? "busy"
+              : seatlineState.kind === "connected" ? "ready" : "idle"
+            : busy ? "busy" : connected.length > 0 ? "ready" : "idle"} />
           <span className="runtime-copy">
             {seatlineStatus && <strong>Seatline · {seatlineStatus}</strong>}
             <span>{runtimeLabel}</span>
@@ -367,7 +371,7 @@ export function Rail(props: RailProps) {
               {subscription.map(provider => (
                 <React.Fragment key={provider.id}>
                   <dt>{runtimeName(provider)}</dt>
-                  <dd>{provider.connected ? "connected" : provider.available ? "not ready" : "unavailable"}</dd>
+                  <dd>{!seatlineReady ? "unverified" : providersLoading ? "checking…" : provider.connected ? "connected" : provider.available ? "not ready" : "unavailable"}</dd>
                   {!provider.connected && provider.message && <dd className="kv-note">{provider.message}</dd>}
                 </React.Fragment>
               ))}
