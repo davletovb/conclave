@@ -138,6 +138,20 @@ declines, so export conversations you want to keep.
 The companion runs two requests per app at a time, so the app sends no more than
 that and shows a waiting step as waiting rather than stalled.
 
+A step that streams quickly, or two that stream together, can deliver hundreds of
+small deltas at once. Seatline's broker used to close an app's connection as soon
+as 64 events were waiting for it, and when the helper took no frame for five
+seconds (which a stalled network causes). Either ended the web helper's relay
+connection in the middle of a run: every step then failed with "Seatline
+companion disconnected" and the sidebar showed Seatline going offline and
+checking runtimes again. Seatline with
+[davletovb/seatline#21](https://github.com/davletovb/seatline/pull/21) keeps that
+output waiting (up to 4 MiB, joining adjacent text), gives a client two minutes
+to take a frame, and has the helper give up on a relay that takes nothing for its
+`dead_after` instead; update Seatline if runs fail that way. The tab likewise
+bounds what it has received and not yet decrypted by size (16 MiB, each frame
+counted as at least 1 KiB), not by a count of 128 frames, which a burst exceeded.
+
 ## Provider readiness and preparation
 
 Conclave owns when to check a provider and what account it accepts; Seatline owns

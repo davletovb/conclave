@@ -177,6 +177,41 @@ describe("Seatline connection, web protocol 2", () => {
     expect(socket.closed).toBe(true);
   });
 
+  it("takes a burst of hundreds of small deltas that arrive together, as two quickly streaming turns deliver them", async () => {
+    const { connection, keyPromise } = setup();
+    const helper = await companionOf(keyPromise);
+    const text: string[] = [];
+    const done = connection.request("claude", "send", {}, event => { if (event.type === "delta") text.push(event.text!); });
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { epoch, browserFrames } = await helper.answer(socket);
+    const request = await openFrame(helper.key, "browser", epoch, await until(() => browserFrames()[0], "request")) as { id: string };
+    // Every frame lands before the tab has decrypted any of them: more than the 128 frames the tab once allowed to wait.
+    const burst = 600;
+    const frames = await Promise.all(Array.from({ length: burst + 1 }, (_, i) =>
+      sealFrame(helper.key, "helper", epoch, i + 1, { id: request.id, event: i < burst ? { type: "delta", text: `${i} ` } : { type: "completed" } })));
+    for (const frame of frames) socket.deliver(frame);
+    await done;
+    expect(socket.closed).toBe(false);
+    expect(text).toHaveLength(burst);
+    expect(text.join("")).toBe(Array.from({ length: burst }, (_, i) => `${i} `).join(""));
+  });
+
+  it("drops the connection when what waits to be decrypted is a flood, not a burst", async () => {
+    const { connection, keyPromise } = setup();
+    const helper = await companionOf(keyPromise);
+    const running = connection.request("codex", "send", {}, () => {}).then(() => new Error("the request unexpectedly succeeded"), error => error as Error);
+    const socket = await until(() => FakeSocket.all[0], "the browser to connect");
+    await helper.accept(socket);
+    const { browserFrames } = await helper.answer(socket);
+    await until(() => browserFrames()[0], "request");
+    // Frames as large as the relay forwards, faster than any could be read: past 16 MiB waiting, the tab stops taking them.
+    const large = JSON.stringify({ type: "data", seq: 1, iv: "", body: "x".repeat(760 * 1024) });
+    for (let i = 0; i < 30 && !socket.closed; i++) socket.onmessage?.({ data: large });
+    expect(socket.closedWith).toBe(1008);
+    expect((await running).message).toMatch(/connection closed/);
+  });
+
   it("times out, naming the protocol, when the companion never answers the hello", async () => {
     const { connection } = setup({ timeoutMs: 60 });
     const waiting = connection.request("codex", "send", {}, () => {}).then(() => new Error("the request unexpectedly succeeded"), error => error as Error);
