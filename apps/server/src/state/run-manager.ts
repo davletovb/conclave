@@ -6,7 +6,7 @@ import type {
   StartRunResponse,
   StoredRun,
 } from "@conclave/core";
-import { Orchestrator } from "../orchestrator.js";
+import { Orchestrator, type KeptStep } from "../orchestrator.js";
 import { formatLegacyWebEvidence } from "../search/legacy-evidence.js";
 import type { StateStore, ListOptions } from "./store.js";
 import { inspectRun } from "./run-inspection.js";
@@ -63,6 +63,11 @@ export class RunManager {
     }
   }
 
+  /**
+   * Continues a run that stopped (failed, interrupted, cancelled) or completed with steps that failed. What its last attempt completed
+   * is kept while it still holds (see Orchestrator's RunContext.keep): only the failed and missing steps, and what follows from them, run
+   * again.
+   */
   async resume(runId: string): Promise<StartRunResponse> {
     const existing = await this.store.getRun(runId);
     if (!existing) throw new Error(`Run ${runId} was not found`);
@@ -72,10 +77,12 @@ export class RunManager {
     this.reserveConversation(existing.conversationId);
 
     try {
+      // Read before the attempt's events are archived.
+      const keep = await this.completedSteps(existing);
       const run = await this.store.prepareResume(runId);
       const history = await this.store.historyForRun(runId);
       this.nextSequence.set(run.id, 0);
-      this.launch(run, history);
+      this.launch(run, history, keep);
       return this.response(run);
     } catch (error) {
       this.activeConversations.delete(existing.conversationId);
@@ -237,12 +244,23 @@ export class RunManager {
     this.activeConversations.set(conversationId, holder);
   }
 
-  private launch(run: StoredRun, history: OrchestrationRequest["history"]) {
+  /** The steps the run's latest attempt completed, by id, each with the attempt that actually ran it. */
+  private async completedSteps(run: StoredRun): Promise<Map<string, KeptStep>> {
+    await this.flush(run.id);
+    const kept = new Map<string, KeptStep>();
+    for (const record of await this.store.readRunEvents(run.id)) {
+      if (record.attempt !== run.attempt || record.event.type !== "step_completed") continue;
+      kept.set(record.event.step.id, { step: record.event.step, attempt: record.event.reusedFromAttempt ?? record.attempt });
+    }
+    return kept;
+  }
+
+  private launch(run: StoredRun, history: OrchestrationRequest["history"], keep?: ReadonlyMap<string, KeptStep>) {
     if (this.active.has(run.id)) return;
     const controller = new AbortController();
     this.activeControllers.set(run.id, controller);
     this.activeRunByConversation.set(run.conversationId, run.id);
-    const task = this.execute(run, history ?? [], controller.signal)
+    const task = this.execute(run, history ?? [], controller.signal, keep)
       .catch(() => undefined)
       .finally(() => {
         this.active.delete(run.id);
@@ -261,6 +279,7 @@ export class RunManager {
     run: StoredRun,
     history: NonNullable<OrchestrationRequest["history"]>,
     signal: AbortSignal,
+    keep?: ReadonlyMap<string, KeptStep>,
   ) {
     if (signal.aborted) {
       await this.store.updateRun(run.id, { status: "cancelled", error: "Run cancelled by user" });
@@ -279,6 +298,7 @@ export class RunManager {
         runId: run.id,
         signal,
         emit: event => this.record(run.id, run.attempt, event),
+        keep,
       });
       await this.flush(run.id);
 

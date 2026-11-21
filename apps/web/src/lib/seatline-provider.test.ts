@@ -138,6 +138,28 @@ describe("Conclave subscription use through Seatline", () => {
     await codex(client).generate({ model: "any", messages: [{ role: "user", content: "Hi" }] }, event => events.push(event));
     expect(events).toContainEqual({ type: "status", message: expect.stringContaining("Waiting for your Seatline companion") });
   });
+
+  it("passes on Seatline's activity while a model reasons, so the run does not call the step stalled", async () => {
+    const client: SeatlineClient = {
+      async request(_provider, method, _params, emit) {
+        if (method === "readiness") emit({ type: "status", status: ready("subscription") });
+        if (method === "send_ready_with_policy") {
+          emit({ type: "status", status: ready("subscription") });
+          // Minutes of reasoning or searching show up only as activity, then the answer.
+          for (let i = 0; i < 3; i++) emit({ type: "activity" });
+          emit({ type: "delta", text: "considered" });
+        }
+      },
+    };
+    const events: unknown[] = [];
+    await codex(client).generate({ model: "any", messages: [{ role: "user", content: "Hi" }] }, event => events.push(event));
+    expect(events.filter(event => (event as { type: string }).type === "activity")).toHaveLength(3);
+  });
+
+  it("waits longer than Seatline's own idle limit before the run may call a silent step stalled", () => {
+    // Seatline ends a turn that has done nothing for 300 seconds; the orchestrator's own default (180 seconds) is shorter.
+    expect(codex(companion("subscription").client).stallTimeoutMs).toBeGreaterThan(300_000);
+  });
 });
 
 describe("reusing Seatline's readiness", () => {

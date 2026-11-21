@@ -92,6 +92,18 @@ Current provider behavior:
 
 After cancellation, already-persisted partial output remains available and the run can be resumed as a new attempt.
 
+## Continuing a run
+
+A run that stopped (failed, interrupted or cancelled) can be continued, and a run that completed with failed steps can have those
+steps retried (**Continue run** and **Retry failed steps** in the app; `POST /runs/:id/resume` on the server). Either starts a new
+attempt that keeps what the last one completed: only the failed and missing steps, and the steps built on them, call a model again.
+
+The orchestrator is deterministic: each step's prompt is built from the request and the outputs of the steps that settled before it.
+So while every step settled so far in the new attempt was kept, each prompt is exactly the one the earlier attempt sent, and its output
+still holds. The first step that runs again (or fails) settles with output the earlier attempt did not have, and from then on every
+later step runs again, since its prompt may now differ. Parallel siblings built before that are still kept. A kept step costs no model
+call and no budget; run inspection marks it "kept from attempt N", naming the attempt that actually ran it.
+
 ## Retries and partial failures
 
 Conclave uses a bounded retry policy rather than unbounded automatic retries.
@@ -108,7 +120,9 @@ Each provider step has an inactivity watchdog.
 
 By default, a call that produces no provider progress event for **180 seconds** is treated as stalled. The local runtime call is aborted, and the step becomes eligible for the same single bounded retry used for transient transport failures when budget remains.
 
-Any provider progress event resets the inactivity timer, so slow calls can continue as long as they are still producing observable progress.
+Any provider progress event resets the inactivity timer, so slow calls can continue as long as they are still producing observable progress. That includes activity a runtime reports while a model reasons, searches or runs a tool without anything to show yet: Seatline reports it, and it is not recorded in the run's event log.
+
+An adapter whose runtime supervises the provider with its own idle limit can set a longer watchdog for its steps. The Seatline adapter waits 330 seconds: Seatline ends a turn that has done nothing for 300 seconds, so its own verdict comes first, and a model reasoning at a high effort is not cut off at 180 seconds.
 
 Configure the watchdog with:
 

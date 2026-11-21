@@ -84,7 +84,12 @@ export type ProviderStreamEvent =
   | { type: "tool_call"; id: string; name: string; input?: unknown }
   | { type: "tool_result"; id: string; output?: unknown; isError?: boolean }
   | { type: "citation"; url?: string; title?: string }
-  | { type: "usage"; inputTokens?: number; outputTokens?: number };
+  | { type: "usage"; inputTokens?: number; outputTokens?: number }
+  /**
+   * The provider is working with nothing to show yet: reasoning, a search or a tool running. It counts as progress for the step's
+   * stall watchdog and is not recorded.
+   */
+  | { type: "activity" };
 
 export type ProviderEventSink = (event: ProviderStreamEvent) => void;
 
@@ -93,6 +98,11 @@ export interface ProviderAdapter {
   readonly label: string;
   /** Whether this adapter can forward native-search policy (provider support is checked at runtime). */
   readonly nativeWebSearch?: boolean;
+  /**
+   * How long a step on this adapter may go without any event before it is taken to have stalled, when the adapter knows better than
+   * the orchestrator's default: a runtime that supervises the provider's process with its own idle limit, say.
+   */
+  readonly stallTimeoutMs?: number;
   listModels(): Promise<ModelRef[]>;
   generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse>;
   limits?(): Promise<ProviderLimitSnapshot>;
@@ -255,7 +265,11 @@ export type OrchestrationStreamEvent =
   | { type: "tool_result"; runId: string; stepId: string; id: string; output?: unknown; isError?: boolean }
   | { type: "citation"; runId: string; stepId: string; url?: string; title?: string }
   | { type: "usage"; runId: string; stepId: string; inputTokens?: number; outputTokens?: number }
-  | { type: "step_completed"; runId: string; step: OrchestrationStep }
+  /**
+   * `reusedFromAttempt`: the step was not run again in this attempt. It completed in that earlier attempt of the same run, with the same
+   * inputs, and its output is kept.
+   */
+  | { type: "step_completed"; runId: string; step: OrchestrationStep; reusedFromAttempt?: number }
   | { type: "run_completed"; runId: string; result: OrchestrationResult }
   | { type: "error"; runId: string; message: string; stepId?: string };
 
@@ -361,6 +375,8 @@ export interface RunStepInspection {
   attempts?: number;
   sources?: SourceCitation[];
   error?: string;
+  /** Kept from this earlier attempt of the run rather than run again. */
+  reusedFromAttempt?: number;
 }
 
 export interface RunAttemptInspection {

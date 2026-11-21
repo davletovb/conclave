@@ -394,7 +394,9 @@ export class StateStore {
     return this.enqueue(async () => {
       const run = this.state.runs[runId];
       if (!run) throw new Error(`Run ${runId} was not found`);
-      if (!["failed", "interrupted", "cancelled"].includes(run.status)) {
+      // A run that completed with steps that failed can be continued too: its failed steps run again.
+      const partial = run.status === "completed" && Boolean(run.result?.failures?.length);
+      if (!partial && !["failed", "interrupted", "cancelled"].includes(run.status)) {
         throw new Error(`Run ${runId} cannot be resumed while it is ${run.status}`);
       }
 

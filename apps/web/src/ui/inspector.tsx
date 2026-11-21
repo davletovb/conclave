@@ -76,7 +76,9 @@ export function RunInspector({
                   <div className="ispect-step-meta num">
                     <span>{step.kind ?? "step"}</span>
                     <span>{step.model?.label ?? "model pending"}</span>
-                    <span>{formatDuration(step.durationMs)}</span>
+                    {step.reusedFromAttempt !== undefined
+                      ? <span>kept from attempt {step.reusedFromAttempt}</span>
+                      : <span>{formatDuration(step.durationMs)}</span>}
                     {step.attempts !== undefined && step.attempts > 1 && <span>{step.attempts} attempts</span>}
                     {(step.inputTokens !== undefined || step.outputTokens !== undefined) && (
                       <span>{step.inputTokens ?? 0}↓ {step.outputTokens ?? 0}↑</span>

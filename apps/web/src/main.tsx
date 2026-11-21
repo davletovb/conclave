@@ -1018,10 +1018,14 @@ function App() {
     }
   }
 
-  async function resumeInterruptedRun() {
-    if (!resumeRunId || loading) return;
+  /**
+   * Continues a run that stopped, or retries the failed steps of one that completed with failures. What the run completed is kept: only
+   * the failed and missing steps, and the steps that build on them, run again.
+   */
+  async function continueRun(target: string | null = resumeRunId) {
+    if (!target || loading) return;
     const epoch = beginViewOperation();
-    const runId = resumeRunId;
+    const runId = target;
     setLoading(true);
     setCancelling(false);
     setError("");
@@ -1043,7 +1047,7 @@ function App() {
       const attached = await consumeRun(resumed.runId, epoch);
       if (attached && isCurrent(epoch)) await refreshConversation(resumed.conversationId, epoch);
     } catch (cause) {
-      if (isCurrent(epoch)) setError(cause instanceof Error ? cause.message : "Could not resume run");
+      if (isCurrent(epoch)) setError(cause instanceof Error ? cause.message : "Could not continue the run");
     } finally {
       if (isCurrent(epoch)) setLoading(false);
     }
@@ -1146,7 +1150,10 @@ function App() {
       list.push({ id: "stop", label: "Stop the active run", group: "Actions", icon: "stop", keys: ["Mod", "."], run: () => void cancelActiveRun() });
     }
     if (resumeRunId && !loading) {
-      list.push({ id: "resume", label: "Resume the interrupted run", group: "Actions", icon: "restart", run: () => void resumeInterruptedRun() });
+      list.push({ id: "resume", label: "Continue the interrupted run", group: "Actions", icon: "restart", run: () => void continueRun() });
+    }
+    if (result?.failures?.length && activeRunId && !loading) {
+      list.push({ id: "retry-failed", label: "Retry the failed steps", group: "Actions", icon: "restart", run: () => void continueRun(activeRunId) });
     }
     if (result) {
       list.push({ id: "copy", label: "Copy the final answer", group: "Actions", icon: "copy", run: () => void copyFinalAnswer() });
@@ -1377,8 +1384,9 @@ function App() {
                 <Icon name="alert" size={14} className="banner-icon" />
                 <p>{error}</p>
                 {resumeRunId && !loading && (
-                  <button type="button" className="btn" onClick={() => void resumeInterruptedRun()}>
-                    <Icon name="restart" size={13} /> Resume run
+                  <button type="button" className="btn" onClick={() => void continueRun()}
+                    title="Keeps the steps that completed and runs the rest">
+                    <Icon name="restart" size={13} /> Continue run
                   </button>
                 )}
               </div>
@@ -1437,6 +1445,12 @@ function App() {
                   <strong>Completed with partial provider failures.</strong>{" "}
                   {result.failures.map((failure: StepFailure) => `${failure.model.label}: ${failure.message}`).join(" · ")}
                 </p>
+                {activeRunId && !loading && (
+                  <button type="button" className="btn" onClick={() => void continueRun(activeRunId)}
+                    title="Keeps the steps that completed and runs the failed ones again">
+                    <Icon name="restart" size={13} /> Retry failed steps
+                  </button>
+                )}
               </div>
             )}
 

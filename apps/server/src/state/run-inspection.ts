@@ -120,6 +120,11 @@ function summarizeAttempt(run: StoredRun, attempt: number, records: RunEventReco
       if (event.step.sources?.length) existing.sources = event.step.sources;
       existing.completedAt = record.at;
       existing.durationMs = durationMs(existing.startedAt, record.at);
+      if (event.reusedFromAttempt !== undefined) {
+        // Kept from an earlier attempt: no call was made here, so no attempts, tokens or time of its own.
+        existing.reusedFromAttempt = event.reusedFromAttempt;
+        existing.attempts = 0;
+      }
       steps.set(event.step.id, existing);
     } else if (event.type === "error") {
       error = event.message;

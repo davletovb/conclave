@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   ModelRef,
   OrchestrationStreamEvent,
+  ProviderEventSink,
   ProviderRequest,
   ProviderResponse,
 } from "@conclave/core";
@@ -84,7 +85,51 @@ class ParallelStallProvider extends MockProvider {
   }
 }
 
+/** Reasons for a while before it answers: nothing to show, only activity, every few milliseconds. */
+class ReasoningProvider extends MockProvider {
+  constructor(private readonly reasoningMs: number, private readonly activityEveryMs: number | undefined) { super(); }
+
+  override async generate(request: ProviderRequest, emit?: ProviderEventSink): Promise<ProviderResponse> {
+    const until = Date.now() + this.reasoningMs;
+    while (Date.now() < until) {
+      if (request.signal?.aborted) throw Object.assign(new Error("reasoning aborted"), { name: "AbortError" });
+      await sleep(this.activityEveryMs ?? 5);
+      if (this.activityEveryMs !== undefined) emit?.({ type: "activity" });
+    }
+    if (request.signal?.aborted) throw Object.assign(new Error("reasoning aborted"), { name: "AbortError" });
+    return { provider: this.id, model: request.model, content: "considered answer", latencyMs: this.reasoningMs };
+  }
+}
+
 describe("Orchestrator stall watchdog lifecycle", () => {
+  it("counts a provider's activity as progress while it reasons, without recording it", async () => {
+    // Reasons for three times the stall limit, reporting activity as it goes, as Seatline does for a model that thinks before it answers.
+    const provider = new ReasoningProvider(90, 10);
+    const instance = new Orchestrator(new Map([[provider.id, provider]]), { stepStallTimeoutMs: 30 });
+    const events: OrchestrationStreamEvent[] = [];
+    const result = await instance.run(
+      { mode: "single", prompt: "think hard", participants: [singleParticipant] },
+      { runId: "reasoning", emit: (event) => events.push(event) },
+    );
+    expect(result.final).toBe("considered answer");
+    expect(events.some((event) => event.type === "step_retrying")).toBe(false);
+    // Activity only keeps the step alive: none of it reaches the run's event log.
+    expect(events.some((event) => (event as { type: string }).type === "activity")).toBe(false);
+  });
+
+  it("waits as long as an adapter says its runtime waits before calling a silent step stalled", async () => {
+    // Silent for longer than the orchestrator's default, but within the adapter's own limit (Seatline's idle limit, say).
+    const provider = Object.assign(new ReasoningProvider(60, undefined), { stallTimeoutMs: 500 });
+    const instance = new Orchestrator(new Map([[provider.id, provider]]), { stepStallTimeoutMs: 20 });
+    const events: OrchestrationStreamEvent[] = [];
+    const result = await instance.run(
+      { mode: "single", prompt: "think silently", participants: [singleParticipant] },
+      { runId: "adapter-limit", emit: (event) => events.push(event) },
+    );
+    expect(result.final).toBe("considered answer");
+    expect(events.some((event) => event.type === "step_retrying")).toBe(false);
+  });
+
   it("cleans up the watchdog when a provider throws synchronously", async () => {
     const provider = new SyncThrowProvider();
     const instance = new Orchestrator(new Map([[provider.id, provider]]), {

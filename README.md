@@ -33,7 +33,7 @@ Conclave makes that process explicit.
 | Persistent runs | Refresh or close the browser without cancelling work already owned by the local server |
 | Streaming | See model output and final answers arrive incrementally |
 | Partial-failure recovery | Preserve useful sibling results when one provider fails, with bounded retry for transient failures |
-| Run controls | Set call budgets, stop active work, resume interrupted/cancelled attempts, and inspect execution |
+| Run controls | Set call budgets, stop active work, continue stopped runs or retry failed steps (keeping completed ones), and inspect execution |
 | Custom workflow graphs | Build validated dependency graphs with parallel branches and explicit output nodes |
 | Conversation tools | Search, rename, delete, and export conversations as Markdown or JSON |
 | Local-first interface | Light/dark themes, keyboard controls, accessibility support, and responsive layout |
@@ -215,7 +215,7 @@ Current behavior includes:
 - preflight call-count validation;
 - provider cancellation that reaches the active local runtime process;
 - durable partial output;
-- resume as a new attempt after cancellation, interruption, or failure;
+- continue a run after cancellation, interruption, or failure, or retry the failed steps of a completed run, keeping the steps that completed;
 - one bounded retry for transient/stalled provider steps when budget remains;
 - preservation of successful sibling outputs in supported parallel modes;
 - provider rate-limit/quota errors recorded with the run;

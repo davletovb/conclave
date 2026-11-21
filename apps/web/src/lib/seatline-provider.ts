@@ -16,6 +16,13 @@ const FRESH = -1;
 const READINESS_MAX_AGE_MS = 30_000;
 /** Preparing a provider is best effort and happens at most this often for each. */
 const PREPARE_INTERVAL_MS = 10_000;
+/**
+ * How long a step may go without any event from Seatline before Conclave takes it to have stalled. Seatline watches the provider's
+ * own output and ends a turn that has done nothing for 300 seconds (its idle limit for every provider), reporting activity while a model
+ * reasons or searches. Conclave waits a little longer than that, so Seatline's own, more precise verdict wins, and a model that reasons
+ * for minutes at a high effort is not cut off at the orchestrator's 180-second default.
+ */
+const SEATLINE_STALL_TIMEOUT_MS = 330_000;
 
 const CACHED = { mode: "cached", max_age_ms: READINESS_MAX_AGE_MS } as const;
 const NEW_CHECK = { mode: "fresh" } as const;
@@ -63,6 +70,7 @@ function capability(client: object, link?: SeatlineLink) {
 
 export class SeatlineProvider implements ProviderAdapter {
   readonly nativeWebSearch = true;
+  readonly stallTimeoutMs = SEATLINE_STALL_TIMEOUT_MS;
   constructor(readonly id: Exclude<ProviderId, "mock">, readonly label: string,
     private readonly provider: string, private readonly client: SeatlineClient, private readonly link?: SeatlineLink) {}
 
@@ -214,6 +222,8 @@ export class SeatlineProvider implements ProviderAdapter {
       const onEvent = (event: SeatlineEvent) => {
         // Waiting for one of the companion's slots: tell the run, which counts it as activity, not a stall.
         if (event.type === "queued") emit?.({ type: "status", message: "Waiting for your Seatline companion to finish other requests" });
+        // The provider is working with nothing to show yet (reasoning, searching): progress for the run's stall watchdog.
+        if (event.type === "activity") emit?.({ type: "activity" });
         // The status a checked send reports is the one it ran under; Conclave's own account rule applies to it too.
         if (event.type === "status" && !this.acceptedSignIn(event.status?.sign_in)) throw new Error("Provider sign-in changed; subscription account required");
         if (event.type === "delta" && event.text) { content += event.text; emit?.({ type: "text_delta", delta: event.text }); }

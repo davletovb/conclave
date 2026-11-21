@@ -19,10 +19,15 @@ import type {
 } from "@conclave/core";
 import { emptyRunUsage, makeStepId } from "@conclave/core";
 
+/** A step an earlier attempt of the run completed, and the attempt that ran it. */
+export type KeptStep = { step: OrchestrationStep; attempt: number };
+
 type RunOptions = {
   runId?: string;
   emit?: OrchestrationEventSink;
   signal?: AbortSignal;
+  /** Steps an earlier attempt of this run completed, by id: continuing a run keeps them instead of running them again. */
+  keep?: ReadonlyMap<string, KeptStep>;
 };
 
 type OrchestratorOptions = {
@@ -51,6 +56,13 @@ type RunContext = {
   stepUsage: Map<string, { inputTokens: number; outputTokens: number }>;
   plannedCallsRemaining: number;
   nativeWebSearch: boolean;
+  /**
+   * What an earlier attempt completed, while it can still be kept. The orchestrator is deterministic: a step's prompt is built from the
+   * request and the outputs of steps that settled before it. So while every step settled so far in this attempt was kept, each prompt
+   * is the one the earlier attempt sent, and its output still holds. The first step that runs again (or fails) settles with output the
+   * earlier attempt did not have; from then on later prompts may differ, and nothing more is kept.
+   */
+  keep?: { steps: ReadonlyMap<string, KeptStep>; changed: boolean };
 };
 
 type ExecuteStepOptions = {
@@ -547,16 +559,19 @@ export class Orchestrator {
         cleanup();
         reject(error);
       };
+      // An adapter whose runtime supervises the provider (Seatline's idle limit) says how long it waits; the orchestrator never gives
+      // up on a step sooner than the runtime running it would.
+      const stallTimeoutMs = adapter.stallTimeoutMs ?? this.stepStallTimeoutMs;
       const armWatchdog = () => {
         clearWatchdog();
         timer = setTimeout(() => {
           if (settled) return;
-          const error = new StepStallError(this.stepStallTimeoutMs);
+          const error = new StepStallError(stallTimeoutMs);
           settled = true;
           cleanup();
           reject(error);
           controller.abort(error);
-        }, this.stepStallTimeoutMs);
+        }, stallTimeoutMs);
       };
       const onParentAbort = () => {
         if (settled) return;
@@ -602,8 +617,48 @@ export class Orchestrator {
     spec: StepSpec,
     context: RunContext,
     options: ExecuteStepOptions = {},
-  ) {
+  ): Promise<OrchestrationStep> {
     this.throwIfCancelled(context);
+    if (options.startingAttempt === undefined && !options.announced) {
+      const kept = this.keptStep(spec, context);
+      if (kept) return kept;
+    }
+    try {
+      return await this.runStep(spec, context, options);
+    } finally {
+      // Whatever it settled with, it was not the earlier attempt's output: prompts built from here on may differ from the earlier ones.
+      if (context.keep) context.keep.changed = true;
+    }
+  }
+
+  /** The earlier attempt's output for this step, announced and completed as kept, when it still holds (see RunContext.keep). */
+  private keptStep(spec: StepSpec, context: RunContext): OrchestrationStep | undefined {
+    const keep = context.keep;
+    if (!keep || keep.changed) return undefined;
+    const previous = keep.steps.get(spec.id);
+    if (!previous || previous.step.kind !== spec.kind || previous.step.model.provider !== spec.model.provider
+      || previous.step.model.model !== spec.model.model) return undefined;
+    // The plan counted this step's call; it is not made.
+    context.plannedCallsRemaining = Math.max(0, context.plannedCallsRemaining - 1);
+    const step: OrchestrationStep = { ...previous.step, model: spec.model, dependsOn: spec.dependsOn, final: spec.final };
+    context.emit?.({
+      type: "step_started",
+      runId: context.runId,
+      stepId: spec.id,
+      kind: spec.kind,
+      model: spec.model,
+      dependsOn: spec.dependsOn,
+      final: spec.final,
+    });
+    context.emit?.({ type: "step_completed", runId: context.runId, step, reusedFromAttempt: previous.attempt });
+    return step;
+  }
+
+  private async runStep(
+    spec: StepSpec,
+    context: RunContext,
+    options: ExecuteStepOptions,
+  ): Promise<OrchestrationStep> {
     let attempt = options.startingAttempt ?? 0;
     let announced = options.announced ?? false;
 
@@ -1064,6 +1119,7 @@ ${transcript(steps)}`;
       stepUsage: new Map(),
       plannedCallsRemaining: 0,
       nativeWebSearch: request.webSearch?.mode === "native",
+      keep: options.keep?.size ? { steps: options.keep, changed: false } : undefined,
     };
 
     context.emit?.({ type: "run_started", runId, mode: request.mode });

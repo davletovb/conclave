@@ -52,6 +52,27 @@ class ReplayStallProvider extends MockProvider {
   }
 }
 
+/**
+ * Fails each step named in `failing` (model and the first line of its prompt) the first time it is asked, with an error the orchestrator
+ * does not retry. Records every step it is asked for, so a test can see which ones a continued run asked again.
+ */
+class FailsOnceProvider extends MockProvider {
+  readonly asked: string[] = [];
+  private readonly failed = new Map<string, number>();
+  constructor(private readonly failing: string[], private readonly times = 1) { super(); }
+
+  override async generate(request: ProviderRequest) {
+    const key = `${request.model}|${(request.messages.at(-1)?.content ?? "").split("\n")[0]}`;
+    this.asked.push(key);
+    const failures = this.failed.get(key) ?? 0;
+    if (this.failing.includes(key) && failures < this.times) {
+      this.failed.set(key, failures + 1);
+      throw new Error("permission denied by the provider");
+    }
+    return super.generate(request);
+  }
+}
+
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
@@ -437,6 +458,91 @@ describe("RunManager", () => {
   });
 });
 
+
+describe("continuing a run", () => {
+  const gpt = participant;
+  const claude: ModelRef = { provider: "mock", model: "mock-claude", label: "Claude (mock)" };
+
+  it("keeps what a debate completed and runs only the judgment that failed", async () => {
+    const provider = new FailsOnceProvider(["mock-gpt|Judge the debate. Produce the best-supported answer, explicitly noting unresolved disagreements and uncertainty."]);
+    const { manager } = await makeManager(provider);
+    const started = await manager.start({
+      request: { mode: "debate", prompt: "Which tafsir was most copied?", participants: [gpt, claude], budget: { maxCalls: 12, maxRounds: 1 } },
+    });
+    const first = await waitForTerminal(manager, started.runId);
+    // The judgment failed; the run completed on a fallback, with that failure.
+    expect(first.status).toBe("completed");
+    expect(first.result?.failures?.map(failure => failure.stepId)).toEqual(["synthesis-1"]);
+    expect(provider.asked).toHaveLength(5);
+
+    const resumed = await manager.resume(started.runId);
+    const second = await waitForTerminal(manager, resumed.runId);
+    expect(second.status).toBe("completed");
+    expect(second.result?.failures ?? []).toEqual([]);
+    expect(second.result?.final).toContain("Judge the debate");
+    // Only the judgment was asked again; the answers and critiques were kept.
+    expect(provider.asked.slice(5)).toEqual([provider.asked[4]]);
+    expect(second.usage).toMatchObject({ callsStarted: 1, callsCompleted: 1 });
+    expect(second.result?.steps.map(step => step.id)).toEqual(["answer-1", "answer-2", "critique-r1-1", "critique-r1-2", "synthesis-1"]);
+
+    const inspection = await manager.inspect(started.runId);
+    const latest = inspection?.attempts.find(attempt => attempt.attempt === second.attempt);
+    expect(Object.fromEntries(latest!.steps.map(step => [step.id, step.reusedFromAttempt]))).toEqual({
+      "answer-1": 1, "answer-2": 1, "critique-r1-1": 1, "critique-r1-2": 1, "synthesis-1": undefined,
+    });
+    // The conversation's answer is the judgment's now, not the fallback.
+    const conversation = await manager.getConversation(started.conversationId);
+    expect(conversation?.messages.filter(message => message.role === "assistant").map(message => message.content)).toEqual([second.result?.final]);
+  });
+
+  it("runs again what follows a step that runs again, and keeps what came before it", async () => {
+    const provider = new FailsOnceProvider(["mock-claude|Compare two manuscripts"]);
+    const { manager } = await makeManager(provider);
+    const started = await manager.start({
+      request: { mode: "panel", prompt: "Compare two manuscripts", participants: [gpt, claude], budget: { maxCalls: 12, maxRounds: 1 } },
+    });
+    const first = await waitForTerminal(manager, started.runId);
+    expect(first.result?.failures?.map(failure => failure.stepId)).toEqual(["answer-2"]);
+    const askedBefore = provider.asked.length;
+
+    const second = await waitForTerminal(manager, (await manager.resume(started.runId)).runId);
+    expect(second.result?.failures ?? []).toEqual([]);
+    // Claude's answer ran again; the synthesis, whose input it is, ran again with it; GPT's answer was kept.
+    expect(provider.asked.slice(askedBefore).map(key => key.split("|")[0])).toEqual(["mock-claude", "mock-gpt"]);
+    const synthesis = second.result?.steps.find(step => step.id === "synthesis-1");
+    expect(synthesis?.content).toContain("careful analyst");
+    const latest = (await manager.inspect(started.runId))?.attempts.find(attempt => attempt.attempt === second.attempt);
+    expect(latest?.steps.filter(step => step.reusedFromAttempt).map(step => step.id)).toEqual(["answer-1"]);
+  });
+
+  it("keeps a step through several continuations, crediting the attempt that ran it", async () => {
+    const judgment = "mock-gpt|Judge the debate. Produce the best-supported answer, explicitly noting unresolved disagreements and uncertainty.";
+    // The judgment fails in the first two attempts.
+    const provider = new FailsOnceProvider([judgment], 2);
+    const { manager } = await makeManager(provider);
+    const started = await manager.start({
+      request: { mode: "debate", prompt: "Keep me", participants: [gpt, claude], budget: { maxCalls: 12, maxRounds: 1 } },
+    });
+    await waitForTerminal(manager, started.runId);
+    const second = await waitForTerminal(manager, (await manager.resume(started.runId)).runId);
+    expect(second.result?.failures?.map(failure => failure.stepId)).toEqual(["synthesis-1"]);
+    const third = await waitForTerminal(manager, (await manager.resume(started.runId)).runId);
+    expect(third.result?.failures ?? []).toEqual([]);
+    // Five steps in the first attempt, then only the judgment in each continuation.
+    expect(provider.asked.filter(key => key === judgment)).toHaveLength(3);
+    expect(provider.asked).toHaveLength(7);
+    const attempts = (await manager.inspect(started.runId))?.attempts ?? [];
+    // The third attempt credits the first, which ran the answers, not the second, which kept them.
+    expect(attempts.at(-1)?.steps.find(step => step.id === "answer-1")?.reusedFromAttempt).toBe(1);
+  });
+
+  it("refuses to continue a run that completed without failures", async () => {
+    const { manager } = await makeManager();
+    const started = await manager.start({ request: { mode: "single", prompt: "Done", participants: [gpt] } });
+    await waitForTerminal(manager, started.runId);
+    await expect(manager.resume(started.runId)).rejects.toThrow(/cannot be resumed while it is completed/);
+  });
+});
 
 describe("persisted native search source inspection", () => {
   class CitingMockProvider extends MockProvider {
