@@ -151,9 +151,10 @@ describe("Seatline connection, web protocol 2", () => {
     await until(() => first.browserFrames()[0], "request");
 
     // The relay reports the helper again without the socket closing.
+    const reconnectAt = socket.sent.length;
     socket.deliver({ type: "peer", connected: true });
     expect((await running).message).toMatch(/reconnected/);
-    const second = await helper.answer(socket, socket.sent.length - 0 > 2 ? 3 : 1);
+    const second = await helper.answer(socket, reconnectAt);
     expect(second.epoch.browser).not.toBe(first.epoch.browser);
 
     const later = connection.request("codex", "status", null, () => {});
@@ -370,8 +371,9 @@ describe("what the app can learn about its companion", () => {
     await helper.accept(socket);
     await helper.answer(socket);
     await until(() => connection.generation === 1 || undefined, "the first handshake to complete");
+    const reconnectAt = socket.sent.length;
     socket.deliver({ type: "peer", connected: true }); // the companion reconnects through the same relay socket
-    await helper.answer(socket, socket.sent.length - 0 > 2 ? 3 : 1);
+    await helper.answer(socket, reconnectAt);
     await until(() => connection.generation === 2 || undefined, "the second handshake to complete");
     await run;
   });
